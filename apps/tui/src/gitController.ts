@@ -7,14 +7,15 @@ import {
   type ProjectId,
   type ThreadId,
 } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
-import { AsyncResult } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { useState, type RefObject } from "react";
 
 import {
   localBranchName,
   resolveBranchSelectionTarget,
-  type BranchPickerItem,
+  type BranchPickerChoice,
 } from "./branchPicker.ts";
 import {
   resolveEnvMode,
@@ -25,10 +26,18 @@ import {
 import type { LaunchWorktree } from "./composerSend.ts";
 import type { ComposerStore } from "./composerStore.ts";
 import type { TuiActionResult, TuiConnection } from "./connection/tuiConnection.ts";
-import { describeGitActionFailure, describeGitActionResult, type GitMenuItem } from "./gitMenu.ts";
+import {
+  armConfirmation,
+  describeGitActionFailure,
+  describeGitActionResult,
+  isArmed,
+  type ArmedConfirmation,
+  type GitMenuItem,
+} from "./gitMenu.ts";
 import type { GitOverlayHandle, GitOverlayMode } from "./gitViews.tsx";
 import { openExternalUrl } from "./openExternal.ts";
 import type { SidebarThread } from "./sidebarModel.ts";
+import { worktreeSendBlock, type WorktreeLaunch } from "./worktreeLaunch.ts";
 
 /** What the git controls act on: the selected thread, or a new-thread draft. */
 export interface GitTarget {
@@ -49,6 +58,8 @@ type GitCommands = Pick<
   | "refreshVcsStatus"
   | "cancelWorktreeSetup"
   | "worktreeSetupAtom"
+  | "worktreeLaunchAtom"
+  | "retryWorkspacePreparation"
   | "stopThreadSession"
   | "updateThreadMetadata"
 >;
@@ -71,6 +82,8 @@ export interface GitControlsOptions {
   readonly overlayRef: RefObject<GitOverlayHandle | null>;
 }
 
+const NO_LAUNCH: Atom.Atom<WorktreeLaunch | null> = Atom.make(null);
+
 function errorText(error: unknown): string {
   return describeGitActionFailure(error, null);
 }
@@ -88,45 +101,53 @@ function failed<A>(result: TuiActionResult<A>, what: string): string | null {
 export function useGitControls(options: GitControlsOptions) {
   const { connection, store, target, thread, project, setStatus } = options;
   const [overlay, setOverlay] = useState<GitOverlayMode | null>(null);
-  const [armedId, setArmedId] = useState<string | null>(null);
+  const [armed, setArmed] = useState<ArmedConfirmation | null>(null);
   const [lastFailure, setLastFailure] = useState<GitFailure | null>(null);
-  // Threads launched into a new worktree from here, by base: their setup shows, and the
-  // toolbar says "Worktree", before the server gives them one.
-  const [launched, setLaunched] = useState<ReadonlyMap<string, string>>(() => new Map());
+  // Threads whose worktree setup failed that the user chose to run in the project checkout.
+  const [workingLocally, setWorkingLocally] = useState<ReadonlySet<string>>(() => new Set());
   const { overlayRef } = options;
 
   const draft = target?.kind === "draft" ? store.findNewThreadDraft(target.threadId) : undefined;
   const projectCwd = project?.workspaceRoot ?? null;
   const worktreePath = target?.kind === "thread" ? (thread?.worktreePath ?? null) : null;
-  const preparingBase =
-    target?.kind === "thread" && worktreePath === null
-      ? (launched.get(target.threadId) ?? null)
-      : null;
-  const envMode =
-    preparingBase !== null
-      ? "worktree"
-      : resolveEnvMode({
-          draft: target?.kind === "draft",
-          worktreePath,
-          draftEnvMode: draft?.envMode,
-          defaultEnvMode: project?.defaultThreadEnvMode ?? options.defaultEnvMode,
-        });
+  // The server's word on a launch into a new worktree: still preparing, or failed.
+  const launch = useAtomValue(
+    target?.kind === "thread" ? connection.worktreeLaunchAtom(target.threadId) : NO_LAUNCH,
+  );
+  const local = target !== null && workingLocally.has(target.threadId);
+  const setupFailed = worktreePath === null && launch?.status === "failed" && !local;
+  const launching =
+    worktreePath === null && launch !== null && (launch.status === "preparing" || !local);
+  const envMode = launching
+    ? "worktree"
+    : resolveEnvMode({
+        draft: target?.kind === "draft",
+        worktreePath,
+        draftEnvMode: draft?.envMode,
+        defaultEnvMode: project?.defaultThreadEnvMode ?? options.defaultEnvMode,
+      });
   const threadBranch =
-    target?.kind === "thread" ? (thread?.branch ?? preparingBase) : (draft?.baseBranch ?? null);
+    target?.kind === "thread"
+      ? (thread?.branch ?? (launching ? (launch?.baseRef ?? null) : null))
+      : (draft?.baseBranch ?? null);
+  const sendBlock =
+    target?.kind === "thread"
+      ? worktreeSendBlock({ worktreePath, launch, workingLocally: local })
+      : null;
   const cwd = worktreePath ?? projectCwd;
   const pickingWorktreeBase = target?.kind === "draft" && envMode === "worktree";
   const failure = lastFailure !== null && lastFailure.cwd === cwd ? lastFailure : null;
 
   const close = () => {
     setOverlay(null);
-    setArmedId(null);
+    setArmed(null);
   };
   const openMenu = () => {
     if (target === null || cwd === null) {
       setStatus("Select a thread first");
       return;
     }
-    setArmedId(null);
+    setArmed(null);
     setOverlay({ kind: "menu" });
     // As web re-reads status when its git menu opens.
     void connection.refreshVcsStatus(cwd, true);
@@ -136,7 +157,7 @@ export function useGitControls(options: GitControlsOptions) {
       setStatus("Select a thread first");
       return;
     }
-    setArmedId(null);
+    setArmed(null);
     setOverlay({ kind: "branches", initialQuery: query });
     void connection.refreshVcsStatus(cwd, true);
   };
@@ -152,6 +173,10 @@ export function useGitControls(options: GitControlsOptions) {
   const setEnvMode = (next: EnvMode) => {
     if (target === null) return;
     if (target.kind === "thread") {
+      if (setupFailed) {
+        openMenu();
+        return;
+      }
       setStatus(
         worktreePath === null
           ? "This thread works in the project's checkout; start a new thread for a worktree"
@@ -172,10 +197,32 @@ export function useGitControls(options: GitControlsOptions) {
   /** A draft's first send makes its worktree from the picked base, else from the checkout's branch. */
   const launchWorktree = (): LaunchWorktree | undefined => {
     if (target?.kind !== "draft" || envMode !== "worktree" || projectCwd === null) return undefined;
-    const threadId = target.threadId;
     const baseBranch = draft?.baseBranch ?? currentRefName() ?? "HEAD";
-    setLaunched((current) => new Map(current).set(threadId, baseBranch));
     return { projectCwd, baseBranch, startFromOrigin: options.startFromOrigin };
+  };
+
+  /** Runs the failed preparation again, for the message that started it. */
+  const retrySetup = async () => {
+    if (target?.kind !== "thread" || launch?.status !== "failed") {
+      setStatus("No failed worktree setup here");
+      return;
+    }
+    const threadId = target.threadId;
+    // A retry puts it back on the worktree, whatever it chose before.
+    setWorkingLocally((current) => new Set([...current].filter((id) => id !== threadId)));
+    const result = await connection.retryWorkspacePreparation({ threadId, runId: launch.runId });
+    setStatus(failed(result, "Retrying worktree setup") ?? "Retrying worktree setup");
+  };
+
+  /** After a failed setup: the thread's next messages run in the project's checkout. */
+  const workLocally = () => {
+    if (target?.kind !== "thread" || !setupFailed) {
+      setStatus("No failed worktree setup here");
+      return;
+    }
+    const threadId = target.threadId;
+    setWorkingLocally((current) => new Set(current).add(threadId));
+    setStatus("This thread now works in the project checkout");
   };
 
   /** Points the thread at a branch and checkout, stopping its session if the checkout moves. */
@@ -194,7 +241,7 @@ export function useGitControls(options: GitControlsOptions) {
     setStatus(failed(updated, "Updating the thread") ?? `On ${branch}`);
   };
 
-  const pickBranch = async (item: BranchPickerItem) => {
+  const pickBranch = async (item: BranchPickerChoice) => {
     if (target === null || cwd === null || projectCwd === null) return;
     close();
     setLastFailure(null);
@@ -261,8 +308,9 @@ export function useGitControls(options: GitControlsOptions) {
       setStatus(item.disabledReason);
       return;
     }
-    if (item.confirm !== undefined && armedId !== item.id) {
-      setArmedId(item.id);
+    const refName = currentRefName();
+    if (item.confirm !== undefined && !isArmed(armed, item, cwd, refName)) {
+      setArmed(armConfirmation(item, cwd, refName));
       return;
     }
     close();
@@ -311,6 +359,12 @@ export function useGitControls(options: GitControlsOptions) {
       case "commit-model":
         options.onPickCommitModel();
         return;
+      case "retry-setup":
+        await retrySetup();
+        return;
+      case "work-locally":
+        workLocally();
+        return;
       case "refresh": {
         const result = await connection.refreshVcsStatus(cwd);
         setStatus(failed(result, "Refresh") ?? "Git status refreshed");
@@ -319,9 +373,9 @@ export function useGitControls(options: GitControlsOptions) {
     }
   };
 
-  /** The thread whose worktree setup shows: one with a worktree, or one launched into one. */
+  /** The thread whose worktree setup shows: one with a worktree, or one the server is launching into one. */
   const setupThreadId =
-    target?.kind === "thread" && (worktreePath !== null || launched.has(target.threadId))
+    target?.kind === "thread" && (worktreePath !== null || launch !== null)
       ? target.threadId
       : null;
 
@@ -361,8 +415,9 @@ export function useGitControls(options: GitControlsOptions) {
     pickingWorktreeBase,
     draft: target?.kind === "draft",
     overlay,
-    armedId,
+    armed,
     failure,
+    setupFailed,
     setupThreadId,
     openMenu,
     openBranchPicker,
@@ -370,9 +425,17 @@ export function useGitControls(options: GitControlsOptions) {
     launchWorktree,
     closeOverlay: close,
     pressToolbar,
-    pickBranch: (item: BranchPickerItem) => void pickBranch(item),
+    pickBranch: (item: BranchPickerChoice) => void pickBranch(item),
     runMenuItem: (item: GitMenuItem) => void runMenuItem(item),
     cancelWorktreeSetup: () => void cancelWorktreeSetup(),
+    retrySetup: () => void retrySetup(),
+    workLocally,
+    /**
+     * Why a message to this thread can't go out now. Only the thread in view has its runs
+     * loaded; elsewhere the server holds messages queued behind a failed worktree.
+     */
+    sendBlockedReason: (threadId: string): string | null =>
+      target?.kind === "thread" && target.threadId === threadId ? sendBlock : null,
     /** Keys while an overlay is open; it takes them all. */
     handleKey: (key: KeyEvent): boolean => {
       if (overlay === null) return false;

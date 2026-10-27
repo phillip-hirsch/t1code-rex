@@ -111,8 +111,12 @@ export interface ComposerGitCommands {
   readonly openMenu: () => void;
   readonly openBranchPicker: (query: string) => void;
   readonly toggleWorktree: () => void;
+  readonly retrySetup: () => void;
+  readonly workLocally: () => void;
   /** The new worktree a draft's first send makes; undefined launches it locally. */
   readonly launchWorktree: () => LaunchWorktree | undefined;
+  /** Why a message to this thread can't go out now: its worktree isn't there. */
+  readonly sendBlockedReason: (threadId: string) => string | null;
 }
 
 export interface ComposerProps {
@@ -390,6 +394,14 @@ export function Composer(props: ComposerProps) {
             if (props.git) props.git.toggleWorktree();
             else props.onStatus("No git here");
             return;
+          case "retry-worktree":
+            if (props.git) props.git.retrySetup();
+            else props.onStatus("No git here");
+            return;
+          case "work-locally":
+            if (props.git) props.git.workLocally();
+            else props.onStatus("No git here");
+            return;
           case "clone":
             props.onStatus("Starting clone…");
             void props.onClone(action.args).then((error) => {
@@ -430,6 +442,11 @@ export function Composer(props: ComposerProps) {
     }
     if (settings === null) {
       store.setNotice(threadId, "No provider is ready yet");
+      return;
+    }
+    const blocked = props.git?.sendBlockedReason(threadId) ?? null;
+    if (blocked !== null) {
+      store.setNotice(threadId, blocked);
       return;
     }
     const worktree = target.kind === "draft" ? props.git?.launchWorktree() : undefined;

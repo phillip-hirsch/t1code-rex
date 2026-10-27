@@ -19,6 +19,7 @@ function toolbar(overrides: Partial<BranchToolbarInput>) {
     statusFailed: false,
     action: null,
     failure: null,
+    setupFailed: false,
     ...overrides,
   }).map((segment) => segment.text);
 }
@@ -99,6 +100,10 @@ describe("describeBranchToolbar", () => {
       "󰘬 Not a git repository",
     ]);
     expect(toolbar({ status: vcsStatus({ refName: null }) })[1]).toBe("󰘬 Detached HEAD");
+    // A loaded detached HEAD wins over the branch the thread last recorded.
+    expect(toolbar({ status: vcsStatus({ refName: null }), threadBranch: "old" })[1]).toBe(
+      "󰘬 Detached HEAD",
+    );
   });
 
   it("waits for status, and says when it failed", () => {
@@ -120,6 +125,26 @@ describe("describeBranchToolbar", () => {
 });
 
 describe("describeBranchToolbar failures", () => {
+  it("keeps a failed worktree setup in view, opening the menu that recovers it", () => {
+    const segments = describeBranchToolbar({
+      draft: false,
+      envMode: "worktree",
+      worktreePath: null,
+      threadBranch: "main",
+      status: vcsStatus(),
+      statusFailed: false,
+      action: null,
+      failure: null,
+      setupFailed: true,
+    });
+    expect(segments.map((segment) => segment.text)).toEqual([
+      "󰙅 Worktree",
+      "󰘬 From main",
+      "✗ Worktree setup failed",
+    ]);
+    expect(segments[2]?.action).toBe("git");
+  });
+
   it("keeps the last failed action in view until the next one runs", () => {
     const failure = { cwd: "/repo", label: "Create PR", message: "No provider" };
     expect(toolbar({ failure })).toContain("✗ Create PR failed");

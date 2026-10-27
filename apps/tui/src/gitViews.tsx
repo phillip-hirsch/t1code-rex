@@ -5,16 +5,19 @@ import {
   resolveVisibleWorktreeSetup,
   worktreeSetupAgentStarted,
 } from "@t3tools/client-runtime/worktree-setup";
-import type { ThreadId, VcsListRefsResult } from "@t3tools/contracts";
+import type { ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { useRenderer } from "@opentui/react";
 import { memo, useEffect, useImperativeHandle, useState, type Ref } from "react";
 
 import {
+  branchRefsQuery,
   buildBranchPickerItems,
   describeBranchPickerItem,
+  type BranchPickerChoice,
   type BranchPickerItem,
+  type BranchRefPages,
 } from "./branchPicker.ts";
 import {
   describeBranchToolbar,
@@ -25,7 +28,7 @@ import {
   type ToolbarTone,
 } from "./branchToolbar.ts";
 import type { TuiConnection, VcsRefsAtom } from "./connection/tuiConnection.ts";
-import { buildGitMenuItems, type GitMenuItem } from "./gitMenu.ts";
+import { buildGitMenuItems, isArmed, type ArmedConfirmation, type GitMenuItem } from "./gitMenu.ts";
 import { printableText } from "./sidebarKeys.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 import { describeWorktreeSetup } from "./worktreeSetupView.ts";
@@ -72,7 +75,11 @@ function useVcsStatusRefresh(source: GitSource, cwd: string): void {
 
 const OVERLAY_ROWS_MAX = 12;
 // The menu doesn't list refs, so it doesn't ask for them.
-const NO_REFS: VcsRefsAtom = Atom.make(AsyncResult.initial<VcsListRefsResult, unknown>());
+const NO_REFS: VcsRefsAtom = Atom.make<BranchRefPages>({
+  data: null,
+  loading: false,
+  failed: false,
+});
 
 export function toneColor(theme: TuiTheme, tone: ToolbarTone): TuiColor {
   const { palette } = theme;
@@ -105,6 +112,7 @@ export interface BranchToolbarProps {
   readonly worktreePath: string | null;
   readonly threadBranch: string | null;
   readonly failure: GitFailure | null;
+  readonly setupFailed: boolean;
   readonly theme: TuiTheme;
   readonly onPress: (action: NonNullable<ToolbarSegment["action"]>) => void;
 }
@@ -127,6 +135,7 @@ export const BranchToolbar = memo(function BranchToolbar(props: BranchToolbarPro
     statusFailed: AsyncResult.isFailure(statusResult),
     action,
     failure: props.failure,
+    setupFailed: props.setupFailed,
   });
   return (
     <box
@@ -178,15 +187,17 @@ export interface GitOverlayProps {
   /** Picking a new worktree's base names a ref; it never checks one out or creates one. */
   readonly pickingWorktreeBase: boolean;
   readonly commitModelLabel: string;
-  /** The menu item waiting for its second ⏎. */
-  readonly armedId: string | null;
+  /** The push waiting for its second ⏎; shown only on the checkout and branch it was armed for. */
+  readonly armed: ArmedConfirmation | null;
+  /** The thread's new worktree couldn't be made; the menu offers to retry or go local. */
+  readonly setupFailed: boolean;
   /** The last action here that failed; the menu shows its whole message. */
   readonly failure: GitFailure | null;
   /** Left edge, past the sidebar. */
   readonly left: number;
   readonly theme: TuiTheme;
   readonly onMenuItem: (item: GitMenuItem) => void;
-  readonly onBranchItem: (item: BranchPickerItem) => void;
+  readonly onBranchItem: (item: BranchPickerChoice) => void;
   readonly onClose: () => void;
   readonly ref?: Ref<GitOverlayHandle>;
 }
@@ -200,10 +211,25 @@ export function GitOverlay(props: GitOverlayProps) {
   const statusResult = useAtomValue(props.source.vcsStatusAtom(props.cwd));
   const status = Option.getOrNull(AsyncResult.value(statusResult)) ?? null;
   const action = useAtomValue(props.source.vcsActionStateAtom(props.cwd));
-  const refsResult = useAtomValue(
-    mode.kind === "branches" ? props.source.vcsRefsAtom(props.cwd) : NO_REFS,
+  // The server filters refs by what's typed; "Load more" asks for its next page.
+  const refsQuery = branchRefsQuery(query);
+  const [pages, setPages] = useState({ query: refsQuery, count: 1 });
+  const pageCount = pages.query === refsQuery ? pages.count : 1;
+  const current = useAtomValue(
+    mode.kind === "branches" ? props.source.vcsRefsAtom(props.cwd, refsQuery, pageCount) : NO_REFS,
   );
-  const refs = mode.kind === "branches" ? Option.getOrNull(AsyncResult.value(refsResult)) : null;
+  // While a new query loads, the last results stay up, narrowed locally.
+  const [shown, setShown] = useState<{
+    readonly cwd: string;
+    readonly query: string;
+    readonly refs: BranchRefPages;
+  } | null>(null);
+  if (current.data !== null && shown?.refs !== current) {
+    setShown({ cwd: props.cwd, query: refsQuery, refs: current });
+  }
+  const listed =
+    current.data !== null || shown?.cwd !== props.cwd ? { query: refsQuery, refs: current } : shown;
+  const refs = mode.kind === "branches" ? listed.refs.data : null;
 
   const menuItems =
     mode.kind === "menu"
@@ -211,18 +237,20 @@ export function GitOverlay(props: GitOverlayProps) {
           status,
           busy: action.isRunning,
           commitModelLabel: props.commitModelLabel,
+          setupFailed: props.setupFailed,
         })
       : [];
   const branchItems =
     mode.kind === "branches"
       ? buildBranchPickerItems({
-          refs,
+          refs: listed.refs,
+          refsQuery: listed.query,
           query,
           activeBranch: resolveToolbarBranch({
             envMode: props.envMode,
             worktreePath: props.worktreePath,
             threadBranch: props.threadBranch,
-            currentBranch: status?.refName ?? null,
+            status,
           }),
           projectCwd: props.projectCwd,
           canCreate: !props.pickingWorktreeBase,
@@ -238,7 +266,9 @@ export function GitOverlay(props: GitOverlayProps) {
       if (item) props.onMenuItem(item);
     } else {
       const item = branchItems[at];
-      if (item) props.onBranchItem(item);
+      if (item?.kind === "more") {
+        if (!item.loading) setPages({ query: refsQuery, count: pageCount + 1 });
+      } else if (item) props.onBranchItem(item);
     }
   };
 
@@ -275,15 +305,18 @@ export function GitOverlay(props: GitOverlayProps) {
         ? "New worktree from…"
         : "Switch branch";
   const armed =
-    mode.kind === "menu" ? (menuItems.find((item) => item.id === props.armedId) ?? null) : null;
+    mode.kind === "menu"
+      ? (menuItems.find((item) => isArmed(props.armed, item, props.cwd, status?.refName ?? null)) ??
+        null)
+      : null;
   const note =
     mode.kind === "branches"
       ? refs === null
-        ? AsyncResult.isFailure(refsResult)
+        ? current.failed
           ? "Couldn't list branches"
           : "Loading branches…"
-        : refs.nextCursor !== null
-          ? `Showing ${refs.refs.length} of ${refs.totalCount} refs; type to filter`
+        : current.failed
+          ? "Couldn't list more branches"
           : null
       : (armed?.confirm ?? null);
 
@@ -409,7 +442,16 @@ function describeOverlayRow(item: GitMenuItem | BranchPickerItem): {
     };
   }
   return {
-    icon: item.kind === "ref" ? (item.selected ? "●" : " ") : item.kind === "create" ? "+" : "󰊢",
+    icon:
+      item.kind === "ref"
+        ? item.selected
+          ? "●"
+          : " "
+        : item.kind === "create"
+          ? "+"
+          : item.kind === "more"
+            ? "…"
+            : "󰊢",
     label: describeBranchPickerItem(item),
     trailing: item.kind === "ref" ? item.tag : null,
     disabled: false,

@@ -11,12 +11,15 @@ import type {
 } from "@t3tools/contracts";
 
 /**
- * The git menu: upstream's quick action first, then commit, push and the PR action as web
- * lists them, pull when behind, and the commit-message model, as the old TUI had it.
+ * The git menu: a failed worktree setup's recovery, upstream's quick action (pull when only
+ * behind), then commit, push and the PR action as web lists them, and the commit-message
+ * model, as the old TUI had it.
  */
 export type GitMenuCommand =
   | { readonly kind: "action"; readonly action: GitStackedAction }
   | { readonly kind: "pull" }
+  | { readonly kind: "retry-setup" }
+  | { readonly kind: "work-locally" }
   | { readonly kind: "open-pr"; readonly url: string }
   | { readonly kind: "commit-model" }
   | { readonly kind: "refresh" };
@@ -37,6 +40,43 @@ export interface GitMenuInput {
   readonly busy: boolean;
   /** The commit-message model's label. */
   readonly commitModelLabel: string;
+  /** The thread's new worktree couldn't be made: offer to retry, or to work locally. */
+  readonly setupFailed?: boolean;
+}
+
+/** A push to the default branch waiting for its second ⏎: what it was armed for. */
+export interface ArmedConfirmation {
+  readonly id: string;
+  readonly cwd: string;
+  readonly refName: string | null;
+  readonly action: GitStackedAction;
+}
+
+/** What a first ⏎ on this item arms, here and on this branch. */
+export function armConfirmation(
+  item: GitMenuItem,
+  cwd: string,
+  refName: string | null,
+): ArmedConfirmation | null {
+  if (item.confirm === undefined || item.command.kind !== "action") return null;
+  return { id: item.id, cwd, refName, action: item.command.action };
+}
+
+/** Whether a second ⏎ runs it: the same item, action, checkout and branch it was armed for. */
+export function isArmed(
+  armed: ArmedConfirmation | null,
+  item: GitMenuItem,
+  cwd: string,
+  refName: string | null,
+): boolean {
+  return (
+    armed !== null &&
+    armed.id === item.id &&
+    armed.cwd === cwd &&
+    armed.refName === refName &&
+    item.command.kind === "action" &&
+    armed.action === item.command.action
+  );
 }
 
 const ACTION_ICONS: Record<GitStackedAction, string> = {
@@ -56,6 +96,22 @@ function confirmFor(action: GitStackedAction, status: VcsStatusResult | null): s
 export function buildGitMenuItems(input: GitMenuInput): ReadonlyArray<GitMenuItem> {
   const { status, busy } = input;
   const items: GitMenuItem[] = [];
+  if (input.setupFailed === true) {
+    items.push(
+      {
+        id: "setup-retry",
+        icon: "󰑐",
+        label: "Retry worktree setup",
+        command: { kind: "retry-setup" },
+      },
+      {
+        id: "setup-local",
+        icon: "󰉋",
+        label: "Work in the project checkout instead",
+        command: { kind: "work-locally" },
+      },
+    );
+  }
   const hasRemote = status?.hasPrimaryRemote ?? false;
   const quick = resolveQuickAction(status, busy, status?.isDefaultRef ?? false, hasRemote);
   if (quick.kind === "run_action" && quick.action !== undefined) {
@@ -67,13 +123,12 @@ export function buildGitMenuItems(input: GitMenuInput): ReadonlyArray<GitMenuIte
       command: { kind: "action", action: quick.action },
       ...(confirm === undefined ? {} : { confirm }),
     });
-  } else if (quick.kind === "run_pull" || (status !== null && status.behindCount > 0)) {
+  } else if (quick.kind === "run_pull") {
     items.push({
       id: "pull",
       icon: "󰓂",
       label: "Pull",
       command: { kind: "pull" },
-      ...(busy ? { disabledReason: "Git action in progress." } : {}),
     });
   } else if (quick.kind === "show_hint" && quick.hint !== undefined && status !== null) {
     items.push({

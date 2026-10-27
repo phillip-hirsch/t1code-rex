@@ -16,6 +16,7 @@ import {
 } from "@t3tools/client-runtime/state/vcs";
 import {
   ProjectId,
+  RunId,
   ThreadId,
   type GitRunStackedActionResult,
   type VcsCreateRefInput,
@@ -26,6 +27,7 @@ import {
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import { act, useEffect, useRef, useState } from "react";
 
+import { branchRefsInput, mergeRefPages, type BranchRefPages } from "../src/branchPicker.ts";
 import { createComposerStore } from "../src/composerStore.ts";
 import type {
   TuiActionResult,
@@ -44,6 +46,9 @@ import {
 import { presentedThread, projectShell } from "../src/shellTestFixtures.ts";
 import type { SidebarThread } from "../src/sidebarModel.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
+import { routeThreadPaneKey } from "../src/threadPaneKeys.ts";
+import { resolveScrollKey } from "../src/threadScroll.ts";
+import { WORKTREE_FAILED_NOTICE, type WorktreeLaunch } from "../src/worktreeLaunch.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -92,15 +97,56 @@ function createGit() {
     vcsRef("fix-typo"),
   ]);
   // Only the picker reads refs; kept alive so a change made while it's closed sticks.
-  const refsAtom = Atom.make<AsyncResult.AsyncResult<VcsListRefsResult, unknown>>(
-    AsyncResult.success(allRefs),
-  ).pipe(Atom.keepAlive);
+  const refsAtom = Atom.make<VcsListRefsResult>(allRefs).pipe(Atom.keepAlive);
+  const refQueries: string[] = [];
+  /** `listRefs` as the server answers it: filtered by the query, a page at a time. */
+  const listRefs = (all: VcsListRefsResult, cwd: string, query: string, cursor?: number) => {
+    const input = branchRefsInput(cwd, query, cursor);
+    const matched = all.refs.filter((ref) =>
+      ref.name.toLowerCase().includes((input.query ?? "").toLowerCase()),
+    );
+    const start = input.cursor ?? 0;
+    // Pages of 3 here, so a handful of refs already spans several.
+    const page = matched.slice(start, start + Math.min(input.limit ?? 100, 3));
+    return AsyncResult.success<VcsListRefsResult>({
+      ...all,
+      refs: page,
+      nextCursor: start + page.length < matched.length ? start + page.length : null,
+      totalCount: matched.length,
+    });
+  };
+  const refPages = (cwd: string, query: string, pages: number) =>
+    Atom.make((get): BranchRefPages => {
+      const all = get(refsAtom);
+      if (!all.isRepo) return mergeRefPages([AsyncResult.success(all)]);
+      refQueries.push(query);
+      const results = [];
+      let cursor: number | undefined;
+      for (let page = 0; page < pages; page += 1) {
+        const result = listRefs(all, cwd, query, cursor);
+        results.push(result);
+        if (result.value.nextCursor === null) break;
+        cursor = result.value.nextCursor;
+      }
+      return mergeRefPages(results);
+    });
+  const refPageAtoms = new Map<string, Atom.Atom<BranchRefPages>>();
+  const launches = new Map<string, Atom.Writable<WorktreeLaunch | null>>();
+  const launchAtom = (threadId: string) => {
+    let atom = launches.get(threadId);
+    if (atom === undefined) {
+      atom = Atom.make<WorktreeLaunch | null>(null).pipe(Atom.keepAlive);
+      launches.set(threadId, atom);
+    }
+    return atom;
+  };
   const statusAtom = (cwd: string) => {
     let atom = statuses.get(cwd);
     if (atom === undefined) {
+      // Kept alive, as the server keeps a checkout's status between reads.
       atom = Atom.make<AsyncResult.AsyncResult<VcsStatusResult | null, unknown>>(
         AsyncResult.success(vcsStatus()),
-      );
+      ).pipe(Atom.keepAlive);
       statuses.set(cwd, atom);
     }
     return atom;
@@ -135,7 +181,25 @@ function createGit() {
   const source = {
     registry,
     vcsStatusAtom: (cwd: string): VcsStatusAtom => statusAtom(cwd),
-    vcsRefsAtom: (_cwd: string): VcsRefsAtom => refsAtom,
+    vcsRefsAtom: (cwd: string, query: string, pages: number): VcsRefsAtom => {
+      const key = JSON.stringify([cwd, query, pages]);
+      let atom = refPageAtoms.get(key);
+      if (atom === undefined) {
+        atom = refPages(cwd, query, pages);
+        refPageAtoms.set(key, atom);
+      }
+      return atom;
+    },
+    worktreeLaunchAtom: (threadId: ThreadId) => launchAtom(threadId),
+    retryWorkspacePreparation: async (input: { threadId: ThreadId; runId: RunId }) => {
+      calls.push(`retryPreparation ${input.threadId} ${input.runId}`);
+      registry.set(launchAtom(input.threadId), {
+        runId: input.runId,
+        status: "preparing",
+        baseRef: "main",
+      });
+      return ok({ sequence: 1 });
+    },
     vcsActionStateAtom: (cwd: string): Atom.Atom<VcsActionState> => actionAtom(cwd),
     worktreeSetupAtom: (threadId: ThreadId): WorktreeSetupAtom => setupAtom(threadId),
     switchRef: async (input: { cwd: string; refName: string }) => {
@@ -213,8 +277,10 @@ function createGit() {
     calls,
     localRefreshes: () => refreshes,
     setStatus,
-    setRefs: (refs: VcsListRefsResult | null) =>
-      registry.set(refsAtom, AsyncResult.success(refs ?? allRefs)),
+    setRefs: (refs: VcsListRefsResult | null) => registry.set(refsAtom, refs ?? allRefs),
+    refQueries,
+    setLaunch: (threadId: string, launch: WorktreeLaunch | null) =>
+      registry.set(launchAtom(threadId), launch),
     setSetup: (threadId: string, snapshot: WorktreeSetupSnapshot | null) =>
       registry.set(setupAtom(threadId), AsyncResult.success(snapshot)),
     takeAction: () => {
@@ -228,6 +294,7 @@ function createGit() {
 interface Scene {
   readonly target: GitTarget;
   readonly thread: SidebarThread | null;
+  readonly project?: typeof PROJECT;
 }
 
 const git = createGit();
@@ -249,10 +316,15 @@ const harness: {
   setScene: (scene: Scene) => void;
   controls: GitControls | null;
   footer: string;
-} = { setScene: () => undefined, controls: null, footer: "" };
+  /** What the transcript did with the keys it took. */
+  scrolls: string[];
+} = { setScene: () => undefined, controls: null, footer: "", scrolls: [] };
 const setScene = (scene: Scene) => harness.setScene(scene);
 
-/** The app's wiring of the git pieces: g and b open the overlays, w flips a draft's mode. */
+/**
+ * The app's wiring of the git pieces: the shell's thread-pane routing (the transcript
+ * first, then c and b open the overlays), and w flips a draft's mode.
+ */
 function Harness() {
   const [scene, setSceneState] = useState<Scene>(threadScene());
   const [status, setStatus] = useState("");
@@ -269,7 +341,7 @@ function Harness() {
     },
     target: scene.target,
     thread: scene.thread,
-    project: PROJECT,
+    project: scene.project ?? PROJECT,
     defaultEnvMode: "local",
     startFromOrigin: false,
     setStatus,
@@ -284,9 +356,20 @@ function Harness() {
   });
   useKeyboard((key: KeyEvent) => {
     if (controller.handleKey(key)) return;
-    if (key.name === "g") controller.openMenu();
-    else if (key.name === "b") controller.openBranchPicker();
-    else if (key.name === "w") controller.toggleWorktree();
+    if (key.name === "w") {
+      controller.toggleWorktree();
+      return;
+    }
+    const routed = routeThreadPaneKey(key, {
+      composer: scene.target.kind,
+      pane: (paneKey) => {
+        const scroll = resolveScrollKey(paneKey, 20);
+        if (scroll !== null) harness.scrolls.push(scroll.kind);
+        return scroll !== null;
+      },
+    });
+    if (routed === "git-menu") controller.openMenu();
+    else if (routed === "branch-picker") controller.openBranchPicker();
   });
   if (controller.cwd === null || controller.projectCwd === null) return null;
   return (
@@ -309,6 +392,7 @@ function Harness() {
         worktreePath={controller.worktreePath}
         threadBranch={controller.threadBranch}
         failure={controller.failure}
+        setupFailed={controller.setupFailed}
         theme={DEFAULT_TUI_THEME}
         onPress={controller.pressToolbar}
       />
@@ -324,7 +408,8 @@ function Harness() {
           threadBranch={controller.threadBranch}
           pickingWorktreeBase={controller.pickingWorktreeBase}
           commitModelLabel="Claude Haiku 5.5"
-          armedId={controller.armedId}
+          armed={controller.armed}
+          setupFailed={controller.setupFailed}
           failure={controller.failure}
           left={0}
           theme={DEFAULT_TUI_THEME}
@@ -349,6 +434,7 @@ const press = async (...keys: string[]) => {
   for (const key of keys) {
     act(() => {
       if (key === "up" || key === "down") setup.mockInput.pressArrow(key);
+      else if (key === "escape") setup.mockInput.pressEscape();
       else setup.mockInput.pressKey(key);
     });
     await render();
@@ -381,8 +467,11 @@ check("G2: a commit shows as ahead", frame().includes("✓ clean  ↑1"), true);
 // G3: the menu's push streams progress into the toolbar, then reports the result.
 const refreshesBeforeMenu = git.localRefreshes();
 await press("g");
+check("G3: g stays the transcript's jump to the top", harness.scrolls.at(-1), "top");
+check("G3: and opens no menu", frame().includes("Git · feature"), false);
+await press("c");
 check("G3: opening the menu re-reads status", git.localRefreshes() > refreshesBeforeMenu, true);
-check("G3: g opens the menu on the branch", frame().includes("Git · feature"), true);
+check("G3: c opens the menu on the branch", frame().includes("Git · feature"), true);
 check("G3: its quick action pushes and opens a PR", frame().includes("Push & create PR"), true);
 await press("down", "down", "RETURN");
 check("G3: ⏎ on Push runs it", lastCall(), "run /repo push");
@@ -410,7 +499,7 @@ check("G3: the result lands in the status line", harness.footer, "Pushed feature
 check("G3: and the toolbar is quiet again", frame().includes("Pushing..."), false);
 
 // G4: a failed PR shows the server's own message.
-await press("g", "down", "down", "down", "RETURN");
+await press("c", "down", "down", "down", "RETURN");
 check("G4: Create PR runs", lastCall(), "run /repo create_pr");
 const pr = git.takeAction();
 act(() => {
@@ -426,7 +515,7 @@ act(() => {
 });
 await render();
 check("G4: the toolbar keeps the failure in view", frame().includes("✗ Create PR failed"), true);
-await press("g");
+await press("c");
 check(
   "G4: the menu shows its whole message",
   frame().includes("✗ Create PR failed: No GitHub repository for remote origin"),
@@ -452,7 +541,7 @@ act(() =>
 );
 await render();
 const before = git.calls.length;
-await press("g", "RETURN");
+await press("c", "RETURN");
 check("G5: the first ⏎ only asks", git.calls.length, before);
 check("G5: naming the branch", frame().includes("This pushes to main, the default branch"), true);
 await press("RETURN");
@@ -539,6 +628,13 @@ act(() =>
   }),
 );
 act(() => git.setSetup(draft.threadId, worktreeSetup({ threadId: draft.threadId })));
+act(() =>
+  git.setLaunch(draft.threadId, {
+    runId: RunId.make("run-launch"),
+    status: "preparing",
+    baseRef: "main",
+  }),
+);
 await render();
 check(
   "G9b: the toolbar shows the launch's base",
@@ -588,6 +684,148 @@ act(() =>
 );
 await render();
 check("G11: the card goes once the agent started", frame().includes("Worktree ready"), false);
+
+// Sol audit round 1.
+const RUN = RunId.make("run-wt");
+const REOPENED = ThreadId.make("thread-reopened");
+const reopenedScene: Scene = {
+  target: { kind: "thread", threadId: REOPENED, projectId: PROJECT.id },
+  thread: presentedThread(REOPENED, PROJECT.id, { branch: null }),
+};
+act(() => git.setStatus("/repo", vcsStatus()));
+
+// S7: a thread this window never launched (the TUI was reopened mid-setup) still shows its
+// setup and can cancel it: the server says its run is preparing a worktree.
+act(() => setScene(reopenedScene));
+act(() => git.setSetup(REOPENED, worktreeSetup({ threadId: REOPENED })));
+act(() => git.setLaunch(REOPENED, { runId: RUN, status: "preparing", baseRef: "main" }));
+await render();
+check("S7: the setup card shows", frame().includes("Setting up worktree"), true);
+check("S7: the toolbar says Worktree", frame().includes("󰙅 Worktree  󰘬 From main"), true);
+check(
+  "S7: sends wait for the worktree",
+  harness.controls?.sendBlockedReason(REOPENED)?.startsWith("The new worktree is still"),
+  true,
+);
+act(() => harness.controls?.cancelWorktreeSetup());
+await render();
+check("S7: and cancel reaches the server", lastCall(), `cancelSetup ${REOPENED}`);
+
+// S1: the setup failed (or was cancelled) and its worktree is gone: sends are blocked until
+// the user retries or chooses the project checkout.
+act(() => git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main" }));
+await render();
+check(
+  "S1: the toolbar keeps the failure in view",
+  frame().includes("✗ Worktree setup failed"),
+  true,
+);
+check(
+  "S1: a send is blocked",
+  harness.controls?.sendBlockedReason(REOPENED),
+  WORKTREE_FAILED_NOTICE,
+);
+await press("c");
+check("S1: the menu leads with retry", frame().includes("Retry worktree setup"), true);
+check(
+  "S1: and offers the checkout",
+  frame().includes("Work in the project checkout instead"),
+  true,
+);
+await press("RETURN");
+check(
+  "S1: retry runs the failed preparation again",
+  lastCall(),
+  `retryPreparation ${REOPENED} ${RUN}`,
+);
+check(
+  "S1: sends wait while it retries",
+  harness.controls?.sendBlockedReason(REOPENED) !== null,
+  true,
+);
+act(() => git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main" }));
+await render();
+await press("c", "down", "RETURN");
+check(
+  "S1: working locally says so",
+  harness.footer,
+  "This thread now works in the project checkout",
+);
+check("S1: sends go out again", harness.controls?.sendBlockedReason(REOPENED), null);
+check("S1: and the toolbar says Local", frame().includes("󰉋 Local  󰘬 feature"), true);
+act(() => git.setLaunch(REOPENED, null));
+
+// S4: a default-branch push armed in one checkout doesn't run in another one.
+const OTHER = projectShell("other", { workspaceRoot: "/other" });
+const defaultDirty = vcsStatus({
+  refName: "main",
+  isDefaultRef: true,
+  ...dirtyTree([{ path: "a.ts", insertions: 1, deletions: 0 }]),
+});
+act(() => git.setStatus("/repo", defaultDirty));
+act(() => git.setStatus("/other", defaultDirty));
+act(() => setScene(threadScene()));
+await render();
+const beforeArm = git.calls.length;
+await press("c", "RETURN");
+check("S4: the first ⏎ asks", frame().includes("This pushes to main, the default branch"), true);
+act(() =>
+  setScene({
+    target: { kind: "thread", threadId: ThreadId.make("thread-other"), projectId: OTHER.id },
+    thread: presentedThread(ThreadId.make("thread-other"), OTHER.id, { branch: "main" }),
+    project: OTHER,
+  }),
+);
+await render();
+check("S4: in another checkout it no longer asks", frame().includes("the default branch"), false);
+await press("RETURN");
+check("S4: so ⏎ there only asks again", git.calls.length, beforeArm);
+check("S4: for that checkout", frame().includes("This pushes to main, the default branch"), true);
+await press("RETURN");
+check("S4: a second ⏎ there runs it there", lastCall(), "run /other commit_push");
+git.takeAction()?.settle({ ok: false, error: new Error("x"), interrupted: true });
+act(() => setScene(threadScene()));
+act(() => git.setStatus("/repo", vcsStatus()));
+await render();
+
+// S3: the server filters refs by what's typed and pages them; "create" waits for every page.
+act(() =>
+  git.setRefs(
+    vcsRefs([
+      vcsRef("main", { isDefault: true }),
+      vcsRef("feature", { current: true, worktreePath: "/repo" }),
+      ...["a-1", "a-2", "a-3", "a-4", "a-5"].map((name) => vcsRef(name)),
+      vcsRef("zeta"),
+    ]),
+  ),
+);
+await press("b");
+await type("zeta");
+check("S3: the query goes to the server", git.refQueries.at(-1), "zeta");
+check("S3: a ref past the first page is found", frame().includes("zeta"), true);
+await press("escape", "b");
+await type("a-");
+check("S3: more matches than one page", frame().includes("Load more (3 of 5 shown)"), true);
+check("S3: so no create yet", frame().includes("Create branch"), false);
+await press("down", "down", "down", "RETURN");
+check("S3: load more lists the rest", frame().includes("a-5"), true);
+check(
+  "S3: then the server has confirmed the name is new",
+  frame().includes('Create branch "a-"'),
+  true,
+);
+await press("escape", "b");
+await type("a-5");
+check("S3: an existing name is never offered", frame().includes("Create branch"), false);
+await press("escape");
+act(() => git.setRefs(null));
+
+// S5: a detached HEAD shows as one, not as the branch the thread last recorded.
+act(() => git.setStatus("/repo", vcsStatus({ refName: null })));
+await render();
+check("S5: detached HEAD", frame().includes("󰘬 Detached HEAD"), true);
+act(() => git.setStatus("/repo", vcsStatus()));
+await render();
 
 setup.renderer.destroy();
 if (failures > 0) {

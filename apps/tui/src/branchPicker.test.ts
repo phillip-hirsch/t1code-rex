@@ -1,9 +1,14 @@
+import type { VcsListRefsResult } from "@t3tools/contracts";
+import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  branchRefsInput,
+  branchRefsQuery,
   buildBranchPickerItems,
   describeBranchPickerItem,
   localBranchName,
+  mergeRefPages,
   resolveBranchSelectionTarget,
   type BranchPickerInput,
 } from "./branchPicker.ts";
@@ -17,14 +22,22 @@ const REFS = vcsRefs([
   vcsRef("origin/release", { isRemote: true, remoteName: "origin" }),
 ]);
 
-function picker(overrides: Partial<BranchPickerInput>) {
+function picker(
+  overrides: Partial<Omit<BranchPickerInput, "refs">> & {
+    readonly refs?: VcsListRefsResult | null;
+    readonly loading?: boolean;
+  },
+) {
+  const { refs = REFS, loading = false, ...rest } = overrides;
+  const query = rest.query ?? "";
   return buildBranchPickerItems({
-    refs: REFS,
-    query: "",
+    refs: { data: refs, loading, failed: false },
+    refsQuery: branchRefsQuery(query),
+    query,
     activeBranch: "main",
     projectCwd: "/repo",
     canCreate: true,
-    ...overrides,
+    ...rest,
   });
 }
 
@@ -66,6 +79,51 @@ describe("buildBranchPickerItems", () => {
 
   it("waits for refs before offering to create", () => {
     expect(picker({ refs: null, query: "x" })).toEqual([]);
+  });
+
+  it("offers to create only once the server has listed every match", () => {
+    // The server matched 300 refs and sent the first page: "x" may be on a later one.
+    const partial = vcsRefs([vcsRef("x-1"), vcsRef("x-2")], { nextCursor: 2, totalCount: 300 });
+    expect(picker({ refs: partial, query: "x" }).map(describeBranchPickerItem)).toEqual([
+      "x-1",
+      "x-2",
+      "Load more (2 of 300 shown)",
+    ]);
+    expect(picker({ refs: vcsRefs([vcsRef("x-1")]), query: "x", loading: true }).at(-1)).toEqual(
+      expect.objectContaining({ kind: "ref" }),
+    );
+    // Results for an older query narrow locally, but don't vouch for the new name.
+    expect(
+      picker({ refs: vcsRefs([vcsRef("fix-typo")]), query: "fix-t", refsQuery: "fix" }).map(
+        (item) => item.kind,
+      ),
+    ).toEqual(["ref"]);
+  });
+});
+
+describe("branch ref pages", () => {
+  it("sends what's typed, dashed, to the server", () => {
+    expect(branchRefsInput("/repo", branchRefsQuery(" my branch "), undefined)).toEqual({
+      cwd: "/repo",
+      limit: 100,
+      query: "my-branch",
+    });
+    expect(branchRefsInput("/repo", "", 100)).toEqual({ cwd: "/repo", limit: 100, cursor: 100 });
+  });
+
+  it("merges pages in order, with the last page's cursor", () => {
+    const merged = mergeRefPages([
+      AsyncResult.success(vcsRefs([vcsRef("a"), vcsRef("b")], { nextCursor: 2, totalCount: 3 })),
+      AsyncResult.success(vcsRefs([vcsRef("c")], { nextCursor: null, totalCount: 3 })),
+    ]);
+    expect(merged.data?.refs.map((ref) => ref.name)).toEqual(["a", "b", "c"]);
+    expect(merged.data?.nextCursor).toBeNull();
+    expect(merged.loading).toBe(false);
+    const loading = mergeRefPages([
+      AsyncResult.success(vcsRefs([vcsRef("a")], { nextCursor: 1, totalCount: 2 })),
+      AsyncResult.initial(true),
+    ]);
+    expect([loading.data?.nextCursor, loading.loading]).toEqual([1, true]);
   });
 });
 

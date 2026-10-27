@@ -30,6 +30,8 @@ export interface BranchToolbarInput {
   readonly action: VcsActionState | null;
   /** The last git action here that failed, until the next one starts. */
   readonly failure: GitFailure | null;
+  /** The thread's new worktree couldn't be made; the git menu offers to retry or go local. */
+  readonly setupFailed: boolean;
 }
 
 /** A failed git action: the menu shows its whole message, the toolbar just that it failed. */
@@ -52,18 +54,21 @@ export function resolveEnvMode(input: {
 
 /**
  * The branch a toolbar shows, as web resolves it: a new worktree starts from the picked base;
- * anything else is on whatever the checkout has now.
+ * anything else is on whatever the checkout has now. The recorded branch stands in only
+ * until status loads; a loaded null is a detached HEAD.
  */
 export function resolveToolbarBranch(input: {
   readonly envMode: EnvMode;
   readonly worktreePath: string | null;
   readonly threadBranch: string | null;
-  readonly currentBranch: string | null;
+  /** The checkout's live status; null while it loads. */
+  readonly status: Pick<VcsStatusResult, "refName"> | null;
 }): string | null {
+  const current = input.status?.refName ?? null;
   if (input.envMode === "worktree" && input.worktreePath === null) {
-    return input.threadBranch ?? input.currentBranch;
+    return input.threadBranch ?? current;
   }
-  return input.currentBranch ?? input.threadBranch;
+  return input.status === null ? input.threadBranch : current;
 }
 
 function plural(count: number, word: string): string {
@@ -104,7 +109,7 @@ export function describeBranchToolbar(input: BranchToolbarInput): ReadonlyArray<
     envMode: input.envMode,
     worktreePath: input.worktreePath,
     threadBranch: input.threadBranch,
-    currentBranch: status?.refName ?? null,
+    status,
   });
   const newWorktree = input.envMode === "worktree" && input.worktreePath === null;
   segments.push({
@@ -128,6 +133,13 @@ export function describeBranchToolbar(input: BranchToolbarInput): ReadonlyArray<
       id: "action",
       text: `󱦟 ${running}`,
       tone: "info",
+      action: "git",
+    });
+  } else if (input.setupFailed) {
+    segments.push({
+      id: "action",
+      text: "✗ Worktree setup failed",
+      tone: "error",
       action: "git",
     });
   } else if (input.failure !== null) {

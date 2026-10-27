@@ -70,7 +70,10 @@ function deferred() {
  */
 function setup(
   script: ReadonlyArray<ComposerCommandResult | Promise<ComposerCommandResult>>,
-  options: { readonly store?: ComposerStore } = {},
+  options: {
+    readonly store?: ComposerStore;
+    readonly blockedReason?: (send: ComposerSend) => string | null;
+  } = {},
 ) {
   const store = options.store ?? createComposerStore({ initialPrefs: {}, persist: null });
   const results = [...script];
@@ -102,6 +105,7 @@ function setup(
       };
     },
   });
+  if (options.blockedReason !== undefined) sender.setBlockedReason(options.blockedReason);
   /** Runs the pending timers with this delay, as if that much time passed. */
   const elapse = (delayMs: number) => {
     for (const timer of timers.filter((entry) => entry.delayMs === delayMs)) timer.run();
@@ -1107,5 +1111,29 @@ describe("composer sender, PR 15 Sol audit round 1", () => {
     expect(sender.pendingCount({ threadIds: [], projectId: "q" })).toBe(0);
     expect(sender.forget({ threadIds: [], projectId: "p" })).toBe(1);
     expect(sender.pendingCount()).toBe(0);
+  });
+});
+
+describe("composer sender, worktree setup", () => {
+  it("hands back queued messages, without sending them, once the thread's worktree is gone", async () => {
+    let blocked: string | null = null;
+    const { store, sender, calls } = setup([dropped], { blockedReason: () => blocked });
+    await sender.send(send({ text: "one" }));
+    await sender.send(send({ commandId: CommandId.make("cmd-2"), text: "two" }));
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    // While they wait to reconnect, the thread's worktree setup fails.
+    blocked = "Worktree setup failed";
+    await sender.retryWaiting();
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    expect(store.getDraft("t1").text).toBe("one\n\ntwo");
+    expect(store.snapshot("t1").sends).toEqual([]);
+    expect(store.snapshot("t1").notice).toBe("Worktree setup failed");
+  });
+
+  it("never holds back a draft's own launch", async () => {
+    const { sender, calls, store } = setup([], { blockedReason: () => "blocked" });
+    const draft = store.openNewThreadDraft(ProjectId.make("p"), () => ThreadId.make("new-1"));
+    await sender.send(send({ target: { kind: "draft", ...draft } }));
+    expect(ids(calls)).toEqual(["cmd-1"]);
   });
 });

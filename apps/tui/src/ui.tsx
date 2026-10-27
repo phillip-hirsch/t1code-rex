@@ -60,6 +60,7 @@ import {
 import { createComposerStore } from "./composerStore.ts";
 import { DiffPanel, useDiffPanelControls, type DiffPanelHandle } from "./diffPanel.tsx";
 import { useGitControls } from "./gitController.ts";
+import { routeThreadPaneKey, THREAD_PANE_SHORTCUT_HINTS } from "./threadPaneKeys.ts";
 import {
   BranchToolbar,
   GitOverlay,
@@ -809,6 +810,12 @@ function Shell(props: AppProps) {
     },
     onFocusComposer: () => setFocusArea(composerTarget === null ? "thread" : "composer"),
   });
+  // A queued message asks the git controls before it goes out.
+  const sendBlockedReason = git.sendBlockedReason;
+  useEffect(
+    () => sender.setBlockedReason((send) => sendBlockedReason(send.target.threadId)),
+    [sender, sendBlockedReason],
+  );
   const commitModelLabel =
     commitModelSelection === null
       ? "server default"
@@ -1164,7 +1171,7 @@ function Shell(props: AppProps) {
     {
       id: "git:menu",
       label: "Git actions",
-      description: "Commit, push, PR, pull  g in the thread  /git",
+      description: "Commit, push, PR, pull  c in the thread  /git",
       disabled: git.cwd === null,
       run: git.openMenu,
     },
@@ -1186,6 +1193,22 @@ function Shell(props: AppProps) {
       description: "/worktree",
       run: git.toggleWorktree,
     });
+  }
+  if (git.setupFailed) {
+    actions.push(
+      {
+        id: "git:retry-setup",
+        label: "Retry worktree setup",
+        description: "/worktree retry",
+        run: git.retrySetup,
+      },
+      {
+        id: "git:work-locally",
+        label: "Work in the project checkout instead",
+        description: "/worktree local",
+        run: git.workLocally,
+      },
+    );
   }
   if (git.setupThreadId !== null) {
     actions.push({
@@ -1497,26 +1520,28 @@ function Shell(props: AppProps) {
       }
       return outcome !== null;
     }
-    if (mainPane?.handleKey(key)) return true;
-    if (composerTarget?.kind === "thread" && key.name === "d" && !key.ctrl && !key.meta) {
-      toggleDiff();
-      return true;
+    const paneKey = routeThreadPaneKey(key, {
+      composer: composerTarget?.kind ?? null,
+      pane: mainPane === null ? null : (paneKeyEvent) => mainPane.handleKey(paneKeyEvent),
+    });
+    switch (paneKey) {
+      case null:
+        return false;
+      case "pane":
+        return true;
+      case "diff":
+        toggleDiff();
+        return true;
+      case "git-menu":
+        git.openMenu();
+        return true;
+      case "branch-picker":
+        git.openBranchPicker();
+        return true;
+      case "compose":
+        setFocusArea("composer");
+        return true;
     }
-    if (
-      composerTarget !== null &&
-      !key.ctrl &&
-      !key.meta &&
-      (key.name === "g" || key.name === "b")
-    ) {
-      if (key.name === "g") git.openMenu();
-      else git.openBranchPicker();
-      return true;
-    }
-    if (composerTarget !== null && (key.name === "i" || isEnter(key.name))) {
-      setFocusArea("composer");
-      return true;
-    }
-    return false;
   };
 
   useKeyboard((key) => {
@@ -1571,7 +1596,7 @@ function Shell(props: AppProps) {
             ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
             : diffShown
               ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
-              : `↑↓ scroll  PgUp/PgDn page  End bottom  d diff  g git  b branch  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
+              : `↑↓ scroll  PgUp/PgDn page  g/G top/bottom  ${THREAD_PANE_SHORTCUT_HINTS}  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -1730,7 +1755,10 @@ function Shell(props: AppProps) {
                     openMenu: git.openMenu,
                     openBranchPicker: git.openBranchPicker,
                     toggleWorktree: git.toggleWorktree,
+                    retrySetup: git.retrySetup,
+                    workLocally: git.workLocally,
                     launchWorktree: git.launchWorktree,
+                    sendBlockedReason: git.sendBlockedReason,
                   },
                   mentionSearch: {
                     cwd: activeThread
@@ -1781,6 +1809,7 @@ function Shell(props: AppProps) {
                   worktreePath={git.worktreePath}
                   threadBranch={git.threadBranch}
                   failure={git.failure}
+                  setupFailed={git.setupFailed}
                   theme={theme}
                   onPress={git.pressToolbar}
                 />
@@ -1931,7 +1960,8 @@ function Shell(props: AppProps) {
           threadBranch={git.threadBranch}
           pickingWorktreeBase={git.pickingWorktreeBase}
           commitModelLabel={commitModelLabel}
-          armedId={git.armedId}
+          armed={git.armed}
+          setupFailed={git.setupFailed}
           failure={git.failure}
           left={(layout.showSidebar ? sidebarWidth : 0) + 2}
           theme={theme}

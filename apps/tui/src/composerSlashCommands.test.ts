@@ -84,5 +84,8 @@ describe("/git, /branch and /worktree", () => {
       query: "feat/x",
     });
     expect(resolveComposerSlashAction("/worktree")).toEqual({ type: "toggle-worktree" });
+    expect(resolveComposerSlashAction("/worktree retry")).toEqual({ type: "retry-worktree" });
+    expect(resolveComposerSlashAction("/worktree local")).toEqual({ type: "work-locally" });
+    expect(resolveComposerSlashAction("/worktree x")).toMatchObject({ type: "error" });
   });
 });

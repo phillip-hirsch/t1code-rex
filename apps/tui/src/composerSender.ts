@@ -106,6 +106,11 @@ interface ThreadQueue {
 const OK: ComposerCommandResult = { ok: true };
 const ABANDONED = Symbol("abandoned");
 const HELD = Symbol("held");
+
+/** A message that can't go out now; it goes back to its composer with the reason. */
+interface Blocked {
+  readonly blocked: string;
+}
 const STALL_MS = 30_000;
 
 export const DISCARD_NOTICE = "Not sent; edit it and send again";
@@ -165,6 +170,11 @@ export function createComposerSender(options: ComposerSenderOptions) {
    */
   const unsure = new Set<string>();
   let disposed = false;
+  /**
+   * Why a message to an existing thread can't go out now (its worktree isn't there); asked
+   * again before each of its commands, so one queued earlier never runs in the wrong checkout.
+   */
+  let blockedReason: (send: ComposerSend) => string | null = () => null;
 
   const mark = (job: Job, status: ComposerSendStatus) => {
     if (job.status === status) return;
@@ -285,7 +295,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
   const runJob = async (
     queue: ThreadQueue,
     job: Job,
-  ): Promise<ComposerCommandResult | typeof ABANDONED | typeof HELD> => {
+  ): Promise<ComposerCommandResult | typeof ABANDONED | typeof HELD | Blocked> => {
     if (job.kind === "resume") {
       mark(job, "sending");
       return attempt(job, () =>
@@ -297,6 +307,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
       if (stage === undefined) break;
       // Stop, or a resume that went ahead of it: it waits at this stage, before its message.
       if (queue.held || queue.jobs[0] !== job) return HELD;
+      const blocked = job.send.target.kind === "thread" ? blockedReason(job.send) : null;
+      if (blocked !== null) return { blocked };
       mark(job, "sending");
       if (stage.kind === "start-turn") job.dispatched = true;
       const result = await attempt(job, () => runStage(job.send, stage));
@@ -339,6 +351,16 @@ export function createComposerSender(options: ComposerSenderOptions) {
     }
   };
 
+  /**
+   * A message can't go out: what waited behind it was planned on top of it, so all of it
+   * goes back, in order. A resume ahead of it still goes out.
+   */
+  const restoreMessages = (queue: ThreadQueue, reason: string) => {
+    for (const entry of sendJobs(queue).reverse()) store.restoreSend(entry.send, reason);
+    const resumes = queue.jobs.filter((entry) => entry.kind === "resume");
+    queue.jobs.splice(0, queue.jobs.length, ...resumes);
+  };
+
   /** Runs the queue's jobs in order until it empties, is held, one is rejected, or the connection drops. */
   const drain = (threadId: string, queue: ThreadQueue): Promise<void> => {
     if (queue.draining !== null) return queue.draining;
@@ -354,6 +376,10 @@ export function createComposerSender(options: ComposerSenderOptions) {
           if (disposed) break;
           // Paused (held, or a resume went ahead), resent, or dropped: the next pass decides.
           if (result === HELD || result === ABANDONED) continue;
+          if ("blocked" in result) {
+            restoreMessages(queue, result.blocked);
+            continue;
+          }
           if (result.ok) {
             queue.jobs.splice(queue.jobs.indexOf(job), 1);
             finish(job);
@@ -370,11 +396,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
               store.setNotice(job.threadId, `Resume failed: ${reason} (/resume, /discard)`);
               break;
             }
-            // What waited behind it was planned on top of it: all of it goes back, in order.
-            // A resume ahead of it still goes out.
-            for (const entry of sendJobs(queue).reverse()) store.restoreSend(entry.send, reason);
-            const resumes = queue.jobs.filter((entry) => entry.kind === "resume");
-            queue.jobs.splice(0, queue.jobs.length, ...resumes);
+            restoreMessages(queue, reason);
             continue;
           }
           job.attempt += 1;
@@ -440,6 +462,10 @@ export function createComposerSender(options: ComposerSenderOptions) {
   };
 
   return {
+    setBlockedReason(reason: (send: ComposerSend) => string | null) {
+      blockedReason = reason;
+    },
+
     /** Resolves when the thread's queue settles; a retry may still follow. */
     send(send: ComposerSend): Promise<void> {
       const threadId = send.target.threadId;

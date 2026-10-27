@@ -3,7 +3,9 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { dirtyTree, vcsStatus } from "./gitTestFixtures.ts";
 import {
+  armConfirmation,
   buildGitMenuItems,
+  isArmed,
   describeGitActionFailure,
   describeGitActionResult,
   type GitMenuItem,
@@ -62,6 +64,17 @@ describe("buildGitMenuItems", () => {
     });
   });
 
+  it("keeps the divergence hint instead of a pull that can't fast-forward", () => {
+    const items = menu(vcsStatus({ aheadCount: 1, behindCount: 2 }));
+    expect(items.map(row)[0]).toEqual({
+      id: "quick",
+      label: "Branch has diverged from upstream. Rebase/merge first.",
+      command: "refresh",
+      disabled: true,
+    });
+    expect(items.some((item) => item.command.kind === "pull")).toBe(false);
+  });
+
   it("explains why nothing can run on an up-to-date branch", () => {
     const [first] = menu();
     expect(first?.label).toBe("Branch is up to date. No action needed.");
@@ -90,6 +103,42 @@ describe("buildGitMenuItems", () => {
     expect(items[0]?.label).toBe("Commit & push");
     expect(items[0]?.confirm).toBe("This pushes to main, the default branch. ⏎ again to continue");
     expect(items.find((item) => item.id === "commit")?.confirm).toBeUndefined();
+  });
+
+  it("binds a default-branch confirmation to its checkout, branch and action", () => {
+    const status = vcsStatus({ ...DIRTY, refName: "main", isDefaultRef: true });
+    const [quick] = menu(status);
+    if (quick === undefined) throw new Error("no quick action");
+    const armed = armConfirmation(quick, "/repo", "main");
+    expect(isArmed(armed, quick, "/repo", "main")).toBe(true);
+    // Another project's checkout, another branch, or the item now running something else.
+    expect(isArmed(armed, quick, "/other", "main")).toBe(false);
+    expect(isArmed(armed, quick, "/repo", "release")).toBe(false);
+    expect(
+      isArmed(armed, { ...quick, command: { kind: "action", action: "push" } }, "/repo", "main"),
+    ).toBe(false);
+    // Items that don't ask never arm.
+    const commit = menu(status).find((item) => item.id === "commit");
+    if (commit === undefined) throw new Error("no commit item");
+    expect(armConfirmation(commit, "/repo", "main")).toBeNull();
+  });
+
+  it("leads with retry and work-locally when a worktree setup failed", () => {
+    const items = buildGitMenuItems({
+      status: vcsStatus(),
+      busy: false,
+      commitModelLabel: "x",
+      setupFailed: true,
+    });
+    expect(items.slice(0, 2).map(row)).toEqual([
+      { id: "setup-retry", label: "Retry worktree setup", command: "retry-setup", disabled: false },
+      {
+        id: "setup-local",
+        label: "Work in the project checkout instead",
+        command: "work-locally",
+        disabled: false,
+      },
+    ]);
   });
 
   it("disables every action while one runs", () => {
