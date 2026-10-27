@@ -33,12 +33,12 @@ function shellQuote(value: string): string {
 
 export function buildTuiAttachCommand(input: TuiServerConnectionInfo): string {
   const env: ReadonlyArray<readonly [string, string]> = [
-    ["T1CODE_TUI_ATTACH_ONLY", "1"],
-    ["T1CODE_HOST", input.host],
-    ["T1CODE_PORT", input.port],
-    ...(input.bearerToken ? ([["T1CODE_AUTH_TOKEN", input.bearerToken]] as const) : []),
+    ["TR3X_TUI_ATTACH_ONLY", "1"],
+    ["TR3X_HOST", input.host],
+    ["TR3X_PORT", input.port],
+    ...(input.bearerToken ? ([["TR3X_AUTH_TOKEN", input.bearerToken]] as const) : []),
   ];
-  return `env ${env.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} t1code`;
+  return `env ${env.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} tr3x`;
 }
 
 export function formatTuiAttachCommandPreview(input: TuiServerConnectionInfo): string {

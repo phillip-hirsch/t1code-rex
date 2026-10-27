@@ -81,7 +81,7 @@ describe("saveClipboardImageToFile", () => {
   });
 
   it("reads clipboard images from wl-paste on Linux", async () => {
-    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-clipboard-"));
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "tr3x-clipboard-"));
     tempRoots.push(root);
 
     const filePath = await saveClipboardImageToFile(root, {
@@ -100,7 +100,7 @@ describe("saveClipboardImageToFile", () => {
   });
 
   it("falls back to xclip and preserves the detected image type", async () => {
-    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-clipboard-"));
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "tr3x-clipboard-"));
     tempRoots.push(root);
 
     const filePath = await saveClipboardImageToFile(root, {

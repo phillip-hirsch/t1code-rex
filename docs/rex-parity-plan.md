@@ -1,6 +1,6 @@
 # Rex parity plan
 
-Goal: a [herdr](https://herdr.dev)-style multiplexer for coding agents. T3 Code's orchestration v2 is the backend, and Rex is the window layer. Each thread runs in its own Rex tab, and T1Code shows which agents are working, idle, or waiting on you.
+Goal: a [herdr](https://herdr.dev)-style multiplexer for coding agents. T3 Code's orchestration v2 is the backend, and Rex is the window layer. Each thread runs in its own Rex tab, and tr3x shows which agents are working, idle, or waiting on you.
 
 ## Branches
 
@@ -13,7 +13,7 @@ Goal: a [herdr](https://herdr.dev)-style multiplexer for coding agents. T3 Code'
 
 1. **Rex tabs for threads (done, PR #1).** Open a thread, a terminal, or a diff as a Rex tab or pane. Thread tabs attach to the opening window's server.
 2. **Orchestration v2 (next).** Port upstream `apps/server/src/orchestration-v2` and the contracts it needs, then move the TUI onto it. Upstream design docs: `docs/orchestration-v2/` in `pingdotgg/t3code`.
-3. **herdr-style agent view.** Show every thread's state (working, idle, blocked, waiting for approval) in T1Code, and jump to the Rex tab that needs attention.
+3. **herdr-style agent view.** Show every thread's state (working, idle, blocked, waiting for approval) in tr3x, and jump to the Rex tab that needs attention.
 4. **Remaining desktop features.** One area per sub-PR, mapping desktop windows onto Rex tabs and panes.
 
 Phase 1 (PR #2) shipped step 1. Steps 3 and 4 come later, each in a new base branch.

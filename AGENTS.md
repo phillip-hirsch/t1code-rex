@@ -1,6 +1,6 @@
-# T1Code fork
+# tr3x fork
 
-This repository is T1Code, a terminal UI fork of T3 Code. The rest of this file is upstream T3 Code's guide and still applies to the shared code.
+This repository is tr3x, a terminal UI fork of T3 Code. The rest of this file is upstream T3 Code's guide and still applies to the shared code.
 
 - `apps/tui` (the terminal UI, runs on Bun with OpenTUI) and `packages/client-core` are fork-only. Everything else tracks upstream `pingdotgg/t3code`; keep it as close to upstream as possible so future syncs stay cheap.
 - When a request names no surface, assume the TUI.

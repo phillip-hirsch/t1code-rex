@@ -31,7 +31,7 @@ describe("connectionsPanel", () => {
         bearerToken: "secret token",
       }),
     ).toBe(
-      "env T1CODE_TUI_ATTACH_ONLY='1' T1CODE_HOST='127.0.0.1' T1CODE_PORT='3773' T1CODE_AUTH_TOKEN='secret token' t1code",
+      "env TR3X_TUI_ATTACH_ONLY='1' TR3X_HOST='127.0.0.1' TR3X_PORT='3773' TR3X_AUTH_TOKEN='secret token' tr3x",
     );
     expect(
       formatTuiAttachCommandPreview({
@@ -40,7 +40,7 @@ describe("connectionsPanel", () => {
         bearerToken: "secret token",
       }),
     ).toBe(
-      "env T1CODE_TUI_ATTACH_ONLY='1' T1CODE_HOST='127.0.0.1' T1CODE_PORT='3773' T1CODE_AUTH_TOKEN='••••••••' t1code",
+      "env TR3X_TUI_ATTACH_ONLY='1' TR3X_HOST='127.0.0.1' TR3X_PORT='3773' TR3X_AUTH_TOKEN='••••••••' tr3x",
     );
   });
 

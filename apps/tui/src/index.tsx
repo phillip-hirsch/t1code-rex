@@ -45,22 +45,22 @@ function terminalIdentity(env: NodeJS.ProcessEnv = process.env): string {
 }
 
 function shouldUseKittyKeyboard(env: NodeJS.ProcessEnv = process.env): boolean {
-  const forced = readBooleanEnv(env.T1CODE_USE_KITTY_KEYBOARD);
+  const forced = readBooleanEnv(env.TR3X_USE_KITTY_KEYBOARD);
   if (forced !== undefined) return forced;
   const identity = terminalIdentity(env);
   return ["ghostty", "kitty", "wezterm", "iterm"].some((token) => identity.includes(token));
 }
 
 function shouldUseAlternateScreen(env: NodeJS.ProcessEnv = process.env): boolean {
-  return readBooleanEnv(env.T1CODE_USE_ALTERNATE_SCREEN) ?? true;
+  return readBooleanEnv(env.TR3X_USE_ALTERNATE_SCREEN) ?? true;
 }
 
 function shouldUseMouse(env: NodeJS.ProcessEnv = process.env): boolean {
-  return readBooleanEnv(env.T1CODE_USE_MOUSE) ?? true;
+  return readBooleanEnv(env.TR3X_USE_MOUSE) ?? true;
 }
 
 function shouldEnableMouseMovement(env: NodeJS.ProcessEnv = process.env): boolean {
-  return readBooleanEnv(env.T1CODE_ENABLE_MOUSE_MOVEMENT) ?? false;
+  return readBooleanEnv(env.TR3X_ENABLE_MOUSE_MOVEMENT) ?? false;
 }
 
 function errorMessage(error: unknown): string {
@@ -69,7 +69,7 @@ function errorMessage(error: unknown): string {
 
 /**
  * Thread tabs attach to the window that opened them, attach-only runs join a
- * server the user points at, and everything else starts a server on T1Code's
+ * server the user points at, and everything else starts a server on tr3x's
  * own data directory (never ~/.t3, which the user's T3 Code owns).
  */
 async function resolveServerSession(
@@ -109,7 +109,7 @@ try {
 } catch (error) {
   logger.log("server.start.failed", { error: errorMessage(error) });
   process.stderr.write(
-    `T1Code could not reach a server: ${errorMessage(error)}\nSee ${paths.logPath}.\n`,
+    `tr3x could not reach a server: ${errorMessage(error)}\nSee ${paths.logPath}.\n`,
   );
   process.exit(1);
 }
@@ -123,13 +123,13 @@ const prefs = await readPrefs(paths);
 const appTheme = prefs.appSettings?.theme ?? DEFAULT_APP_THEME;
 const tuiThemeId = normalizeTuiThemeId(prefs.tuiThemeId);
 
-if (process.env.T1CODE_HEADLESS === "1") {
+if (process.env.TR3X_HEADLESS === "1") {
   const outputPath =
-    process.env.T1CODE_HEADLESS_FRAME_PATH?.trim() ||
+    process.env.TR3X_HEADLESS_FRAME_PATH?.trim() ||
     NodePath.join(paths.configHomeDir, "headless-frame.txt");
-  const timeoutMs = Number(process.env.T1CODE_HEADLESS_TIMEOUT_MS ?? 1_500);
-  const width = Number(process.env.T1CODE_HEADLESS_WIDTH ?? 160);
-  const height = Number(process.env.T1CODE_HEADLESS_HEIGHT ?? 48);
+  const timeoutMs = Number(process.env.TR3X_HEADLESS_TIMEOUT_MS ?? 1_500);
+  const width = Number(process.env.TR3X_HEADLESS_WIDTH ?? 160);
+  const height = Number(process.env.TR3X_HEADLESS_HEIGHT ?? 48);
   const testSetup = await createTestRenderer({ width, height, kittyKeyboard: true });
   const root = createRoot(testSetup.renderer);
   root.render(
@@ -197,7 +197,7 @@ if (process.env.T1CODE_HEADLESS === "1") {
     } catch {}
     if (error) {
       process.stderr.write(
-        `t1 tui shutdown after error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+        `tr3x shutdown after error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
       );
       process.exitCode = code || 1;
     } else {

@@ -18,7 +18,7 @@ async function makeTempImage(
   fileName: string,
   bytes = Buffer.from("png-bytes"),
 ): Promise<{ root: string; filePath: string }> {
-  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-composer-submit-"));
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "tr3x-composer-submit-"));
   tempRoots.push(root);
   const filePath = NodePath.join(root, fileName);
   await NodeFSP.writeFile(filePath, bytes);

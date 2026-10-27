@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-const APP_DIR_NAME = "t1code";
+const APP_DIR_NAME = "tr3x";
 
 export interface TuiPaths {
   readonly userHomeDir: string;
@@ -35,15 +35,15 @@ export function resolveTuiPaths(
   const home = host.homeDir;
   const isLinux = host.platform === "linux";
   const homeDir =
-    env.T1CODE_HOME?.trim() ||
+    env.TR3X_HOME?.trim() ||
     (isLinux
       ? resolveAppDir(env.XDG_DATA_HOME, NodePath.join(home, ".local", "share", APP_DIR_NAME))
-      : NodePath.join(home, ".t1"));
+      : NodePath.join(home, ".tr3x"));
   const configHomeDir =
-    env.T1CODE_CONFIG_HOME?.trim() ||
+    env.TR3X_CONFIG_HOME?.trim() ||
     resolveAppDir(env.XDG_CONFIG_HOME, NodePath.join(home, ".config", APP_DIR_NAME));
   const stateHomeDir =
-    env.T1CODE_STATE_HOME?.trim() ||
+    env.TR3X_STATE_HOME?.trim() ||
     (isLinux
       ? resolveAppDir(env.XDG_STATE_HOME, NodePath.join(home, ".local", "state", APP_DIR_NAME))
       : configHomeDir);
