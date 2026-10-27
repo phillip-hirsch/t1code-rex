@@ -36,6 +36,7 @@ function cellAttributes(cell: TerminalCell): number {
 /**
  * A row as styled runs. A wide character gets a run of its own, so the column after
  * it starts where the emulator put it even if the renderer measures the glyph differently.
+ * Ghostty's snapshot marks the spacer after a wide cell, not always the wide cell itself.
  */
 export function terminalRowRuns(row: TerminalRow): ReadonlyArray<TerminalCellRun> {
   const runs: TerminalCellRun[] = [];
@@ -52,9 +53,11 @@ export function terminalRowRuns(row: TerminalRow): ReadonlyArray<TerminalCellRun
   };
   row.cells.forEach((cell, x) => {
     if (cell.wide === SPACER_TAIL) return;
-    const text = cell.invisible || cell.text.length === 0 ? " " : cell.text;
+    const wide = cell.wide === WIDE || row.cells[x + 1]?.wide === SPACER_TAIL;
+    const blank = cell.invisible || cell.text.length === 0;
+    const text = blank ? (wide ? "  " : " ") : cell.text;
     const attributes = cellAttributes(cell);
-    if (cell.wide === WIDE) {
+    if (wide) {
       flush();
       runs.push({
         x,

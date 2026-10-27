@@ -52,6 +52,25 @@ describe("terminalRowRuns", () => {
     ]);
   });
 
+  it("finds a wide character by the spacer after it, as Ghostty reports it", () => {
+    const runs = terminalRowRuns({
+      cells: [
+        cell("a"),
+        cell("👨‍"),
+        cell("", { wide: 2 }),
+        cell("界", { invisible: true }),
+        cell("", { wide: 2 }),
+        cell("b"),
+      ],
+    });
+    expect(runs.map((run) => [run.x, run.text])).toEqual([
+      [0, "a"],
+      [1, "👨‍"],
+      [3, "  "],
+      [5, "b"],
+    ]);
+  });
+
   it("draws hidden text as blanks", () => {
     expect(terminalRowRuns({ cells: [cell("p", { invisible: true })] })[0]?.text).toBe(" ");
   });

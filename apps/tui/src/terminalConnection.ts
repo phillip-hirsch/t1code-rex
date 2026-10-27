@@ -3,8 +3,11 @@ import {
   EMPTY_TERMINAL_BUFFER_STATE,
   type TerminalBufferState,
   type TerminalGridSize,
+  type TerminalSession,
+  type TerminalSessionAtoms,
+  type TerminalSessionOptions,
 } from "@t3tools/client-runtime/state/terminal";
-import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
+import { runAtomCommand, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import type {
   EnvironmentId,
   TerminalAttachInput,
@@ -47,6 +50,14 @@ export function writeChunkEnd(data: string): number {
 
 export type TerminalEnvironmentAtoms = ReturnType<typeof createTerminalEnvironmentAtoms>;
 
+/** The slice of the terminal atoms a pane's connection and close use. */
+export interface TerminalConnectionAtoms {
+  readonly attach: TerminalSessionAtoms["attach"];
+  readonly write: TerminalSessionAtoms["write"];
+  readonly close: TerminalSessionAtoms["close"];
+  readonly createSession: (options: TerminalSessionOptions) => TerminalSession;
+}
+
 export interface TerminalLaunch {
   readonly threadId: ThreadId;
   readonly terminalId: string;
@@ -83,14 +94,22 @@ function bufferOf(
   };
 }
 
+function failureMessage(
+  result: { readonly cause: Cause.Cause<unknown> },
+  fallback: string,
+): string {
+  const error = squashAtomCommandFailure(result);
+  return error instanceof Error && error.message.length > 0 ? error.message : fallback;
+}
+
 /**
- * A pane attached to the server's terminal, the way web's drawer attaches:
- * upstream's terminal session owns reopening, resizing and closing an exited shell,
- * and the attach stream resumes across reconnects and server restarts.
+ * A pane attached to the server's terminal the way web's drawer attaches. Input goes to a
+ * running shell one write at a time; a failed write drops what's queued behind it and
+ * stops input until the terminal reattaches, so no later chunk runs without it.
  */
 export function connectServerTerminal(input: {
   readonly registry: AtomRegistry.AtomRegistry;
-  readonly atoms: TerminalEnvironmentAtoms;
+  readonly atoms: TerminalConnectionAtoms;
   readonly environmentId: EnvironmentId;
   readonly launch: TerminalLaunch;
   readonly gridSize: TerminalGridSize;
@@ -109,12 +128,44 @@ export function connectServerTerminal(input: {
   });
   const unmount = registry.mount(session.driver({ kind: "attached", input: attachInput }));
   const attachAtom = atoms.attach({ environmentId, input: attachInput });
-  // One write in flight at a time, so keys can't overtake each other on the way;
-  // what's typed meanwhile goes out together in the next one.
+  const listeners = new Set<(buffer: TerminalPaneBuffer) => void>();
+  let disposed = false;
   let pending = "";
   let writing = false;
+  /** Why input stopped; it resumes once a shell other than `stoppedAt` runs attached. */
+  let inputError: string | null = null;
+  let stoppedAt: number | null = null;
+
+  const read = (): TerminalPaneBuffer => {
+    const buffer = bufferOf(registry.get(attachAtom));
+    return inputError === null ? buffer : { ...buffer, error: inputError };
+  };
+  const notify = () => {
+    const buffer = read();
+    for (const listener of listeners) listener(buffer);
+  };
+  /** The lifecycle of a running, attached shell, else null. */
+  const runningLifecycle = (): number | null => {
+    const result = registry.get(attachAtom);
+    const buffer = Option.getOrNull(AsyncResult.value(result));
+    return result._tag !== "Failure" &&
+      buffer !== null &&
+      buffer.version > 0 &&
+      buffer.status === "running"
+      ? buffer.lifecycleVersion
+      : null;
+  };
+  const resumeInput = () => {
+    if (inputError === null) return;
+    const lifecycle = runningLifecycle();
+    if (lifecycle !== null && lifecycle !== stoppedAt) inputError = null;
+  };
+  // One write in flight at a time, so keys can't overtake each other on the way;
+  // what's typed meanwhile goes out together in the next one.
   const pump = () => {
-    if (writing || pending.length === 0) return;
+    if (disposed || writing || inputError !== null || pending.length === 0) return;
+    const lifecycle = runningLifecycle();
+    if (lifecycle === null) return;
     const end = writeChunkEnd(pending);
     const data = pending.slice(0, end);
     pending = pending.slice(end);
@@ -124,40 +175,68 @@ export function connectServerTerminal(input: {
       atoms.write,
       { environmentId, input: { threadId: launch.threadId, terminalId: launch.terminalId, data } },
       { reportFailure: false },
-    ).finally(() => {
+    ).then((result) => {
       writing = false;
-      pump();
+      if (disposed) return;
+      if (result._tag === "Success") {
+        pump();
+        return;
+      }
+      pending = "";
+      inputError = `Input not sent: ${failureMessage(result, "Terminal write failed")}. Typing resumes when the terminal reconnects.`;
+      stoppedAt = lifecycle;
+      notify();
+      // The pane has printed why; a reattach that landed meanwhile resumes input at once.
+      resumeInput();
     });
   };
+  const unsubscribe = registry.subscribe(attachAtom, () => {
+    resumeInput();
+    pump();
+    notify();
+  });
   return {
-    read: () => bufferOf(registry.get(attachAtom)),
-    subscribe: (listener) => registry.subscribe(attachAtom, (result) => listener(bufferOf(result))),
+    read,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     write: (data) => {
+      if (disposed || inputError !== null) return;
       pending += data;
       pump();
     },
     reportGridSize: session.reportGridSize,
-    dispose: unmount,
+    dispose: () => {
+      disposed = true;
+      pending = "";
+      listeners.clear();
+      unsubscribe();
+      unmount();
+    },
   };
 }
 
-/** Ends a terminal's shell on the server. */
-export function closeServerTerminal(input: {
+/** Ends a terminal's shell on the server and deletes its history, as web's close does. */
+export async function closeServerTerminal(input: {
   readonly registry: AtomRegistry.AtomRegistry;
-  readonly atoms: TerminalEnvironmentAtoms;
+  readonly atoms: Pick<TerminalConnectionAtoms, "close">;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly terminalId: string;
 }): Promise<void> {
-  return runAtomCommand(
+  const result = await runAtomCommand(
     input.registry,
     input.atoms.close,
     {
       environmentId: input.environmentId,
-      input: { threadId: input.threadId, terminalId: input.terminalId },
+      input: { threadId: input.threadId, terminalId: input.terminalId, deleteHistory: true },
     },
     { reportFailure: false },
-  ).then(() => undefined);
+  );
+  if (result._tag === "Failure") {
+    throw new Error(failureMessage(result, "Terminal close failed"));
+  }
 }
 
 /** Running shells a thread has on the server, in `term-N` order. */
@@ -188,7 +267,8 @@ export interface TerminalBackend {
     gridSize: TerminalGridSize,
     onExit: () => void,
   ) => TerminalPaneConnection;
-  readonly close: (threadId: ThreadId, terminalId: string) => void;
+  /** Ends the shell and deletes its history; rejects when the server didn't. */
+  readonly close: (threadId: ThreadId, terminalId: string) => Promise<void>;
 }
 
 /** The drawer's backend on this server's terminal RPCs. */
@@ -206,8 +286,7 @@ export function createServerTerminalBackend(input: {
       runningTerminalIds(Option.getOrNull(AsyncResult.value(registry.get(metadataAtom))), threadId),
     connect: (launch, gridSize, onExit) =>
       connectServerTerminal({ registry, atoms, environmentId, launch, gridSize, onExit }),
-    close: (threadId, terminalId) => {
-      void closeServerTerminal({ registry, atoms, environmentId, threadId, terminalId });
-    },
+    close: (threadId, terminalId) =>
+      closeServerTerminal({ registry, atoms, environmentId, threadId, terminalId }),
   };
 }

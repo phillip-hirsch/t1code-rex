@@ -49,7 +49,7 @@ function colorKey(color: TerminalColor): number {
 
 /**
  * One terminal pane. While its thread is hidden it's detached, not destroyed, so its
- * screen stays exactly as the emulator laid it out. It draws the emulator's grid straight into OpenTUI's frame
+ * screen stays exactly as the emulator laid it out, and its output asks for no frames. It draws the emulator's grid straight into OpenTUI's frame
  * buffer: output chunks write to the emulator and ask for a frame, and nothing
  * goes through React. Rows are re-read from the emulator only when they changed.
  */
@@ -147,8 +147,16 @@ export class TerminalPaneRenderable extends Renderable {
     if (buffer.error !== null && buffer.error !== previous?.error) {
       emulator.write(`\r\n[terminal] ${buffer.error}\r\n`);
     }
+    this.invalidate();
+  }
+
+  /**
+   * Marks the screen for a redraw. Only a shown pane asks for a frame: a hidden thread's
+   * pane keeps reading output, and adding it back to a host draws what changed meanwhile.
+   */
+  private invalidate(): void {
     this.stale = true;
-    this.requestRender();
+    if (this.parent !== null) this.requestRender();
   }
 
   setFocusedCursor(shown: boolean): void {
@@ -161,8 +169,7 @@ export class TerminalPaneRenderable extends Renderable {
     this.theme = theme;
     this.mutedColor = mutedColor;
     this.emulator?.setTheme(theme);
-    this.stale = true;
-    this.requestRender();
+    this.invalidate();
   }
 
   /** Sends a key press to the shell; false when it sends nothing. */
@@ -187,16 +194,14 @@ export class TerminalPaneRenderable extends Renderable {
     // Typing returns to the live screen, like any terminal.
     if (this.scrollLabel !== null) {
       this.emulator?.scrollToBottom();
-      this.stale = true;
-      this.requestRender();
+      this.invalidate();
     }
     this.connection?.write(data);
   }
 
   scrollBy(rows: number): void {
     this.emulator?.scroll(rows);
-    this.stale = true;
-    this.requestRender();
+    this.invalidate();
   }
 
   scrollPage(to: "pageUp" | "pageDown" | "top" | "bottom"): void {
@@ -205,8 +210,7 @@ export class TerminalPaneRenderable extends Renderable {
     if (to === "bottom") emulator.scrollToBottom();
     else if (to === "top") emulator.scroll(-(emulator.scrollbarState()?.total ?? 0));
     else emulator.scroll((to === "pageUp" ? -1 : 1) * Math.max(1, this.height - 1));
-    this.stale = true;
-    this.requestRender();
+    this.invalidate();
   }
 
   protected override onResize(width: number, height: number): void {

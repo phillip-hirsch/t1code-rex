@@ -43,15 +43,16 @@ async function settle(render: () => Promise<void>): Promise<void> {
 
 // Keys: OpenTUI's parser in, Ghostty's encoder out.
 
+const THEME = {
+  foreground: { r: 229, g: 229, b: 229 },
+  background: { r: 17, g: 17, b: 17 },
+  cursor: { r: 212, g: 212, b: 212 },
+};
 const replies: string[] = [];
 const emulator = await createTerminalEmulator({
   cols: 40,
   rows: 5,
-  theme: {
-    foreground: { r: 229, g: 229, b: 229 },
-    background: { r: 17, g: 17, b: 17 },
-    cursor: { r: 212, g: 212, b: 212 },
-  },
+  theme: THEME,
   onReply: (data) => replies.push(data),
 });
 const encode = (raw: string, kitty = false) => {
@@ -107,6 +108,8 @@ interface FakeShell {
 
 const shells = new Map<string, FakeShell>();
 const closed: string[] = [];
+/** Set, the server refuses to close a shell. */
+let closeFailure: string | null = null;
 const shellKey = (threadId: string, terminalId: string) => `${threadId}/${terminalId}`;
 
 function emit(shell: FakeShell, data: string) {
@@ -177,7 +180,8 @@ const backend: TerminalBackend = {
       dispose: () => shell.listeners.clear(),
     };
   },
-  close: (threadId, terminalId) => {
+  close: async (threadId, terminalId) => {
+    if (closeFailure !== null) throw new Error(closeFailure);
     closed.push(shellKey(threadId, terminalId));
     shells.delete(shellKey(threadId, terminalId));
   },
@@ -257,6 +261,52 @@ act(() => setup.mockInput.pressTab());
 await settle(setup.renderOnce);
 check("typing, Enter, Ctrl+C and Tab go to the shell", shellA1()?.input.join(""), "ls\r\u0003\t");
 check("its echo is drawn", frame().includes("^C"), true);
+
+// Wide characters: each cell is drawn in the column Ghostty put it in.
+const WIDE_LINE = "Qa👨‍👩‍👧‍👦b 界x \u001b[8m界\u001b[0my \u001b[41m界\u001b[0mz";
+const reference = await createTerminalEmulator({
+  cols: 60,
+  rows: 2,
+  theme: THEME,
+  onReply: () => {},
+});
+reference.write(WIDE_LINE);
+const ghosttyColumns = new Map<string, number>();
+let ghosttyRed = THEME.background;
+reference.snapshot().rowData[0]?.cells.forEach((cell, x) => {
+  if (/^[Qabxyz]$/u.test(cell.text) || cell.text === "界") ghosttyColumns.set(cell.text, x);
+  if (cell.text === "界") ghosttyRed = cell.background;
+});
+reference.dispose();
+const shellA = shellA1();
+if (shellA !== undefined) emit(shellA, `\r\n${WIDE_LINE}\r\n$ `);
+await settle(setup.renderOnce);
+const drawn = setup.renderer.currentRenderBuffer;
+const cellIndex = (x: number, y: number) => y * drawn.width + x;
+const markIndex = drawn.buffers.char.indexOf("Q".codePointAt(0) ?? 0);
+const origin = {
+  x: (markIndex % drawn.width) - (ghosttyColumns.get("Q") ?? 0),
+  y: Math.floor(markIndex / drawn.width),
+};
+const drawnAt = (letter: string) =>
+  String.fromCodePoint(
+    drawn.buffers.char[cellIndex(origin.x + (ghosttyColumns.get(letter) ?? -1), origin.y)] ?? 0,
+  );
+check("Ghostty puts the family emoji in 8 columns", ghosttyColumns.get("b"), 10);
+check("the letter after a ZWJ emoji is drawn in Ghostty's column", drawnAt("b"), "b");
+check("…after CJK", drawnAt("x"), "x");
+check("…after hidden CJK", drawnAt("y"), "y");
+check("…after colored CJK", drawnAt("z"), "z");
+const redColumn = origin.x + (ghosttyColumns.get("界") ?? 0);
+const redBackground = (x: number) => {
+  const [r, g, b] = drawn.buffers.bg.subarray(cellIndex(x, origin.y) * 4);
+  return r === ghosttyRed.r && g === ghosttyRed.g && b === ghosttyRed.b && r !== THEME.background.r;
+};
+check(
+  "a colored wide char fills both its columns",
+  redBackground(redColumn) && redBackground(redColumn + 1),
+  true,
+);
 check("focus stays in the terminal", frame().includes("focus:terminal"), true);
 
 await act(() => setup.mockInput.pasteBracketedText("echo pasted"));
@@ -277,8 +327,21 @@ act(() => setup.mockInput.pressKey("n", { meta: true }));
 await settle(setup.renderOnce);
 check("⌘N opens a new tab", frame().includes("2 term-3"), true);
 
-act(() => setup.mockInput.pressKey("w", { meta: true }));
-await settle(setup.renderOnce);
+/** ⌘W, with the close's reply landing inside `act`. */
+async function pressClose(): Promise<void> {
+  await act(async () => {
+    setup.mockInput.pressKey("w", { meta: true });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  await settle(setup.renderOnce);
+}
+
+closeFailure = "terminal busy";
+await pressClose();
+check("a close the server refuses keeps the terminal", frame().includes("2 term-3"), true);
+check("…and says why", statuses.at(-1), "Couldn't close term-3: terminal busy");
+closeFailure = null;
+await pressClose();
 check("⌘W closes the active terminal on the server", closed.at(-1), "thread-a/term-3");
 check("…and its tab", frame().includes("term-3"), false);
 
@@ -298,8 +361,22 @@ check("another thread has its own drawer", frame().includes("Terminal"), false);
 act(() => setup.mockInput.pressKey("j", { meta: true }));
 await settle(setup.renderOnce);
 check("…with its own shell", frame().includes("/work/thread-b $"), true);
+
+// A hidden thread's shell keeps printing; its pane reads the output but asks for no frames.
+let renderRequests = 0;
+const requestRender = setup.renderer.requestRender.bind(setup.renderer);
+setup.renderer.requestRender = () => {
+  renderRequests += 1;
+  requestRender();
+};
+const hiddenShell = shellA1();
+if (hiddenShell !== undefined) for (let chunk = 0; chunk < 40; chunk += 1) emit(hiddenShell, ".");
+setup.renderer.requestRender = requestRender;
+check("a hidden thread's output asks for no frames", renderRequests, 0);
+
 act(() => controls.showThread("thread-a"));
 await settle(setup.renderOnce);
+check("showing it again draws what it printed meanwhile", frame().includes(".".repeat(40)), true);
 // ⌘W on term-3 handed the focus to term-2, its neighbour.
 check(
   "switching back finds the split intact",
@@ -318,9 +395,13 @@ check(
   1,
 );
 
-act(() => shellA1()?.onExit?.());
+await act(async () => {
+  shellA1()?.onExit?.();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+});
 await settle(setup.renderOnce);
 check("a shell that exits leaves the drawer", frame().includes("term-1"), false);
+check("…and its history goes, as a close's does", closed.at(-1), "thread-a/term-1");
 act(() => setup.mockInput.pressKey("j", { meta: true }));
 await settle(setup.renderOnce);
 check("⌘J in a focused terminal hides the drawer", frame().includes("Terminal"), false);

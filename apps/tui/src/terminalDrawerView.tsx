@@ -24,6 +24,7 @@ import {
   openTerminalDrawer,
   removeTerminal,
   splitTerminal,
+  terminalIdsOf,
   type TerminalGroup,
   type TerminalSplitDirection,
 } from "./terminalDrawer.ts";
@@ -186,25 +187,46 @@ export function useTerminalDrawer(options: {
     options.onFocus();
   };
 
-  /** Ends the shell; the drawer drops it and hides once it's the last. */
-  const close = (terminalId: string | null = activeId) => {
-    const current = requireTarget();
-    if (current === null || terminalId === null) return;
-    backend.close(current.threadId, terminalId);
-    disposePane(current.threadId, terminalId);
-    const next = store.update(current.threadId, (entry) => removeTerminal(entry, terminalId));
-    if (!next.open) options.onLeave();
-  };
-
-  // A shell that exits on its own (`exit`, Ctrl+D) leaves like a closed one.
-  const onExit = useCallback(
+  /** The drawer drops an ended terminal and hides once it was the last. */
+  const dropTerminal = useCallback(
     (threadId: string, terminalId: string) => {
       disposePane(threadId, terminalId);
+      // A close and the exit it causes both land here; only the first changes anything.
+      if (!terminalIdsOf(store.get(threadId)).includes(terminalId)) return;
       const next = store.update(threadId, (entry) => removeTerminal(entry, terminalId));
       const now = latest.current;
       if (!next.open && now.target?.threadId === threadId && now.focused) now.onLeave();
     },
     [disposePane, store],
+  );
+
+  /** Ends the shell and its history. A failed close keeps the terminal, so ⌘W can retry. */
+  const endTerminal = useCallback(async (threadId: ThreadId, terminalId: string) => {
+    try {
+      await latest.current.backend.close(threadId, terminalId);
+      return true;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      latest.current.onStatus(`Couldn't close ${terminalId}: ${reason}`);
+      return false;
+    }
+  }, []);
+
+  const close = (terminalId: string | null = activeId) => {
+    const current = requireTarget();
+    if (current === null || terminalId === null) return;
+    void endTerminal(current.threadId, terminalId).then((closed) => {
+      if (closed) dropTerminal(current.threadId, terminalId);
+    });
+  };
+
+  // A shell that exits on its own (`exit`, Ctrl+D) leaves like a closed one.
+  const onExit = useCallback(
+    (threadId: ThreadId, terminalId: string) => {
+      dropTerminal(threadId, terminalId);
+      void endTerminal(threadId, terminalId);
+    },
+    [dropTerminal, endTerminal],
   );
 
   const setHeight = (next: number) => store.setHeight(clampTerminalDrawerHeight(next, area.rows));
@@ -256,7 +278,7 @@ export function useTerminalDrawer(options: {
     return true;
   };
 
-  const actions: TerminalDrawerAction[] = [
+  const actions: ReadonlyArray<TerminalDrawerAction> = [
     {
       id: "terminal:toggle",
       label: open ? (focused ? "Hide terminal" : "Focus terminal") : "Open terminal",
@@ -285,15 +307,18 @@ export function useTerminalDrawer(options: {
       disabled: target === null,
       run: () => split("vertical"),
     },
+    ...(open
+      ? [
+          {
+            id: "terminal:close",
+            label: "Close terminal",
+            description:
+              activeId === null ? "⌘W in the terminal" : `${activeId}  ⌘W in the terminal`,
+            run: () => close(),
+          },
+        ]
+      : []),
   ];
-  if (open) {
-    actions.push({
-      id: "terminal:close",
-      label: "Close terminal",
-      description: activeId === null ? "⌘W in the terminal" : `${activeId}  ⌘W in the terminal`,
-      run: () => close(),
-    });
-  }
 
   const element =
     open && state !== null && target !== null ? (
@@ -331,7 +356,7 @@ function TerminalDrawerView(props: {
   readonly panes: Map<string, TerminalPaneRenderable>;
   readonly onActivate: (terminalId: string) => void;
   readonly onResize: (height: number) => void;
-  readonly onExit: (threadId: string, terminalId: string) => void;
+  readonly onExit: (threadId: ThreadId, terminalId: string) => void;
   readonly onStatus: (status: string) => void;
 }) {
   const { theme, target, groups, activeTerminalId, focused, height } = props;
@@ -434,7 +459,7 @@ function TerminalPaneHost(props: {
   readonly focused: boolean;
   readonly panes: Map<string, TerminalPaneRenderable>;
   readonly onActivate: (terminalId: string) => void;
-  readonly onExit: (threadId: string, terminalId: string) => void;
+  readonly onExit: (threadId: ThreadId, terminalId: string) => void;
   readonly onStatus: (status: string) => void;
 }) {
   const renderer = useRenderer();
