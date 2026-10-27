@@ -16,18 +16,11 @@
   "bin": {
     "tr3x": "./bin/tr3x.js"
   },
-  "files": [
-    "README.md",
-    "bin",
-    "dist"
-  ],
   "type": "module",
   "scripts": {
     "dev": "bun run src/index.tsx",
     "dev:headless": "TR3X_HEADLESS=1 bun run src/index.tsx",
     "build": "bun run scripts/build-runtime.mjs && node scripts/bundle-server-dist.mjs",
-    "prepack": "bun run build && node scripts/prepare-package-json.mjs",
-    "postpack": "node scripts/restore-package-json.mjs",
     "start": "bun dist/index.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vp test run"
