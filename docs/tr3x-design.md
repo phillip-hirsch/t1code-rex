@@ -184,7 +184,7 @@ Target: about **4–5k non-test lines** for the view, against 25k for the abando
 
 **Security.**
 
-- The daemon holds the only long-lived bearer. For each tab it issues a scoped session (`orchestration:read orchestration:operate`, `providers:manage` only if the view does provider auth) through `EnvironmentAuth.issueSession`, the same call `t3 auth session issue` makes [V `v2:apps/server/src/cli/auth.ts:159`].
+- No long-lived bearer is stored (PR #26). The daemon doesn't exchange the desktop bootstrap credential, and `daemon.json` holds no secret. Each client mints its own short-lived, scoped session with `t3 auth session issue --base-dir … --scope … --ttl …` against the tr3x base dir; the token comes back on stdout. Doctor uses a 2-minute `orchestration:read` session. Each tab will get `orchestration:read orchestration:operate`, plus `providers:manage` only if the view does provider auth [V `v2:apps/server/src/cli/auth.ts:159`].
 - It writes `{server, threadId, bearer}` to a one-shot launch file: mode 0600, in a 0700 directory, opened with `wx`, deleted by the view on read, and expired by the daemon after 60 s. This is `threadWindowLaunch.ts` as it exists today [V].
 - Only the file path goes in argv. Rex can't pass env [V], so tokens would otherwise end up in `ps`.
 - The daemon revokes the session on `window_closed` or `block_closed`.
