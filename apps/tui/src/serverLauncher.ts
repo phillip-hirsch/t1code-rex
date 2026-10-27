@@ -495,26 +495,34 @@ export async function startManagedServer(
   const exchange = () =>
     exchangeBearerToken({ httpBaseUrl: endpoint.httpBaseUrl, credential: bootstrapToken });
 
+  // The last bearer that worked. Retries always start from it, never from a
+  // pending or failed request of an earlier server generation.
+  let lastGoodBearer: string | null = null;
+
   const getBearerToken = () => {
     if (bearer !== null && bearer.generation === generation) return bearer.token;
     const current = generation;
-    const previousEntry = bearer;
+    const previous = lastGoodBearer;
     // Exchange again only when the server definitively rejects the old bearer. A
     // network error while the new server boots must not trigger an exchange, or
     // it would revoke the bearer that Rex thread tabs share.
     const token = (
-      previousEntry
-        ? previousEntry.token.then(async (bearerToken) =>
-            (await isBearerAccepted({ httpBaseUrl: endpoint.httpBaseUrl, bearerToken }))
-              ? bearerToken
-              : exchange(),
+      previous
+        ? isBearerAccepted({ httpBaseUrl: endpoint.httpBaseUrl, bearerToken: previous }).then(
+            (accepted) => (accepted ? previous : exchange()),
           )
         : exchange()
-    ).catch((error: unknown) => {
-      // Let the next call try again from the same state.
-      if (bearer?.generation === current) bearer = previousEntry;
-      throw error;
-    });
+    ).then(
+      (resolved) => {
+        if (current === generation) lastGoodBearer = resolved;
+        return resolved;
+      },
+      (error: unknown) => {
+        // Let the next call try again from the last good bearer.
+        if (bearer?.generation === current) bearer = null;
+        throw error;
+      },
+    );
     bearer = { generation: current, token };
     return token;
   };

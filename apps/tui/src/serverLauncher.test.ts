@@ -186,6 +186,49 @@ describe("startManagedServer", () => {
     server.stop();
   });
 
+  it("recovers when checks from overlapping server generations fail", async () => {
+    vi.useFakeTimers();
+    const { children, spawnImpl } = fakeSpawn();
+    const exchangeBearerToken = vi.fn(async ({ credential }: { credential: string }) => {
+      return `bearer:${credential}`;
+    });
+    let rejectPending: (error: Error) => void = () => {};
+    const isBearerAccepted = vi.fn(async () => true);
+    let tokenIndex = 0;
+    const server = await startManagedServer(
+      { baseDir: "/tmp/.t1", port: 43116, restartDelayMs: 25 },
+      {
+        spawnImpl,
+        waitUntilReady: ready,
+        randomToken: () => `token-${(tokenIndex += 1)}`,
+        exchangeBearerToken,
+        isBearerAccepted,
+        env: {},
+      },
+    );
+    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
+
+    // Generation 2's check hangs, then generation 3 starts and its check fails too.
+    children[0]!.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(25);
+    isBearerAccepted.mockImplementationOnce(
+      () => new Promise<boolean>((_resolve, reject) => (rejectPending = reject)),
+    );
+    const generation2 = server.getBearerToken();
+    children[1]!.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(25);
+    isBearerAccepted.mockRejectedValueOnce(new Error("still booting"));
+    await expect(server.getBearerToken()).rejects.toThrow("still booting");
+    rejectPending(new Error("connection refused"));
+    await expect(generation2).rejects.toThrow("connection refused");
+
+    // The next call checks the server again and keeps the last good bearer.
+    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
+    expect(isBearerAccepted).toHaveBeenCalledTimes(3);
+    expect(exchangeBearerToken).toHaveBeenCalledTimes(1);
+    server.stop();
+  });
+
   it("stops the server process when it never becomes ready", async () => {
     vi.useFakeTimers();
     const { children, spawnImpl } = fakeSpawn();
