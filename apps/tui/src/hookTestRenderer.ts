@@ -45,6 +45,12 @@ export function renderHook<T>(useHook: () => T, registry: AtomRegistry.AtomRegis
     act(update: () => void): void {
       act(update);
     },
+    /** For updates that land after a promise: commits them before resolving. */
+    async actAsync(update: () => Promise<unknown>): Promise<void> {
+      await act(async () => {
+        await update();
+      });
+    },
     unmount(): void {
       act(() => renderer?.unmount());
       vi.unstubAllGlobals();

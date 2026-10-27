@@ -2,7 +2,13 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
-import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core";
+import {
+  decodePasteBytes,
+  stripAnsiSequences,
+  type KeyEvent,
+  type PasteEvent,
+  type TextareaRenderable,
+} from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import type { ThreadQueueWorkflowState } from "@t3tools/client-runtime/state/thread-workflows";
 import * as Option from "effect/Option";
@@ -60,6 +66,7 @@ import {
 import type { ComposerSendEntry, ComposerStore } from "./composerStore.ts";
 import { pastedImagePath, resolveImageAttachmentFromPath } from "./composerSubmit.ts";
 import { truncateToolbarLabel } from "./composerControlLabels.ts";
+import { cursorStringOffset, replaceBeforeCursor } from "./textareaOffsets.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 
 export interface ProviderBadge {
@@ -77,6 +84,8 @@ export interface ComposerHandle {
   readonly handleKey: (key: KeyEvent) => boolean;
   /** Types text at the cursor. */
   readonly insertText: (text: string) => void;
+  /** A paste that arrived while another pane had focus; handled as if pasted here. */
+  readonly paste: (event: PasteEvent) => void;
 }
 
 type MentionSearchAtom = Atom.Atom<AsyncResult.AsyncResult<ProjectSearchEntriesResult, unknown>>;
@@ -131,7 +140,7 @@ function newId(): string {
 }
 
 function decodePaste(event: PasteEvent): string {
-  return new TextDecoder().decode(event.bytes);
+  return decodePasteBytes(event.bytes);
 }
 
 /**
@@ -218,7 +227,8 @@ export function Composer(props: ComposerProps) {
   const readText = () => textareaRef.current?.plainText ?? "";
   /** The `@query` before the cursor; picking an entry replaces it. */
   const syncMention = (text: string) => {
-    const next = mentionQueryAt(text, textareaRef.current?.cursorOffset ?? text.length);
+    const textarea = textareaRef.current;
+    const next = mentionQueryAt(text, textarea ? cursorStringOffset(textarea) : text.length);
     setMention((current) =>
       current?.query === next?.query && current?.length === next?.length ? current : next,
     );
@@ -283,6 +293,23 @@ export function Composer(props: ComposerProps) {
         props.onStatus(error instanceof Error ? error.message : String(error)),
       )
       .finally(() => setPasting(false));
+  };
+
+  /**
+   * Pastes that attach an image: an empty paste (terminals paste nothing when the clipboard
+   * holds only an image) or an image's path. Returns false for text, which the textarea takes.
+   */
+  const takeImagePaste = (pasted: string): boolean => {
+    if (pasted.trim().length === 0) {
+      pasteClipboardImage();
+      return true;
+    }
+    const imagePath = pastedImagePath(pasted);
+    if (imagePath === null) return false;
+    void attachFromPath(imagePath, false).then((attached) => {
+      if (!attached) textareaRef.current?.insertText(pasted);
+    });
+    return true;
   };
 
   const submit = (
@@ -404,8 +431,7 @@ export function Composer(props: ComposerProps) {
     const entry = mentionEntries[mentionIndex] ?? mentionEntries[0];
     const textarea = textareaRef.current;
     if (!entry || !textarea || mention === null) return;
-    for (let index = 0; index < mention.length; index += 1) textarea.deleteCharBackward();
-    textarea.insertText(mentionReplacement(entry.path));
+    replaceBeforeCursor(textarea, mention.length, mentionReplacement(entry.path));
   };
 
   useImperativeHandle(ref, () => ({
@@ -417,6 +443,7 @@ export function Composer(props: ComposerProps) {
         running,
         stopRequested,
         slashMenuOpen,
+        mentionActive,
         mentionMenuOpen,
         slashMenuCompletes:
           slashMenuOpen &&
@@ -476,6 +503,11 @@ export function Composer(props: ComposerProps) {
       }
     },
     insertText: (text: string) => textareaRef.current?.insertText(text),
+    paste: (event: PasteEvent) => {
+      const pasted = decodePaste(event);
+      // As the textarea pastes text itself.
+      if (!takeImagePaste(pasted)) textareaRef.current?.insertText(stripAnsiSequences(pasted));
+    },
   }));
 
   const borderColor = props.focused ? palette.composerBorder : palette.composerBorderMuted;
@@ -574,20 +606,7 @@ export function Composer(props: ComposerProps) {
                 store.setNotice(threadId, null);
               }}
               onPaste={(event: PasteEvent) => {
-                const pasted = decodePaste(event);
-                if (pasted.trim().length === 0) {
-                  // Terminals paste nothing when the clipboard holds only an image.
-                  event.preventDefault();
-                  pasteClipboardImage();
-                  return;
-                }
-                const imagePath = pastedImagePath(pasted);
-                if (imagePath !== null) {
-                  event.preventDefault();
-                  void attachFromPath(imagePath, false).then((attached) => {
-                    if (!attached) textareaRef.current?.insertText(pasted);
-                  });
-                }
+                if (takeImagePaste(decodePaste(event))) event.preventDefault();
               }}
               style={{
                 flexGrow: 1,

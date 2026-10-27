@@ -96,50 +96,73 @@ export function archiveThreadsConfirm(titles: ReadonlyArray<string>): ConfirmSte
   };
 }
 
-export function deleteThreadsConfirm(titles: ReadonlyArray<string>): ConfirmStep {
+/** Messages queued for threads being deleted: no composer could show them afterwards. */
+function unsentNote(pending: number): string {
+  if (pending <= 0) return "";
+  return ` ${plural(pending, "unsent message")} ${pending === 1 ? "is" : "are"} discarded too.`;
+}
+
+export function deleteThreadsConfirm(titles: ReadonlyArray<string>, pending = 0): ConfirmStep {
   return {
     title:
       titles.length === 1
         ? `Delete thread "${titles[0]}"?`
         : `Delete ${plural(titles.length, "thread")}?`,
     body:
-      titles.length === 1
+      (titles.length === 1
         ? "This permanently clears the thread's conversation history."
-        : "This permanently clears these threads' conversation history.",
+        : "This permanently clears these threads' conversation history.") + unsentNote(pending),
     confirmLabel: "Delete",
     destructive: true,
   };
 }
 
+/** A project's threads: those the sidebar lists (older settled ones too), and archived ones. */
+export interface ProjectThreadCount {
+  readonly listed: number;
+  readonly archived: number;
+}
+
 /**
  * The old TUI's two steps for a project with threads: a heads-up, then the real question.
- * The server also deletes the project's archived threads, which the sidebar doesn't count.
+ * The server deletes archived threads too, so they count; when they can't be counted, it
+ * asks both steps.
  */
 export function projectRemovalSteps(
   projectTitle: string,
-  threadCount: number,
+  threads: ProjectThreadCount | null,
+  pending = 0,
 ): ReadonlyArray<ConfirmStep> {
-  if (threadCount <= 0) {
+  const total = threads === null ? null : threads.listed + threads.archived;
+  if (total === 0) {
     return [
       {
         title: `Remove project "${projectTitle}"?`,
-        body: "Any archived threads in it are deleted too. Files on disk are kept.",
+        body: `It has no threads. Files on disk are kept.${unsentNote(pending)}`,
         confirmLabel: "Remove",
         destructive: true,
       },
     ];
   }
-  const threads = plural(threadCount, "thread");
+  const archived =
+    threads !== null && threads.archived > 0 ? ` (${threads.archived} archived)` : "";
+  const counted =
+    total === null
+      ? "its threads, archived ones included"
+      : `its ${plural(total, "thread")}${archived}`;
   return [
     {
       title: `Remove project "${projectTitle}"?`,
-      body: `Removing this project also deletes its ${threads}. Continue to confirm.`,
+      body: `Removing this project also deletes ${counted}. Continue to confirm.`,
       confirmLabel: "Continue",
       destructive: true,
     },
     {
-      title: `Remove project "${projectTitle}" and ${threads}?`,
-      body: "This permanently deletes the project's conversation history, archived threads included. Files on disk are kept.",
+      title:
+        total === null
+          ? `Remove project "${projectTitle}" and its threads?`
+          : `Remove project "${projectTitle}" and ${plural(total, "thread")}?`,
+      body: `This permanently deletes the project's conversation history, archived threads included. Files on disk are kept.${unsentNote(pending)}`,
       confirmLabel: "Remove project",
       destructive: true,
     },

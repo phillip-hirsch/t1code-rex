@@ -3,7 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import type { CliRenderer, KeyEvent } from "@opentui/core";
-import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { useKeyboard, usePaste, useTerminalDimensions } from "@opentui/react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   connectionProjectionPhase,
@@ -80,7 +80,12 @@ import {
   resolveRexContext,
   rexTabLabel,
 } from "./rexWorkspace.ts";
-import { buildArchivedThreadRows } from "./archivedThreads.ts";
+import {
+  buildArchivedThreadRows,
+  reconcileArchivedSelection,
+  selectArchivedRow,
+  type ArchivedSelection,
+} from "./archivedThreads.ts";
 import { useManagement } from "./management.ts";
 import { ArchivedThreadsView, ConfirmDialogView, PromptDialogView } from "./managementViews.tsx";
 import { Sidebar, sidebarRowId, type SidebarPress } from "./sidebar.tsx";
@@ -377,8 +382,8 @@ function Shell(props: AppProps) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteQuery, setPaletteQuery] = useState("");
-  /** The archived-threads view, with its highlighted row; null while closed. */
-  const [archivedIndex, setArchivedIndex] = useState<number | null>(null);
+  /** The archived-threads view's highlighted row; null while the view is closed. */
+  const [archivedSelection, setArchivedSelection] = useState<ArchivedSelection | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [focusArea, setFocusArea] = useState<FocusArea>("sidebar");
   const [sidebarCollapsedPreference, setSidebarCollapsedPreference] = useState(false);
@@ -731,6 +736,7 @@ function Shell(props: AppProps) {
     sidebar,
     serverConfig,
     composerStore,
+    sender,
     logger,
     setStatus,
     openNewThread,
@@ -791,7 +797,7 @@ function Shell(props: AppProps) {
             await management.copyPath(projectPath(projectId));
             return;
           case "remove-project":
-            management.requestRemoveProject(projectId);
+            await management.requestRemoveProject(projectId);
             return;
         }
         return;
@@ -852,7 +858,7 @@ function Shell(props: AppProps) {
 
   // Archived threads, fetched while the view is open.
   const archivedResult = useAtomValue(
-    archivedIndex === null ? NO_ARCHIVED_ATOM : connection.archivedShellSnapshotAtom,
+    archivedSelection === null ? NO_ARCHIVED_ATOM : connection.archivedShellSnapshotAtom,
   );
   const archivedSnapshot = Option.getOrNull(AsyncResult.value(archivedResult));
   const archivedRows = useMemo(
@@ -868,11 +874,17 @@ function Shell(props: AppProps) {
     [archivedSnapshot, connection.environmentId],
   );
   const archivedError = archivedResult._tag === "Failure" ? "Couldn't load archived threads" : null;
+  // One selection for the view and its keys, kept on a live row as rows come and go.
+  const archivedSelected =
+    archivedSelection === null ? null : reconcileArchivedSelection(archivedRows, archivedSelection);
+  if (archivedSelected !== archivedSelection) setArchivedSelection(archivedSelected);
+  const archivedRow =
+    archivedSelected === null ? null : (archivedRows[archivedSelected.index] ?? null);
   const openArchivedView = () => {
     setPaletteOpen(false);
     setContextMenu(null);
     connection.refreshArchivedThreads();
-    setArchivedIndex(0);
+    setArchivedSelection({ threadId: null, index: 0 });
   };
 
   const pickSettings = (patch: ComposerSettingsPatch): ComposerSettings | null => {
@@ -1154,17 +1166,21 @@ function Shell(props: AppProps) {
     setFocusArea((area) => order[(order.indexOf(area) + 1) % order.length] ?? "thread");
   };
 
-  /** Moves typing to the composer: the first key lands there, and the rest follow focus. */
-  const typeIntoComposer = (text: string): boolean => {
+  /**
+   * Text typed or pasted into the sidebar goes to the composer: the first key lands there,
+   * and the rest follow focus.
+   */
+  const writeToComposer = (write: (dock: ComposerDockHandle) => void): boolean => {
     if (composerTarget === null || dockRef.current === null) {
       setStatus("Select a thread to type a message");
       return true;
     }
-    dockRef.current.insertText(text);
+    write(dockRef.current);
     setFocusArea("composer");
     if (sidebarOverlayOpen) setSidebarOverlayOpen(false);
     return true;
   };
+  const typeIntoComposer = (text: string) => writeToComposer((dock) => dock.insertText(text));
 
   const runSidebarCommand = (type: "menu" | "rename" | "delete"): void => {
     const row = sidebar.cursorRow;
@@ -1201,13 +1217,13 @@ function Shell(props: AppProps) {
     }
     // A dialog owns the keyboard: its text box gets the keys it doesn't use.
     if (management.dialogOpen) return management.handleDialogKey(key);
-    if (archivedIndex !== null) {
-      const row = archivedRows[archivedIndex];
-      if (key.name === "escape" || (key.ctrl && key.name === "c")) setArchivedIndex(null);
-      else if (key.name === "up") setArchivedIndex(Math.max(0, archivedIndex - 1));
-      else if (key.name === "down")
-        setArchivedIndex(Math.min(Math.max(0, archivedRows.length - 1), archivedIndex + 1));
-      else if (isEnter(key.name) && !key.repeated && row) void management.unarchive(row.threadId);
+    if (archivedSelected !== null) {
+      const row = archivedRow;
+      if (key.name === "escape" || (key.ctrl && key.name === "c")) setArchivedSelection(null);
+      else if (key.name === "up" || key.name === "down") {
+        const delta = key.name === "up" ? -1 : 1;
+        setArchivedSelection(selectArchivedRow(archivedRows, archivedSelected.index + delta));
+      } else if (isEnter(key.name) && !key.repeated && row) void management.unarchive(row.threadId);
       else if ((key.name === "delete" || key.name === "backspace") && row) {
         management.requestDelete([row.threadId], [row.title]);
       }
@@ -1338,6 +1354,20 @@ function Shell(props: AppProps) {
 
   useKeyboard((key) => {
     if (handleKey(key)) key.preventDefault();
+  });
+  // A bracketed paste is one event, not keys: with the sidebar focused it goes to the
+  // composer too. Dialogs, menus and the palette keep theirs (their inputs take pastes).
+  usePaste((event) => {
+    const overlayOpen =
+      modelPickerRef.current !== null ||
+      management.dialogOpen ||
+      archivedSelected !== null ||
+      paletteOpen ||
+      contextMenu !== null;
+    if (!sidebarFocused || overlayOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    writeToComposer((dock) => dock.paste(event));
   });
 
   const toneColor = {
@@ -1517,7 +1547,7 @@ function Shell(props: AppProps) {
                   modelPicker !== null ||
                   paletteOpen ||
                   management.dialogOpen ||
-                  archivedIndex !== null
+                  archivedSelected !== null
                     ? null
                     : composerFocused
                       ? "composer"
@@ -1713,15 +1743,15 @@ function Shell(props: AppProps) {
             ))}
         </box>
       ) : null}
-      {archivedIndex !== null ? (
+      {archivedSelected !== null ? (
         <ArchivedThreadsView
           rows={archivedRows}
-          index={Math.min(archivedIndex, Math.max(0, archivedRows.length - 1))}
+          index={archivedSelected.index}
           loading={archivedSnapshot === null}
           error={archivedError}
           theme={theme}
-          onSelect={setArchivedIndex}
-          onClose={() => setArchivedIndex(null)}
+          onSelect={(index) => setArchivedSelection(selectArchivedRow(archivedRows, index))}
+          onClose={() => setArchivedSelection(null)}
         />
       ) : null}
       {management.prompt !== null ? (

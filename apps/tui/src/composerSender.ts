@@ -83,6 +83,12 @@ type ResumeJob = JobState & { readonly kind: "resume" };
 
 export type ComposerJob = Pick<JobState, "kind" | "threadId" | "commandId">;
 
+/** Some threads' jobs, and any message sent to the project (a launch the shell doesn't list yet). */
+export interface ComposerJobScope {
+  readonly threadIds: ReadonlyArray<string>;
+  readonly projectId?: string;
+}
+
 type Job = SendJob | ResumeJob;
 
 interface ThreadQueue {
@@ -115,6 +121,20 @@ const RESUME_NOTICES: Partial<Record<ComposerSendStatus, string>> = {
   waiting: "Resuming the queue once connected",
   stuck: "Resume got no reply (/resume retries, /discard drops it)",
 };
+
+function inScope(
+  scope: ComposerJobScope,
+  threadId: string,
+  queue: { readonly jobs: ReadonlyArray<Job> },
+): boolean {
+  return (
+    scope.threadIds.includes(threadId) ||
+    (scope.projectId !== undefined &&
+      queue.jobs.some(
+        (job) => job.kind === "send" && job.send.target.projectId === scope.projectId,
+      ))
+  );
+}
 
 /** Whether the shell already lists the modes the server accepted. */
 function reflects(listed: ComposerSettings | null, accepted: ComposerSettings): boolean {
@@ -523,9 +543,41 @@ export function createComposerSender(options: ComposerSenderOptions) {
       }
     },
 
-    /** Messages not yet accepted by the server, across threads. */
-    pendingCount(): number {
-      return [...queues.values()].reduce((count, queue) => count + sendJobs(queue).length, 0);
+    /** Messages not yet accepted by the server: across threads, or only those in `scope`. */
+    pendingCount(scope?: ComposerJobScope): number {
+      return [...queues]
+        .filter(([threadId, queue]) => scope === undefined || inScope(scope, threadId, queue))
+        .reduce((count, [, queue]) => count + sendJobs(queue).length, 0);
+    },
+
+    /**
+     * The threads were deleted: drops their jobs, unsent messages included, without handing
+     * them back, since no composer can show them now. The user confirmed losing them. A
+     * command in flight is abandoned; nothing is saved for them at quit. Returns how many
+     * messages were dropped.
+     */
+    forget(scope: ComposerJobScope): number {
+      let messages = 0;
+      const forgotten = new Set(scope.threadIds);
+      for (const [threadId, queue] of queues) {
+        if (!inScope(scope, threadId, queue)) continue;
+        forgotten.add(threadId);
+        const jobs = sendJobs(queue);
+        messages += jobs.length;
+        for (const job of jobs) store.finishSend(job.send);
+        store.setNotice(threadId, null);
+        queue.jobs.splice(0, queue.jobs.length);
+        queue.held = false;
+        stopRetry(queue);
+        queue.current?.abandon?.();
+        queues.delete(threadId);
+      }
+      for (const threadId of forgotten) {
+        accepted.delete(threadId);
+        launched.delete(threadId);
+        unsure.delete(threadId);
+      }
+      return messages;
     },
 
     /**

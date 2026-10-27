@@ -33,9 +33,25 @@ describe("thread multi-selection", () => {
       "c",
       order,
     );
-    expect(pruneThreadSelection(selection, () => true)).toBe(selection);
-    const pruned = pruneThreadSelection(selection, (id) => id !== "a");
+    expect(pruneThreadSelection(selection, new Set(["a", "b", "c"]))).toBe(selection);
+    const pruned = pruneThreadSelection(selection, new Set(["b", "c"]));
     expect(ids(pruned)).toEqual(["b", "c"]);
     expect(pruned.anchorThreadId).toBeNull();
+  });
+
+  it("S8: looks each selected thread up once in the live set, however many threads are listed", () => {
+    const listed = Array.from({ length: 2_000 }, (_, index) => `t${index}`);
+    let selection = EMPTY_MULTI_SELECTION;
+    for (const id of listed.slice(0, 500)) selection = toggleThreadInSelection(selection, id);
+    let lookups = 0;
+    class CountingSet extends Set<string> {
+      override has(value: string): boolean {
+        lookups += 1;
+        return super.has(value);
+      }
+    }
+    expect(pruneThreadSelection(selection, new CountingSet(listed))).toBe(selection);
+    // One per selected thread, plus the anchor.
+    expect(lookups).toBe(501);
   });
 });

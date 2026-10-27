@@ -24,6 +24,7 @@ import {
 import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import {
   createEnvironmentCommand,
+  createEnvironmentRpcCommand,
   createRuntimeCommand,
   runAtomCommand,
   type AtomCommand,
@@ -65,6 +66,7 @@ import type {
   SourceControlCloneRepositoryInput,
   ThreadId,
 } from "@t3tools/contracts";
+import { ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -214,6 +216,10 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     environmentId,
     input: {},
   });
+  const archivedShellSnapshot = createEnvironmentRpcCommand(runtime, {
+    label: "tr3x:orchestration:archived-shell-snapshot",
+    tag: ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
+  });
   const serverConfigsAtom = createEnvironmentServerConfigsAtom({
     catalogValueAtom: catalog.catalogValueAtom,
     serverConfigValueAtom: server.configValueAtom,
@@ -309,6 +315,8 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     browseAtom: (input: FilesystemBrowseInput) => filesystem.browse({ environmentId, input }),
     archivedShellSnapshotAtom,
     refreshArchivedThreads: () => registry.refresh(archivedShellSnapshotAtom),
+    /** The archived threads as the server has them now, never from cache. */
+    fetchArchivedShellSnapshot: () => runAction(archivedShellSnapshot, {}),
     retryNow: catalog.retryNow,
     dispose: () => {
       registry.dispose();

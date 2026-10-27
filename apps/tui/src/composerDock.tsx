@@ -1,5 +1,5 @@
 // @effect-diagnostics globalDate:off globalTimers:off -- The TUI runs on Bun outside the Effect runtime.
-import type { KeyEvent } from "@opentui/core";
+import type { KeyEvent, PasteEvent } from "@opentui/core";
 import {
   useCallback,
   useEffect,
@@ -36,6 +36,8 @@ export interface ComposerDockHandle {
   readonly handleKey: (key: KeyEvent) => boolean;
   /** Types text into the composer at its cursor, for keys typed while another pane had focus. */
   readonly insertText: (text: string) => void;
+  /** Pastes into the composer, image rules included, for a paste while another pane had focus. */
+  readonly paste: (event: PasteEvent) => void;
 }
 
 export interface ComposerDockRequests {
@@ -183,6 +185,7 @@ export function ComposerDock(props: ComposerDockProps) {
       return false;
     },
     insertText: (text: string) => composerRef.current?.insertText(text),
+    paste: (event: PasteEvent) => composerRef.current?.paste(event),
   }));
 
   return (

@@ -78,18 +78,22 @@ export function extendThreadSelection(
   return { selection: selectThreadRange(base, threadId, order), threadId };
 }
 
-/** Drops threads that left the list (archived, deleted, or elsewhere). Keeps identity if none did. */
+/**
+ * Drops threads that left the list (archived, deleted, or elsewhere). `liveThreadIds` is a
+ * set, so this stays linear in the selection. Keeps identity if none left.
+ */
 export function pruneThreadSelection(
   selection: ThreadMultiSelection,
-  isLive: (threadId: string) => boolean,
+  liveThreadIds: ReadonlySet<string>,
 ): ThreadMultiSelection {
   let changed = false;
   const next = new Set<string>();
   for (const id of selection.threadIds) {
-    if (isLive(id)) next.add(id);
+    if (liveThreadIds.has(id)) next.add(id);
     else changed = true;
   }
-  const anchorGone = selection.anchorThreadId !== null && !isLive(selection.anchorThreadId);
+  const anchorGone =
+    selection.anchorThreadId !== null && !liveThreadIds.has(selection.anchorThreadId);
   if (!changed && !anchorGone) return selection;
   return { threadIds: next, anchorThreadId: anchorGone ? null : selection.anchorThreadId };
 }

@@ -121,4 +121,19 @@ describe("resolveComposerKey with the @ file menu", () => {
     // Shift+Enter still adds a newline.
     expect(resolveComposerKey({ name: "return", shift: true }, open)).toBeNull();
   });
+
+  it("S2: Esc closes a menu that's still searching or found nothing, without stopping the run", () => {
+    const searching = { ...idle, hasText: true, running: true, mentionActive: true };
+    expect(resolveComposerKey({ name: "escape" }, searching)).toEqual({ type: "mention-dismiss" });
+    // With nothing to pick, Enter sends and arrows edit as usual.
+    expect(resolveComposerKey({ name: "return" }, searching)).toEqual({
+      type: "submit",
+      alternate: false,
+    });
+    expect(resolveComposerKey({ name: "down" }, searching)).toBeNull();
+    // A held Esc's repeats still do nothing.
+    expect(resolveComposerKey({ name: "escape", repeated: true }, searching)).toEqual({
+      type: "ignore",
+    });
+  });
 });

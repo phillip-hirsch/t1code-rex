@@ -23,6 +23,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { useCallback, useEffect, useState } from "react";
 
 import { copyTextToClipboard } from "./clipboardText.ts";
+import type { ComposerSender } from "./composerSender.ts";
 import type { ComposerStore } from "./composerStore.ts";
 import {
   archiveThreadsConfirm,
@@ -122,11 +123,48 @@ function isEnter(name: string): boolean {
   return name === "return" || name === "enter" || name === "kpenter" || name === "linefeed";
 }
 
+/** The connection's management commands; tests pass their own. */
+export type ManagementConnection = Pick<
+  TuiConnection,
+  | "projectClonesAtom"
+  | "browseAtom"
+  | "archiveThread"
+  | "unarchiveThread"
+  | "deleteThread"
+  | "refreshArchivedThreads"
+  | "fetchArchivedShellSnapshot"
+  | "pinThread"
+  | "unpinThread"
+  | "settleThread"
+  | "unsettleThread"
+  | "updateThreadMetadata"
+  | "openInEditor"
+  | "createProject"
+  | "updateProject"
+  | "deleteProject"
+  | "startProjectClone"
+  | "cloneRepository"
+>;
+
+export type ManagementSidebar = Pick<
+  SidebarController,
+  | "threadsById"
+  | "projectsById"
+  | "threadCountByProject"
+  | "olderSettledByProject"
+  | "activeProject"
+  | "settings"
+  | "clearMultiSelection"
+  | "markUnread"
+>;
+
 export interface ManagementOptions {
-  readonly connection: TuiConnection;
-  readonly sidebar: SidebarController;
+  readonly connection: ManagementConnection;
+  readonly sidebar: ManagementSidebar;
   readonly serverConfig: ServerConfig | null;
   readonly composerStore: ComposerStore;
+  /** Deleting a thread drops the messages still queued for it. */
+  readonly sender: Pick<ComposerSender, "pendingCount" | "forget">;
   readonly logger: T1Logger;
   readonly setStatus: (status: string) => void;
   /** Opens a new-thread draft in the project and focuses the composer. */
@@ -134,8 +172,16 @@ export interface ManagementOptions {
 }
 
 export function useManagement(options: ManagementOptions) {
-  const { connection, sidebar, serverConfig, composerStore, logger, setStatus, openNewThread } =
-    options;
+  const {
+    connection,
+    sidebar,
+    serverConfig,
+    composerStore,
+    sender,
+    logger,
+    setStatus,
+    openNewThread,
+  } = options;
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   /** Remounts the prompt's input so a picked suggestion's text lands with the cursor at its end. */
@@ -192,8 +238,13 @@ export function useManagement(options: ManagementOptions) {
       : connection.browseAtom({ partialPath: debouncedBrowse.partialPath });
   const browseResult = useAtomValue(browseAtom);
   const browsed = Option.getOrNull(AsyncResult.value(browseResult));
+  // Only for what the prompt says now: until the pause ends, the last answer is for older text.
   const suggestions =
-    prompt?.kind === "add-project" && debouncedBrowse !== null && browsed !== null
+    prompt?.kind === "add-project" &&
+    debouncedBrowse !== null &&
+    debouncedBrowse.partialPath === browsePath &&
+    debouncedBrowse.filter === browseFilter &&
+    browsed !== null
       ? projectPathSuggestions(browsed.entries, debouncedBrowse.filter)
       : [];
 
@@ -253,16 +304,26 @@ export function useManagement(options: ManagementOptions) {
     report("Restore", result, "Thread restored");
   };
 
-  /** Deleting always asks, whatever the confirm setting says: it can't be undone. */
+  /** A deleted thread's draft and queued messages go with it; the confirm said so. */
+  const forgetThreads = (threadIds: ReadonlyArray<string>, projectId?: string) => {
+    sender.forget({ threadIds, ...(projectId === undefined ? {} : { projectId }) });
+    for (const threadId of threadIds) composerStore.clearDraft(threadId);
+  };
+
+  /**
+   * Deleting always asks, whatever the confirm setting says: it can't be undone. The confirm
+   * counts the messages still queued for the threads, which go too.
+   */
   const requestDelete = (threadIds: ReadonlyArray<string>, titles?: ReadonlyArray<string>) => {
     if (threadIds.length === 0) return;
+    const pending = sender.pendingCount({ threadIds });
     setConfirm({
-      dialog: openConfirm([deleteThreadsConfirm(titles ?? threadIds.map(threadTitle))]),
+      dialog: openConfirm([deleteThreadsConfirm(titles ?? threadIds.map(threadTitle), pending)]),
       run: async () => {
         const outcome = await runForThreads(threadIds, (threadId) =>
           connection.deleteThread({ threadId: ThreadId.make(threadId) }),
         );
-        for (const threadId of outcome.done) composerStore.clearDraft(threadId);
+        forgetThreads(outcome.done);
         sidebar.clearMultiSelection();
         connection.refreshArchivedThreads();
         setStatus(describeBulkOutcome("Deleted", outcome, describeError));
@@ -355,20 +416,48 @@ export function useManagement(options: ManagementOptions) {
     setPromptRevision((revision) => revision + 1);
   };
 
-  const requestRemoveProject = (projectId: string) => {
+  /**
+   * Counts the project's threads, archived ones included (the server deletes those too),
+   * then asks. Unknown counts get both steps.
+   */
+  const requestRemoveProject = async (projectId: string) => {
+    if (!sidebar.projectsById.has(projectId)) return;
+    setStatus("Counting the project's threads…");
+    const archived = await connection.fetchArchivedShellSnapshot();
     const project = sidebar.projectsById.get(projectId);
     if (!project) return;
-    const threadCount =
-      (sidebar.threadCountByProject.get(ProjectId.make(projectId)) ?? 0) +
-      (sidebar.olderSettledByProject.get(ProjectId.make(projectId)) ?? 0);
+    const archivedIds = archived.ok
+      ? archived.value.threads
+          .filter((thread) => thread.projectId === projectId && thread.archivedAt !== null)
+          .map((thread) => thread.id)
+      : null;
+    const listedIds = [...sidebar.threadsById.values()]
+      .filter((thread) => thread.projectId === projectId)
+      .map((thread) => thread.id);
+    const draftId = composerStore.getNewThreadDraft(projectId)?.threadId;
+    const threadIds = [...listedIds, ...(archivedIds ?? []), ...(draftId ? [draftId] : [])];
+    const pending = sender.pendingCount({ threadIds, projectId });
+    const threads =
+      archivedIds === null
+        ? null
+        : {
+            listed:
+              (sidebar.threadCountByProject.get(ProjectId.make(projectId)) ?? 0) +
+              (sidebar.olderSettledByProject.get(ProjectId.make(projectId)) ?? 0),
+            archived: archivedIds.length,
+          };
     setConfirm({
-      dialog: openConfirm(projectRemovalSteps(project.title, threadCount)),
+      dialog: openConfirm(projectRemovalSteps(project.title, threads, pending)),
       run: async () => {
         // The user confirmed deleting its threads; the server refuses otherwise.
         const result = await connection.deleteProject({
           projectId: ProjectId.make(projectId),
           force: true,
         });
+        if (result.ok) {
+          forgetThreads(threadIds, projectId);
+          if (draftId) composerStore.closeNewThreadDraft(draftId);
+        }
         report("Remove project", result, `Removed project ${project.title}`);
       },
     });

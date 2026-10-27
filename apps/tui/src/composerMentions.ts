@@ -12,11 +12,11 @@ export const MENTION_SEARCH_DEBOUNCE_MS = 120;
 export interface MentionQuery {
   /** What follows the `@`. */
   readonly query: string;
-  /** Characters from the `@` to the cursor, which picking an entry replaces. */
+  /** UTF-16 units from the `@` to the cursor, which picking an entry replaces. */
   readonly length: number;
 }
 
-/** The `@query` the cursor ends, if any. `cursor` counts characters, as the textarea does. */
+/** The `@query` the cursor ends, if any. `cursor` counts UTF-16 units; see `textareaOffsets.ts`. */
 export function mentionQueryAt(text: string, cursor: number): MentionQuery | null {
   const trigger = detectComposerTrigger(text, cursor);
   if (trigger?.kind !== "path") return null;

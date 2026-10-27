@@ -139,6 +139,11 @@ export function useSidebarController(options: SidebarControllerOptions) {
     () => new Map<string, SidebarThread>(threads.map((thread) => [thread.id, thread])),
     [threads],
   );
+  /** Threads the sidebar lists, for keeping the multi-selection on live rows. */
+  const listedThreadIds = useMemo(
+    () => new Set(groups.flatMap((group) => group.threads.map((thread) => thread.id))),
+    [groups],
+  );
   const threadCountByProject = useMemo(
     () => new Map(groups.map((group) => [group.project.id, group.threads.length])),
     [groups],
@@ -196,9 +201,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
       );
       if (pruned !== expandedProjectIds) setExpandedProjectIds(pruned);
     }
-    const prunedSelection = pruneThreadSelection(multiSelection, (threadId) =>
-      groups.some((group) => group.threads.some((thread) => thread.id === threadId)),
-    );
+    const prunedSelection = pruneThreadSelection(multiSelection, listedThreadIds);
     if (prunedSelection !== multiSelection) setMultiSelection(prunedSelection);
   }
   if (!initialized && hasSnapshot) {
