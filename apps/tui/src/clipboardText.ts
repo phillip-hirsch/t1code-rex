@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
-
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeChildProcess from "node:child_process";
 export type ClipboardCopyCommand = readonly [command: string, ...args: string[]];
 
 export function resolveClipboardCopyCommands(
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
   platform: NodeJS.Platform = process.platform,
 ): readonly ClipboardCopyCommand[] {
   if (platform === "darwin") return [["pbcopy"]];
@@ -32,6 +33,7 @@ export async function copyTextToClipboard(value: string): Promise<void> {
   const commands = resolveClipboardCopyCommands();
 
   if (commands.length === 0) {
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
     throw new Error(`Clipboard copy is not supported on ${process.platform}.`);
   }
 
@@ -39,7 +41,7 @@ export async function copyTextToClipboard(value: string): Promise<void> {
   for (const command of commands) {
     try {
       await new Promise<void>((resolve, reject) => {
-        const child = spawn(command[0], command.slice(1), {
+        const child = NodeChildProcess.spawn(command[0], command.slice(1), {
           stdio: ["pipe", "ignore", "pipe"],
         });
 

@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { resolveClipboardCopyCommands } from "./clipboardText";
+import { resolveClipboardCopyCommands } from "./clipboardText.ts";
 
 describe("resolveClipboardCopyCommands", () => {
   it("uses pbcopy on macOS", () => {

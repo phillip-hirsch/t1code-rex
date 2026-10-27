@@ -1,9 +1,4 @@
-import type {
-  ProviderKind,
-  ProviderModelOptions,
-  ProviderOptionDescriptor,
-  ProviderOptionSelection,
-} from "@t3tools/contracts";
+import type { ProviderOptionDescriptor, ProviderOptionSelection } from "@t3tools/contracts";
 import {
   getProviderOptionCurrentLabel,
   getProviderOptionCurrentValue,
@@ -40,34 +35,6 @@ export function filterProviderOptionSelectionsForDescriptors(
   const descriptorIds = new Set((descriptors ?? []).map((descriptor) => descriptor.id));
   const filtered = (selections ?? []).filter((selection) => descriptorIds.has(selection.id));
   return filtered.length > 0 ? filtered : undefined;
-}
-
-export function modelOptionsToProviderOptionSelections(
-  provider: ProviderKind,
-  modelOptions: ProviderModelOptions | null | undefined,
-): ProviderOptionSelection[] | undefined {
-  const selections: ProviderOptionSelection[] = [];
-  if (provider === "codex") {
-    const options = modelOptions?.codex;
-    if (options?.reasoningEffort) {
-      selections.push({ id: "reasoningEffort", value: options.reasoningEffort });
-    }
-    if (options?.fastMode === true) {
-      selections.push({ id: "fastMode", value: true });
-    }
-  } else {
-    const options = modelOptions?.claudeAgent;
-    if (options?.thinking !== undefined) {
-      selections.push({ id: "thinking", value: options.thinking });
-    }
-    if (options?.effort) {
-      selections.push({ id: "effort", value: options.effort });
-    }
-    if (options?.fastMode === true) {
-      selections.push({ id: "fastMode", value: true });
-    }
-  }
-  return selections.length > 0 ? selections : undefined;
 }
 
 function getOptionDefaultValue(descriptor: ProviderOptionDescriptor): string | boolean | undefined {

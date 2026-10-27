@@ -1,69 +1,38 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFSP from "node:fs/promises";
+import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const tuiRoot = path.resolve(scriptDir, "..");
-const repoRoot = path.resolve(tuiRoot, "../..");
-const serverRoot = path.resolve(repoRoot, "apps/server");
-const serverDistSource = path.resolve(serverRoot, "dist");
-const serverDistTarget = path.resolve(tuiRoot, "dist/server");
-const serverClientSource = path.resolve(serverDistSource, "client");
-const nodePtyTarget = path.resolve(serverDistTarget, "node_modules/node-pty");
-const serverBundleExternalModules = ["node-pty", "ws"];
-const nodePtyRuntimeEntries = [
-  "LICENSE",
-  "README.md",
-  "package.json",
-  "lib",
-  "prebuilds",
-  "typings",
-];
+/**
+ * Builds upstream's server with Vite+ and stages its `dist` next to the TUI
+ * bundle as `dist/server`, plus the native packages the server loads from
+ * disk at runtime. The TUI launcher runs `dist/server/bin.mjs` with Node.
+ */
+
+const scriptDir = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const tuiRoot = NodePath.resolve(scriptDir, "..");
+const repoRoot = NodePath.resolve(tuiRoot, "../..");
+const serverRoot = NodePath.resolve(repoRoot, "apps/server");
+const serverDistSource = NodePath.resolve(serverRoot, "dist");
+const serverDistTarget = NodePath.resolve(tuiRoot, "dist/server");
+const serverRequire = NodeModule.createRequire(NodePath.join(serverRoot, "package.json"));
+// Kept in step with CLI_RUNTIME_EXTERNAL_PREFIXES in scripts/lib/cli-external-packages.ts.
+const runtimeExternalPackages = ["node-pty"];
+const runtimeEntries = ["LICENSE", "README.md", "package.json", "lib", "prebuilds", "typings"];
 
 async function exists(targetPath) {
   try {
-    await fs.access(targetPath);
+    await NodeFSP.access(targetPath);
     return true;
   } catch {
     return false;
   }
 }
 
-async function resolveNodePtySource() {
-  const directCandidates = [
-    path.resolve(tuiRoot, "node_modules/node-pty"),
-    path.resolve(repoRoot, "node_modules/node-pty"),
-  ];
-
-  for (const candidate of directCandidates) {
-    if (await exists(candidate)) {
-      return candidate;
-    }
-  }
-
-  const bunStoreDir = path.resolve(repoRoot, "node_modules/.bun");
-  const bunStoreEntries = await fs.readdir(bunStoreDir, { withFileTypes: true }).catch(() => []);
-
-  for (const entry of bunStoreEntries) {
-    if (!entry.isDirectory() || !entry.name.startsWith("node-pty@")) {
-      continue;
-    }
-
-    const candidate = path.resolve(bunStoreDir, entry.name, "node_modules/node-pty");
-    if (await exists(candidate)) {
-      return candidate;
-    }
-  }
-
-  throw new Error(
-    `Unable to locate node-pty runtime files under ${tuiRoot}/node_modules or ${bunStoreDir}.`,
-  );
-}
-
 function run(command, args, cwd) {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = NodeChildProcess.spawn(command, args, {
       cwd,
       stdio: "inherit",
       env: process.env,
@@ -83,33 +52,27 @@ function run(command, args, cwd) {
   });
 }
 
-await run("bun", ["run", "build"], serverRoot);
-await fs.rm(serverDistTarget, { recursive: true, force: true });
-await fs.mkdir(path.dirname(serverDistTarget), { recursive: true });
-await run(
-  "bun",
-  [
-    "build",
-    "src/index.ts",
-    "--target=node",
-    "--format=esm",
-    "--splitting",
-    "--packages=bundle",
-    ...serverBundleExternalModules.flatMap((moduleName) => ["--external", moduleName]),
-    "--outdir",
-    serverDistTarget,
-  ],
-  serverRoot,
-);
-if (await exists(serverClientSource)) {
-  await fs.cp(serverClientSource, path.resolve(serverDistTarget, "client"), { recursive: true });
+function resolvePackageDir(name) {
+  return NodePath.dirname(serverRequire.resolve(`${name}/package.json`));
 }
-const nodePtySource = await resolveNodePtySource();
-await fs.mkdir(path.dirname(nodePtyTarget), { recursive: true });
-await fs.rm(nodePtyTarget, { recursive: true, force: true });
-await fs.mkdir(nodePtyTarget, { recursive: true });
-for (const entry of nodePtyRuntimeEntries) {
-  await fs.cp(path.resolve(nodePtySource, entry), path.resolve(nodePtyTarget, entry), {
-    recursive: true,
-  });
+
+await run("vp", ["run", "build"], serverRoot);
+if (!(await exists(NodePath.join(serverDistSource, "bin.mjs")))) {
+  throw new Error(`Server build did not produce ${serverDistSource}/bin.mjs.`);
+}
+await NodeFSP.rm(serverDistTarget, { recursive: true, force: true });
+await NodeFSP.mkdir(NodePath.dirname(serverDistTarget), { recursive: true });
+await NodeFSP.cp(serverDistSource, serverDistTarget, { recursive: true });
+
+for (const name of runtimeExternalPackages) {
+  const source = resolvePackageDir(name);
+  const target = NodePath.resolve(serverDistTarget, "node_modules", name);
+  await NodeFSP.rm(target, { recursive: true, force: true });
+  await NodeFSP.mkdir(target, { recursive: true });
+  for (const entry of runtimeEntries) {
+    const entrySource = NodePath.resolve(source, entry);
+    if (await exists(entrySource)) {
+      await NodeFSP.cp(entrySource, NodePath.resolve(target, entry), { recursive: true });
+    }
+  }
 }

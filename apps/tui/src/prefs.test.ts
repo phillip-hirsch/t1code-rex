@@ -1,23 +1,24 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import type { TuiPaths } from "./config";
-import { readPrefs, writePrefs } from "./prefs";
+import type { TuiPaths } from "./config.ts";
+import { readPrefs, writePrefs } from "./prefs.ts";
 
 async function makePaths(): Promise<{ root: string; paths: TuiPaths }> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "t1code-prefs-"));
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-prefs-"));
   return {
     root,
     paths: {
-      userHomeDir: path.join(root, "user-home"),
-      homeDir: path.join(root, "home"),
-      configHomeDir: path.join(root, "config"),
-      stateHomeDir: path.join(root, "state"),
-      prefsPath: path.join(root, "config", "prefs.json"),
-      logPath: path.join(root, "state", "tui.log"),
-      imagesDir: path.join(root, "state", "images"),
+      userHomeDir: NodePath.join(root, "user-home"),
+      homeDir: NodePath.join(root, "home"),
+      configHomeDir: NodePath.join(root, "config"),
+      stateHomeDir: NodePath.join(root, "state"),
+      prefsPath: NodePath.join(root, "config", "prefs.json"),
+      logPath: NodePath.join(root, "state", "tui.log"),
+      imagesDir: NodePath.join(root, "state", "images"),
     },
   };
 }
@@ -26,7 +27,7 @@ const tempRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
+    tempRoots.splice(0).map((root) => NodeFSP.rm(root, { recursive: true, force: true })),
   );
 });
 

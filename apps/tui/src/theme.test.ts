@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   DEFAULT_TUI_THEME,
@@ -8,7 +8,7 @@ import {
   normalizeTuiThemeId,
   resolveTuiTheme,
   resolveTuiThemeMode,
-} from "./theme";
+} from "./theme.ts";
 
 const SAMPLE_TERMINAL_COLORS: TerminalColors = {
   palette: [

@@ -1,7 +1,7 @@
-import os from "node:os";
-import { describe, expect, it, vi } from "vitest";
+import * as NodeOS from "node:os";
+import { describe, expect, it } from "vite-plus/test";
 
-import { resolveTuiPaths } from "./config";
+import { resolveTuiPaths } from "./config.ts";
 
 describe("resolveTuiPaths", () => {
   it("prefers TUI-specific paths", () => {
@@ -12,7 +12,7 @@ describe("resolveTuiPaths", () => {
     });
 
     expect(paths).toEqual({
-      userHomeDir: os.homedir(),
+      userHomeDir: NodeOS.homedir(),
       homeDir: "/tmp/t1-home",
       configHomeDir: "/tmp/t1-config",
       stateHomeDir: "/tmp/t1-state",
@@ -23,14 +23,14 @@ describe("resolveTuiPaths", () => {
   });
 
   it("uses XDG config, data, and state locations on Linux", () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("linux");
-    vi.spyOn(os, "homedir").mockReturnValue("/Users/tester");
-
-    const paths = resolveTuiPaths({
-      XDG_CONFIG_HOME: "/var/config",
-      XDG_DATA_HOME: "/var/data",
-      XDG_STATE_HOME: "/var/state",
-    });
+    const paths = resolveTuiPaths(
+      {
+        XDG_CONFIG_HOME: "/var/config",
+        XDG_DATA_HOME: "/var/data",
+        XDG_STATE_HOME: "/var/state",
+      },
+      { homeDir: "/Users/tester", platform: "linux" },
+    );
 
     expect(paths).toEqual({
       userHomeDir: "/Users/tester",
@@ -44,10 +44,7 @@ describe("resolveTuiPaths", () => {
   });
 
   it("keeps legacy defaults on non-Linux platforms", () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
-    vi.spyOn(os, "homedir").mockReturnValue("/Users/tester");
-
-    const paths = resolveTuiPaths({});
+    const paths = resolveTuiPaths({}, { homeDir: "/Users/tester", platform: "darwin" });
 
     expect(paths).toEqual({
       userHomeDir: "/Users/tester",

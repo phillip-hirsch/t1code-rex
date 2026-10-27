@@ -33,16 +33,19 @@
     "postpack": "node scripts/restore-package-json.mjs",
     "start": "bun dist/index.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vp test run"
   },
   "dependencies": {
+    "@effect/atom-react": "catalog:",
     "@opentui/core": "0.2.7",
     "@opentui/react": "0.2.7",
+    "@t3tools/client-runtime": "workspace:*",
     "effect": "catalog:",
     "react": "^19.0.0",
     "react-devtools-core": "^7.0.1",
+    "scheduler": "^0.27.0",
     "web-tree-sitter": "0.25.10",
-    "ws": "^8.18.0"
+    "ws": "catalog:"
   },
   "devDependencies": {
     "@t3tools/client-core": "workspace:*",
@@ -50,9 +53,7 @@
     "@t3tools/shared": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "^19.0.0",
-    "tsdown": "^0.20.3",
-    "typescript": "catalog:",
-    "vitest": "^4.0.0"
+    "typescript": "catalog:"
   },
   "optionalDependencies": {
     "@opentui/core-darwin-arm64": "0.2.7",

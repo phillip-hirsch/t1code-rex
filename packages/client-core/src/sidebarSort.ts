@@ -1,4 +1,4 @@
-import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "./appSettings";
+import type { SidebarProjectSortOrder, SidebarThreadSortOrder } from "./appSettings.ts";
 
 type SidebarMessage = {
   role?: string | null | undefined;

@@ -1,9 +1,8 @@
 #!/usr/bin/env bun
 
-import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
-
-const entryPath = fileURLToPath(new URL("../dist/index.mjs", import.meta.url));
+import * as NodeChildProcess from "node:child_process";
+import * as NodeURL from "node:url";
+const entryPath = NodeURL.fileURLToPath(new URL("../dist/index.mjs", import.meta.url));
 
 function printError(error) {
   process.stderr.write(
@@ -13,7 +12,7 @@ function printError(error) {
 
 if (process.versions.bun === undefined) {
   const bunBin = process.env.T1CODE_BUN_BIN?.trim() || "bun";
-  const child = spawn(bunBin, [entryPath, ...process.argv.slice(2)], {
+  const child = NodeChildProcess.spawn(bunBin, [entryPath, ...process.argv.slice(2)], {
     stdio: "inherit",
     env: process.env,
   });

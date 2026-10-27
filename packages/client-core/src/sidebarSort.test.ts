@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { sortProjectsForSidebar, sortThreadsForSidebar } from "./sidebarSort";
+import { sortProjectsForSidebar, sortThreadsForSidebar } from "./sidebarSort.ts";
 
 describe("sortThreadsForSidebar", () => {
   it("does not reorder a thread when only assistant activity updates updatedAt", () => {

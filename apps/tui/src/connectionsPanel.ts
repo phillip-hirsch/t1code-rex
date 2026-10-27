@@ -3,19 +3,24 @@ import type { AdvertisedEndpoint } from "@t3tools/contracts";
 export interface TuiServerConnectionInfo {
   readonly host: string;
   readonly port: string;
-  readonly authToken: string | null;
+  readonly bearerToken: string | null;
 }
 
-export function parseTuiServerConnection(rawUrl: string): TuiServerConnectionInfo | null {
+/** Reads host and port from a server's http(s) or ws(s) base URL. */
+export function parseTuiServerConnection(
+  rawUrl: string,
+  bearerToken: string | null = null,
+): TuiServerConnectionInfo | null {
   try {
     const parsed = new URL(rawUrl);
-    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    const secure = parsed.protocol === "https:" || parsed.protocol === "wss:";
+    if (!secure && parsed.protocol !== "http:" && parsed.protocol !== "ws:") {
       return null;
     }
     return {
       host: parsed.hostname,
-      port: parsed.port || (parsed.protocol === "wss:" ? "443" : "80"),
-      authToken: parsed.searchParams.get("token")?.trim() || null,
+      port: parsed.port || (secure ? "443" : "80"),
+      bearerToken: bearerToken?.trim() || null,
     };
   } catch {
     return null;
@@ -31,17 +36,16 @@ export function buildTuiAttachCommand(input: TuiServerConnectionInfo): string {
     ["T1CODE_TUI_ATTACH_ONLY", "1"],
     ["T1CODE_HOST", input.host],
     ["T1CODE_PORT", input.port],
-    ...(input.authToken ? ([["T1CODE_AUTH_TOKEN", input.authToken]] as const) : []),
+    ...(input.bearerToken ? ([["T1CODE_AUTH_TOKEN", input.bearerToken]] as const) : []),
   ];
   return `env ${env.map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ")} t1code`;
 }
 
 export function formatTuiAttachCommandPreview(input: TuiServerConnectionInfo): string {
-  const maskedInput = {
+  return buildTuiAttachCommand({
     ...input,
-    authToken: input.authToken ? "••••••••" : null,
-  };
-  return buildTuiAttachCommand(maskedInput);
+    bearerToken: input.bearerToken ? "••••••••" : null,
+  });
 }
 
 export function formatEndpointStatus(endpoint: AdvertisedEndpoint): string {

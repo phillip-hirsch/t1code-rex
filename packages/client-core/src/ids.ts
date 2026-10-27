@@ -1,6 +1,7 @@
 import { CommandId, MessageId, ProjectId, ThreadId } from "@t3tools/contracts";
 export function randomUUID(): string {
   if (typeof crypto.randomUUID === "function") {
+    // @effect-diagnostics-next-line cryptoRandomUUID:off -- Ids are minted outside the Effect runtime.
     return crypto.randomUUID();
   }
   return "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (digit) =>

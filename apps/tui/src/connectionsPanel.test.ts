@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildTuiAttachCommand,
@@ -6,15 +6,21 @@ import {
   formatEndpointStatus,
   formatTuiAttachCommandPreview,
   parseTuiServerConnection,
-} from "./connectionsPanel";
+} from "./connectionsPanel.ts";
 
 describe("connectionsPanel", () => {
-  it("parses websocket connection metadata", () => {
-    expect(parseTuiServerConnection("ws://127.0.0.1:3773/?token=abc")).toEqual({
+  it("parses server base URLs and keeps the bearer out of the URL", () => {
+    expect(parseTuiServerConnection("http://127.0.0.1:3773", "abc")).toEqual({
       host: "127.0.0.1",
       port: "3773",
-      authToken: "abc",
+      bearerToken: "abc",
     });
+    expect(parseTuiServerConnection("wss://host.example")).toEqual({
+      host: "host.example",
+      port: "443",
+      bearerToken: null,
+    });
+    expect(parseTuiServerConnection("file:///tmp")).toBeNull();
   });
 
   it("builds an attach-only TUI command without rendering the token separately", () => {
@@ -22,7 +28,7 @@ describe("connectionsPanel", () => {
       buildTuiAttachCommand({
         host: "127.0.0.1",
         port: "3773",
-        authToken: "secret token",
+        bearerToken: "secret token",
       }),
     ).toBe(
       "env T1CODE_TUI_ATTACH_ONLY='1' T1CODE_HOST='127.0.0.1' T1CODE_PORT='3773' T1CODE_AUTH_TOKEN='secret token' t1code",
@@ -31,7 +37,7 @@ describe("connectionsPanel", () => {
       formatTuiAttachCommandPreview({
         host: "127.0.0.1",
         port: "3773",
-        authToken: "secret token",
+        bearerToken: "secret token",
       }),
     ).toBe(
       "env T1CODE_TUI_ATTACH_ONLY='1' T1CODE_HOST='127.0.0.1' T1CODE_PORT='3773' T1CODE_AUTH_TOKEN='••••••••' t1code",

@@ -1,12 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import {
   filterProviderOptionSelectionsForDescriptors,
   mergeProviderOptionSelections,
-  modelOptionsToProviderOptionSelections,
   providerOptionTraitsLabel,
   selectedContextWindowLabel,
   setProviderOptionSelection,
-} from "./providerOptionSelections";
+} from "./providerOptionSelections.ts";
 
 describe("provider option selections", () => {
   it("merges generic selections over legacy model options", () => {
@@ -54,18 +53,6 @@ describe("provider option selections", () => {
         ],
       ),
     ).toEqual([{ id: "contextWindow", value: "1m" }]);
-  });
-
-  it("converts legacy provider model options into generic selections", () => {
-    expect(
-      modelOptionsToProviderOptionSelections("claudeAgent", {
-        claudeAgent: { effort: "high", thinking: false, fastMode: true },
-      }),
-    ).toEqual([
-      { id: "thinking", value: false },
-      { id: "effort", value: "high" },
-      { id: "fastMode", value: true },
-    ]);
   });
 
   it("labels descriptor-backed effort values outside legacy Claude options", () => {

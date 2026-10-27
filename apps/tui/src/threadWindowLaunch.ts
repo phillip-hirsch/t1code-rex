@@ -1,21 +1,22 @@
-import { randomBytes } from "node:crypto";
-import fs from "node:fs";
-import path from "node:path";
-import type { TuiPaths } from "./config";
+// @effect-diagnostics globalTimers:off nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import type { TuiPaths } from "./config.ts";
 
 /**
  * A thread window is a second T1Code instance, opened in its own Rex tab,
  * that attaches to the server of the window that opened it and starts on one
- * thread. Launch details travel in a one-shot file (mode 0600) so the server
- * auth token never appears in process arguments.
+ * thread. Launch details travel in a one-shot file (mode 0600) so the bearer
+ * token never appears in process arguments.
  */
 
 export const THREAD_WINDOW_LAUNCH_ENV = "T1CODE_THREAD_WINDOW_FILE";
 
 export interface ThreadWindowServer {
-  readonly host: string;
-  readonly port: number;
-  readonly authToken: string;
+  readonly httpBaseUrl: string;
+  readonly wsBaseUrl: string;
+  readonly bearerToken: string;
 }
 
 export interface ThreadWindowLaunch {
@@ -28,6 +29,15 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function isUrlWithProtocol(value: unknown, protocols: ReadonlyArray<string>): value is string {
+  if (!isNonEmptyString(value)) return false;
+  try {
+    return protocols.includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+}
+
 export function parseThreadWindowLaunch(raw: string): ThreadWindowLaunch | null {
   let parsed: unknown;
   try {
@@ -38,27 +48,29 @@ export function parseThreadWindowLaunch(raw: string): ThreadWindowLaunch | null 
   if (typeof parsed !== "object" || parsed === null) return null;
   const { server, projectId, threadId } = parsed as Record<string, unknown>;
   if (typeof server !== "object" || server === null) return null;
-  const { host, port, authToken } = server as Record<string, unknown>;
+  const { httpBaseUrl, wsBaseUrl, bearerToken } = server as Record<string, unknown>;
   if (
-    !isNonEmptyString(host) ||
-    typeof port !== "number" ||
-    !Number.isInteger(port) ||
-    !isNonEmptyString(authToken) ||
+    !isUrlWithProtocol(httpBaseUrl, ["http:", "https:"]) ||
+    !isUrlWithProtocol(wsBaseUrl, ["ws:", "wss:"]) ||
+    !isNonEmptyString(bearerToken) ||
     !isNonEmptyString(projectId) ||
     !isNonEmptyString(threadId)
   ) {
     return null;
   }
-  return { server: { host, port, authToken }, projectId, threadId };
+  return { server: { httpBaseUrl, wsBaseUrl, bearerToken }, projectId, threadId };
 }
 
 export async function writeThreadWindowLaunch(
   directory: string,
   launch: ThreadWindowLaunch,
 ): Promise<string> {
-  await fs.promises.mkdir(directory, { recursive: true, mode: 0o700 });
-  const filePath = path.join(directory, `thread-window-${randomBytes(8).toString("hex")}.json`);
-  await fs.promises.writeFile(filePath, JSON.stringify(launch), { mode: 0o600, flag: "wx" });
+  await NodeFS.promises.mkdir(directory, { recursive: true, mode: 0o700 });
+  const filePath = NodePath.join(
+    directory,
+    `thread-window-${NodeCrypto.randomBytes(8).toString("hex")}.json`,
+  );
+  await NodeFS.promises.writeFile(filePath, JSON.stringify(launch), { mode: 0o600, flag: "wx" });
   return filePath;
 }
 
@@ -69,9 +81,10 @@ export const THREAD_WINDOW_LAUNCH_TTL_MS = 60_000;
 export function expireThreadWindowLaunch(
   filePath: string,
   ttlMs: number = THREAD_WINDOW_LAUNCH_TTL_MS,
+  schedule: (callback: () => void, ms: number) => { unref: () => unknown } = setTimeout,
 ): void {
-  setTimeout(() => {
-    void fs.promises.rm(filePath, { force: true });
+  schedule(() => {
+    void NodeFS.promises.rm(filePath, { force: true });
   }, ttlMs).unref();
 }
 
@@ -88,9 +101,9 @@ export function consumeThreadWindowLaunch(
   if (!filePath) return null;
   let raw: string | null = null;
   try {
-    raw = fs.readFileSync(filePath, "utf8");
+    raw = NodeFS.readFileSync(filePath, "utf8");
   } catch {}
-  fs.rmSync(filePath, { force: true });
+  NodeFS.rmSync(filePath, { force: true });
   const launch = raw === null ? null : parseThreadWindowLaunch(raw);
   if (!launch) {
     throw new Error(

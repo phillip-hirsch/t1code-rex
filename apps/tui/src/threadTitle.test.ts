@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { DEFAULT_THREAD_TITLE, truncateTitle, truncateTitleForDisplay } from "./threadTitle";
+import { DEFAULT_THREAD_TITLE, truncateTitle, truncateTitleForDisplay } from "./threadTitle.ts";
 
 describe("threadTitle", () => {
   it("exports the placeholder title used before provider naming arrives", () => {

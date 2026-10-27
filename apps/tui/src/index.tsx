@@ -1,21 +1,36 @@
-import fs from "node:fs/promises";
-import path from "node:path";
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- The entrypoint runs on Bun outside the Effect runtime.
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 import { createCliRenderer } from "@opentui/core";
 import { createTestRenderer } from "@opentui/core/testing";
 import { createRoot } from "@opentui/react";
 import React from "react";
 import { DEFAULT_APP_THEME } from "@t3tools/client-core";
-import { resolveTuiPaths } from "./config";
-import { readPrefs } from "./prefs";
+
+import packageJson from "../package.json" with { type: "json" };
+import { resolveTuiPaths, type TuiPaths } from "./config.ts";
+import { createTuiConnection } from "./connection/tuiConnection.ts";
+import { createT1Logger, type T1Logger } from "./log.ts";
+import { readPrefs } from "./prefs.ts";
 import {
   normalizeRendererThemeMode,
   resolveTerminalPalette,
   shouldResolveTerminalPalette,
   shouldTrackSystemThemeMode,
-} from "./rendererTheme";
-import { normalizeTuiThemeId, resolveTerminalThemeMode, resolveTuiTheme } from "./theme";
-import { consumeThreadWindowLaunch } from "./threadWindowLaunch";
-import { App } from "./ui";
+} from "./rendererTheme.ts";
+import {
+  attachServerSession,
+  managedServerSession,
+  resolveAttachedServerConnection,
+  startManagedServer,
+  type TuiServerSession,
+} from "./serverLauncher.ts";
+import { normalizeTuiThemeId, resolveTerminalThemeMode, resolveTuiTheme } from "./theme.ts";
+import { consumeThreadWindowLaunch, type ThreadWindowLaunch } from "./threadWindowLaunch.ts";
+import { App } from "./ui.tsx";
+
+// oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
+const HOST_PLATFORM = process.platform;
 
 function readBooleanEnv(value: string | undefined): boolean | undefined {
   if (!value) return undefined;
@@ -48,29 +63,94 @@ function shouldEnableMouseMovement(env: NodeJS.ProcessEnv = process.env): boolea
   return readBooleanEnv(env.T1CODE_ENABLE_MOUSE_MOVEMENT) ?? false;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Thread tabs attach to the window that opened them, attach-only runs join a
+ * server the user points at, and everything else starts a server on T1Code's
+ * own data directory (never ~/.t3, which the user's T3 Code owns).
+ */
+async function resolveServerSession(
+  paths: TuiPaths,
+  logger: T1Logger,
+  threadWindowLaunch: ThreadWindowLaunch | null,
+): Promise<TuiServerSession> {
+  if (threadWindowLaunch) {
+    return attachServerSession(threadWindowLaunch.server, "thread-window");
+  }
+  const attached = resolveAttachedServerConnection();
+  if (attached) {
+    return attachServerSession(attached, "attached");
+  }
+  const server = await startManagedServer({
+    baseDir: paths.homeDir,
+    onLog: (event, details) => logger.log(event, details),
+    onRestart: ({ attempt }) => logger.log("server.restarting", { attempt }),
+    onFatal: (message) => process.stderr.write(`${message}\n`),
+  });
+  return managedServerSession(server);
+}
+
+const paths = resolveTuiPaths();
+const logger = createT1Logger(paths.logPath);
+let threadWindowLaunch: ThreadWindowLaunch | null = null;
+try {
+  threadWindowLaunch = consumeThreadWindowLaunch();
+} catch (error) {
+  process.stderr.write(`${errorMessage(error)}\n`);
+  process.exit(1);
+}
+
+let session: TuiServerSession;
+try {
+  session = await resolveServerSession(paths, logger, threadWindowLaunch);
+} catch (error) {
+  logger.log("server.start.failed", { error: errorMessage(error) });
+  process.stderr.write(
+    `T1Code could not reach a server: ${errorMessage(error)}\nSee ${paths.logPath}.\n`,
+  );
+  process.exit(1);
+}
+
+const connection = createTuiConnection({
+  session,
+  appVersion: packageJson.version ?? "0.0.0",
+  platformOs: HOST_PLATFORM,
+});
+const prefs = await readPrefs(paths);
+const appTheme = prefs.appSettings?.theme ?? DEFAULT_APP_THEME;
+const tuiThemeId = normalizeTuiThemeId(prefs.tuiThemeId);
+
 if (process.env.T1CODE_HEADLESS === "1") {
-  const paths = resolveTuiPaths();
   const outputPath =
     process.env.T1CODE_HEADLESS_FRAME_PATH?.trim() ||
-    path.join(paths.configHomeDir, "headless-frame.txt");
+    NodePath.join(paths.configHomeDir, "headless-frame.txt");
   const timeoutMs = Number(process.env.T1CODE_HEADLESS_TIMEOUT_MS ?? 1_500);
   const width = Number(process.env.T1CODE_HEADLESS_WIDTH ?? 160);
   const height = Number(process.env.T1CODE_HEADLESS_HEIGHT ?? 48);
-  const testSetup = await createTestRenderer({
-    width,
-    height,
-    kittyKeyboard: true,
-  });
+  const testSetup = await createTestRenderer({ width, height, kittyKeyboard: true });
   const root = createRoot(testSetup.renderer);
-  root.render(<App renderer={testSetup.renderer} />);
+  root.render(
+    <App
+      renderer={testSetup.renderer}
+      connection={connection}
+      paths={paths}
+      logger={logger}
+      theme={resolveTuiTheme(appTheme, tuiThemeId)}
+      threadWindowLaunch={threadWindowLaunch}
+    />,
+  );
 
   setTimeout(() => {
     void (async () => {
       await testSetup.renderOnce();
-      await fs.mkdir(path.dirname(outputPath), { recursive: true });
-      await fs.writeFile(outputPath, testSetup.captureCharFrame(), "utf8");
+      await NodeFSP.mkdir(NodePath.dirname(outputPath), { recursive: true });
+      await NodeFSP.writeFile(outputPath, testSetup.captureCharFrame(), "utf8");
       root.unmount();
       testSetup.renderer.destroy();
+      connection.dispose();
       process.stdout.write(`Headless frame written to ${outputPath}\n`);
       process.exit(0);
     })();
@@ -78,17 +158,6 @@ if (process.env.T1CODE_HEADLESS === "1") {
 } else {
   let shuttingDown = false;
   let interruptRequestToken = 0;
-  let threadWindowLaunch: ReturnType<typeof consumeThreadWindowLaunch>;
-  try {
-    threadWindowLaunch = consumeThreadWindowLaunch();
-  } catch (error) {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-    process.exit(1);
-  }
-  const paths = resolveTuiPaths();
-  const prefs = await readPrefs(paths);
-  const appTheme = prefs.appSettings?.theme ?? DEFAULT_APP_THEME;
-  const tuiThemeId = normalizeTuiThemeId(prefs.tuiThemeId);
   const tracksSystemThemeMode = shouldTrackSystemThemeMode(appTheme);
   const usesTerminalPalette = shouldResolveTerminalPalette(tuiThemeId);
   const shouldDeferInitialBackground = tracksSystemThemeMode || usesTerminalPalette;
@@ -114,21 +183,6 @@ if (process.env.T1CODE_HEADLESS === "1") {
   renderer.setBackgroundColor?.(rendererTheme.palette.canvas);
   const root = createRoot(renderer);
 
-  const renderApp = () => {
-    root.render(
-      <App
-        renderer={renderer}
-        interruptRequestToken={interruptRequestToken}
-        onRequestExit={() => shutdown(0)}
-        initialTuiThemeId={tuiThemeId}
-        initialSystemThemeMode={initialSystemThemeMode}
-        initialTerminalThemeColors={detectedTerminalPalette.colors}
-        threadWindowLaunch={threadWindowLaunch}
-        {...(prefs.appSettings ? { initialAppSettings: prefs.appSettings } : {})}
-      />,
-    );
-  };
-
   const shutdown = (code = 0, error?: unknown) => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -137,6 +191,9 @@ if (process.env.T1CODE_HEADLESS === "1") {
     } catch {}
     try {
       renderer.destroy();
+    } catch {}
+    try {
+      connection.dispose();
     } catch {}
     if (error) {
       process.stderr.write(
@@ -149,6 +206,21 @@ if (process.env.T1CODE_HEADLESS === "1") {
     setTimeout(() => {
       process.exit(process.exitCode ?? code);
     }, 50).unref();
+  };
+
+  const renderApp = () => {
+    root.render(
+      <App
+        renderer={renderer}
+        connection={connection}
+        paths={paths}
+        logger={logger}
+        theme={rendererTheme}
+        interruptRequestToken={interruptRequestToken}
+        onRequestExit={() => shutdown(0)}
+        threadWindowLaunch={threadWindowLaunch}
+      />,
+    );
   };
 
   const signalHandlers = [

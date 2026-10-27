@@ -1,9 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 import {
   createDeferredComposerSyncState,
   invalidateDeferredComposerSync,
   scheduleDeferredComposerSync,
-} from "./composerSync";
+} from "./composerSync.ts";
 
 describe("composerSync", () => {
   it("runs only the latest scheduled sync", () => {

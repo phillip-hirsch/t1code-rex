@@ -1,6 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 
-import { openExternalUrl, resolveOpenExternalCommands } from "./openExternal";
+import { openExternalUrl, resolveOpenExternalCommands } from "./openExternal.ts";
 
 describe("resolveOpenExternalCommands", () => {
   it("prefers Linux desktop openers", () => {

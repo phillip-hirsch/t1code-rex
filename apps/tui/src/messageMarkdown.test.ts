@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 const filetypeByExtension = new Map([
   ["go", "go"],
@@ -26,7 +26,7 @@ import {
   isDiffLikeCodeBlockFiletype,
   parseMessageMarkdownSegments,
   resolveCodeBlockFiletype,
-} from "./messageMarkdown";
+} from "./messageMarkdown.ts";
 
 describe("parseMessageMarkdownSegments", () => {
   it("keeps plain markdown as a single segment", () => {

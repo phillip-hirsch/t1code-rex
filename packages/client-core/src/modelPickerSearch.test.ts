@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { rankModelPickerItems, scoreModelPickerSearch } from "./modelPickerSearch";
+import { rankModelPickerItems, scoreModelPickerSearch } from "./modelPickerSearch.ts";
 
 const items = [
   {

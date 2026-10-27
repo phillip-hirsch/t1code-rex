@@ -1,6 +1,6 @@
-import * as fs from "node:fs/promises";
-import path from "node:path";
-
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 const SUPPORTED_INLINE_IMAGE_EXTENSIONS = new Set([
   ".png",
   ".jpg",
@@ -110,13 +110,13 @@ function expandHomePath(inputPath: string, homeDir: string): string {
     return homeDir;
   }
   if (inputPath.startsWith("~/")) {
-    return path.join(homeDir, inputPath.slice(2));
+    return NodePath.join(homeDir, inputPath.slice(2));
   }
   return inputPath;
 }
 
 function inferImageMimeType(filePath: string): string | null {
-  const extension = path.extname(filePath).toLowerCase();
+  const extension = NodePath.extname(filePath).toLowerCase();
   if (!SUPPORTED_INLINE_IMAGE_EXTENSIONS.has(extension)) {
     return null;
   }
@@ -127,7 +127,7 @@ export async function resolveImageAttachmentFromPath(input: {
   filePath: string;
   homeDir: string;
 }): Promise<ResolvedComposerImageAttachment | null> {
-  const expandedPath = path.resolve(expandHomePath(input.filePath, input.homeDir));
+  const expandedPath = NodePath.resolve(expandHomePath(input.filePath, input.homeDir));
   const mimeType = inferImageMimeType(expandedPath);
   if (!mimeType) {
     return null;
@@ -135,7 +135,7 @@ export async function resolveImageAttachmentFromPath(input: {
 
   let stat;
   try {
-    stat = await fs.stat(expandedPath);
+    stat = await NodeFSP.stat(expandedPath);
   } catch {
     return null;
   }
@@ -143,10 +143,10 @@ export async function resolveImageAttachmentFromPath(input: {
     return null;
   }
 
-  const bytes = await fs.readFile(expandedPath);
+  const bytes = await NodeFSP.readFile(expandedPath);
   return {
     type: "image",
-    name: path.basename(expandedPath),
+    name: NodePath.basename(expandedPath),
     mimeType,
     sizeBytes: bytes.byteLength,
     dataUrl: `data:${mimeType};base64,${bytes.toString("base64")}`,
@@ -171,7 +171,7 @@ export async function resolveComposerSubmission(input: {
   const seenPaths = new Set<string>();
 
   for (const candidate of candidates) {
-    const expandedPath = path.resolve(expandHomePath(candidate.rawPath, input.homeDir));
+    const expandedPath = NodePath.resolve(expandHomePath(candidate.rawPath, input.homeDir));
     if (seenPaths.has(expandedPath)) {
       resolvedCandidates.push(candidate);
       continue;

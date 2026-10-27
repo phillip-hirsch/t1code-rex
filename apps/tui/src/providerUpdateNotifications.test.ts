@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
 
 import {
   collectProviderUpdateCandidates,
   getProviderUpdateNoticeView,
   providerUpdateNotificationKey,
-} from "./providerUpdateNotifications";
+} from "./providerUpdateNotifications.ts";
 
 const codex = ProviderDriverKind.make("codex");
 const claude = ProviderDriverKind.make("claudeAgent");

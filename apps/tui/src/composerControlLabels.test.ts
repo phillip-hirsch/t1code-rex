@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { formatReasoningEffortLabel, truncateToolbarLabel } from "./composerControlLabels";
+import { formatReasoningEffortLabel, truncateToolbarLabel } from "./composerControlLabels.ts";
 
 describe("formatReasoningEffortLabel", () => {
   it("formats no reasoning explicitly", () => {

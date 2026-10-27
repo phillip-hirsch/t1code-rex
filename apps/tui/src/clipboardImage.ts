@@ -1,8 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { randomBytes } from "node:crypto";
-import * as fs from "node:fs/promises";
-import path from "node:path";
-
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 const MACOS_CLIPBOARD_IMAGE_SWIFT = `
 import AppKit
 import Foundation
@@ -31,7 +31,7 @@ exit(2)
 
 function readClipboardImagePngMacOs(): Promise<Buffer | null> {
   return new Promise((resolve, reject) => {
-    const child = spawn("swift", ["-"], {
+    const child = NodeChildProcess.spawn("swift", ["-"], {
       stdio: ["pipe", "pipe", "pipe"],
     });
 
@@ -61,7 +61,7 @@ function readClipboardImagePngMacOs(): Promise<Buffer | null> {
   });
 }
 
-type SpawnImpl = typeof spawn;
+type SpawnImpl = typeof NodeChildProcess.spawn;
 
 type ClipboardImagePayload = {
   readonly bytes: Buffer;
@@ -118,7 +118,7 @@ function readCommandStdout(
   return new Promise((resolve, reject) => {
     const child = spawnImpl(command[0], command.slice(1), {
       stdio: ["ignore", "pipe", "pipe"],
-    }) as ChildProcess;
+    }) as NodeChildProcess.ChildProcess;
     const stdout: Buffer[] = [];
     let stderr = "";
 
@@ -194,7 +194,7 @@ async function resolveClipboardImage(
 const CLIPBOARD_IMAGE_ID_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 
 function createShortImageId(length: number): string {
-  const bytes = randomBytes(length);
+  const bytes = NodeCrypto.randomBytes(length);
   let id = "";
   for (const byte of bytes) {
     id += CLIPBOARD_IMAGE_ID_ALPHABET[byte % CLIPBOARD_IMAGE_ID_ALPHABET.length];
@@ -215,17 +215,18 @@ export async function saveClipboardImageToFile(
 ): Promise<string | null> {
   const clipboardImage = await resolveClipboardImage({
     env: dependencies.env ?? process.env,
+    // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
     platform: dependencies.platform ?? process.platform,
-    spawnImpl: dependencies.spawnImpl ?? spawn,
+    spawnImpl: dependencies.spawnImpl ?? NodeChildProcess.spawn,
   });
 
   if (!clipboardImage || clipboardImage.bytes.length === 0) {
     return null;
   }
 
-  await fs.mkdir(directory, { recursive: true });
+  await NodeFSP.mkdir(directory, { recursive: true });
   const extension = CLIPBOARD_IMAGE_EXTENSION_BY_MIME[clipboardImage.mimeType] ?? ".bin";
-  const filePath = path.join(directory, createClipboardImageFileName(undefined, extension));
-  await fs.writeFile(filePath, clipboardImage.bytes);
+  const filePath = NodePath.join(directory, createClipboardImageFileName(undefined, extension));
+  await NodeFSP.writeFile(filePath, clipboardImage.bytes);
   return filePath;
 }
