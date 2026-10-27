@@ -75,6 +75,7 @@ function ok<A>(value: A): TuiActionResult<A> {
 function createGit() {
   const registry = AtomRegistry.make();
   const calls: string[] = [];
+  let refreshes = 0;
   const statuses = new Map<
     string,
     Atom.Writable<AsyncResult.AsyncResult<VcsStatusResult | null, unknown>>
@@ -179,8 +180,10 @@ function createGit() {
         };
       });
     },
-    refreshVcsStatus: async (cwd: string) => {
-      calls.push(`refresh ${cwd}`);
+    refreshVcsStatus: async (cwd: string, localOnly = false) => {
+      // The toolbar's own local re-reads aren't actions; only an asked-for refresh is logged.
+      if (localOnly) refreshes += 1;
+      else calls.push(`refresh ${cwd}`);
       return ok(vcsStatus());
     },
     cancelWorktreeSetup: async (threadId: ThreadId) => {
@@ -208,6 +211,7 @@ function createGit() {
     source,
     registry,
     calls,
+    localRefreshes: () => refreshes,
     setStatus,
     setRefs: (refs: VcsListRefsResult | null) =>
       registry.set(refsAtom, AsyncResult.success(refs ?? allRefs)),
@@ -304,6 +308,7 @@ function Harness() {
         envMode={controller.envMode}
         worktreePath={controller.worktreePath}
         threadBranch={controller.threadBranch}
+        failure={controller.failure}
         theme={DEFAULT_TUI_THEME}
         onPress={controller.pressToolbar}
       />
@@ -320,6 +325,7 @@ function Harness() {
           pickingWorktreeBase={controller.pickingWorktreeBase}
           commitModelLabel="Claude Haiku 5.5"
           armedId={controller.armedId}
+          failure={controller.failure}
           left={0}
           theme={DEFAULT_TUI_THEME}
           onMenuItem={controller.runMenuItem}
@@ -354,7 +360,8 @@ const type = async (text: string) => {
 const lastCall = () => git.calls.at(-1) ?? "";
 await render();
 
-// G1: the toolbar shows the checkout's branch and state.
+// G1: the toolbar shows the checkout's branch and state, and re-reads it once mounted.
+check("G1: the toolbar refreshed status on mount", git.localRefreshes() >= 1, true);
 check(
   "G1: env, branch, clean, in sync",
   frame().includes("󰉋 Local  󰘬 feature  ✓ clean  ≡ up to date"),
@@ -372,7 +379,9 @@ await render();
 check("G2: a commit shows as ahead", frame().includes("✓ clean  ↑1"), true);
 
 // G3: the menu's push streams progress into the toolbar, then reports the result.
+const refreshesBeforeMenu = git.localRefreshes();
 await press("g");
+check("G3: opening the menu re-reads status", git.localRefreshes() > refreshesBeforeMenu, true);
 check("G3: g opens the menu on the branch", frame().includes("Git · feature"), true);
 check("G3: its quick action pushes and opens a PR", frame().includes("Push & create PR"), true);
 await press("down", "down", "RETURN");
@@ -416,6 +425,14 @@ act(() => {
   pr?.settle({ ok: false, error: new Error("Source control action failed."), interrupted: false });
 });
 await render();
+check("G4: the toolbar keeps the failure in view", frame().includes("✗ Create PR failed"), true);
+await press("g");
+check(
+  "G4: the menu shows its whole message",
+  frame().includes("✗ Create PR failed: No GitHub repository for remote origin"),
+  true,
+);
+await press("escape");
 check(
   "G4: the failure names the cause",
   harness.footer,
@@ -513,6 +530,24 @@ check(
   JSON.stringify(harness.controls?.launchWorktree()),
   JSON.stringify({ projectCwd: "/repo", baseBranch: "main", startFromOrigin: false }),
 );
+
+// G9b: once sent, the thread says "Worktree" while the server still makes it.
+act(() =>
+  setScene({
+    target: { kind: "thread", threadId: draft.threadId, projectId: PROJECT.id },
+    thread: presentedThread(draft.threadId, PROJECT.id, { branch: null }),
+  }),
+);
+act(() => git.setSetup(draft.threadId, worktreeSetup({ threadId: draft.threadId })));
+await render();
+check(
+  "G9b: the toolbar shows the launch's base",
+  frame().includes("󰙅 Worktree  󰘬 From main"),
+  true,
+);
+check("G9b: and the setup card follows it", frame().includes("Setting up worktree"), true);
+act(() => setScene(draftScene));
+await render();
 
 // G10: a folder that isn't a repository offers git init.
 await press("w");

@@ -1,3 +1,4 @@
+// @effect-diagnostics globalTimers:off -- The TUI runs on Bun outside the Effect runtime.
 import type { KeyEvent } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -7,7 +8,8 @@ import {
 import type { ThreadId, VcsListRefsResult } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { memo, useImperativeHandle, useState, type Ref } from "react";
+import { useRenderer } from "@opentui/react";
+import { memo, useEffect, useImperativeHandle, useState, type Ref } from "react";
 
 import {
   buildBranchPickerItems,
@@ -18,6 +20,7 @@ import {
   describeBranchToolbar,
   resolveToolbarBranch,
   type EnvMode,
+  type GitFailure,
   type ToolbarSegment,
   type ToolbarTone,
 } from "./branchToolbar.ts";
@@ -30,8 +33,42 @@ import { describeWorktreeSetup } from "./worktreeSetupView.ts";
 /** What the git views read; the TUI's connection, or fixed atoms in checks. */
 export type GitSource = Pick<
   TuiConnection,
-  "vcsStatusAtom" | "vcsRefsAtom" | "vcsActionStateAtom" | "worktreeSetupAtom"
+  "vcsStatusAtom" | "vcsRefsAtom" | "vcsActionStateAtom" | "worktreeSetupAtom" | "refreshVcsStatus"
 >;
+
+/** How often a focused toolbar re-reads its checkout; edits made elsewhere show within it. */
+export const VCS_STATUS_POLL_MS = 5_000;
+
+/**
+ * Keeps a checkout's status fresh the way web does on window focus: a local-only refresh on
+ * mount and when the terminal regains focus, and every few seconds while it has focus, since
+ * the server only refreshes on its own after runs and git actions.
+ */
+function useVcsStatusRefresh(source: GitSource, cwd: string): void {
+  const renderer = useRenderer();
+  useEffect(() => {
+    let focused = true;
+    const refresh = () => {
+      if (focused) void source.refreshVcsStatus(cwd, true);
+    };
+    const onFocus = () => {
+      focused = true;
+      refresh();
+    };
+    const onBlur = () => {
+      focused = false;
+    };
+    refresh();
+    const timer = setInterval(refresh, VCS_STATUS_POLL_MS);
+    renderer.on("focus", onFocus);
+    renderer.on("blur", onBlur);
+    return () => {
+      clearInterval(timer);
+      renderer.off("focus", onFocus);
+      renderer.off("blur", onBlur);
+    };
+  }, [renderer, source, cwd]);
+}
 
 const OVERLAY_ROWS_MAX = 12;
 // The menu doesn't list refs, so it doesn't ask for them.
@@ -67,6 +104,7 @@ export interface BranchToolbarProps {
   readonly envMode: EnvMode;
   readonly worktreePath: string | null;
   readonly threadBranch: string | null;
+  readonly failure: GitFailure | null;
   readonly theme: TuiTheme;
   readonly onPress: (action: NonNullable<ToolbarSegment["action"]>) => void;
 }
@@ -77,6 +115,7 @@ export interface BranchToolbarProps {
  */
 export const BranchToolbar = memo(function BranchToolbar(props: BranchToolbarProps) {
   const { theme } = props;
+  useVcsStatusRefresh(props.source, props.cwd);
   const statusResult = useAtomValue(props.source.vcsStatusAtom(props.cwd));
   const action = useAtomValue(props.source.vcsActionStateAtom(props.cwd));
   const segments = describeBranchToolbar({
@@ -87,6 +126,7 @@ export const BranchToolbar = memo(function BranchToolbar(props: BranchToolbarPro
     status: Option.getOrNull(AsyncResult.value(statusResult)) ?? null,
     statusFailed: AsyncResult.isFailure(statusResult),
     action,
+    failure: props.failure,
   });
   return (
     <box
@@ -140,6 +180,8 @@ export interface GitOverlayProps {
   readonly commitModelLabel: string;
   /** The menu item waiting for its second ⏎. */
   readonly armedId: string | null;
+  /** The last action here that failed; the menu shows its whole message. */
+  readonly failure: GitFailure | null;
   /** Left edge, past the sidebar. */
   readonly left: number;
   readonly theme: TuiTheme;
@@ -249,7 +291,8 @@ export function GitOverlay(props: GitOverlayProps) {
     <box
       style={{
         position: "absolute",
-        bottom: 2,
+        // Above the branch toolbar, which stays in view.
+        bottom: 3,
         left: props.left,
         width: 64,
         flexDirection: "column",
@@ -270,7 +313,13 @@ export function GitOverlay(props: GitOverlayProps) {
         <text
           wrapMode="none"
           truncate
-          content={query.length > 0 ? `› ${query}▏` : "› type to filter or name a new branch"}
+          content={
+            query.length > 0
+              ? `› ${query}▏`
+              : props.pickingWorktreeBase
+                ? "› type to filter"
+                : "› type to filter or name a new branch"
+          }
           style={{ fg: query.length > 0 ? palette.text : palette.subtle }}
         />
       ) : null}
@@ -315,12 +364,21 @@ export function GitOverlay(props: GitOverlayProps) {
             </box>
           );
         })}
-      {mode.kind === "menu" && menuItems[selected]?.disabledReason !== undefined ? (
+      {mode.kind === "menu" &&
+      menuItems[selected]?.disabledReason !== undefined &&
+      menuItems[selected]?.disabledReason !== menuItems[selected]?.label ? (
         <text
           wrapMode="none"
           truncate
           content={menuItems[selected]?.disabledReason ?? ""}
           style={{ fg: palette.muted }}
+        />
+      ) : null}
+      {mode.kind === "menu" && props.failure !== null ? (
+        <text
+          wrapMode="word"
+          content={`✗ ${props.failure.label} failed: ${props.failure.message}`}
+          style={{ fg: palette.composerStop }}
         />
       ) : null}
       {note === null ? null : (

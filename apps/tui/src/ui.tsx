@@ -1780,6 +1780,7 @@ function Shell(props: AppProps) {
                   envMode={git.envMode}
                   worktreePath={git.worktreePath}
                   threadBranch={git.threadBranch}
+                  failure={git.failure}
                   theme={theme}
                   onPress={git.pressToolbar}
                 />
@@ -1931,6 +1932,7 @@ function Shell(props: AppProps) {
           pickingWorktreeBase={git.pickingWorktreeBase}
           commitModelLabel={commitModelLabel}
           armedId={git.armedId}
+          failure={git.failure}
           left={(layout.showSidebar ? sidebarWidth : 0) + 2}
           theme={theme}
           onMenuItem={git.runMenuItem}

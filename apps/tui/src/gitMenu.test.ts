@@ -64,7 +64,7 @@ describe("buildGitMenuItems", () => {
 
   it("explains why nothing can run on an up-to-date branch", () => {
     const [first] = menu();
-    expect(first?.label).toBe("Commit");
+    expect(first?.label).toBe("Branch is up to date. No action needed.");
     expect(first?.disabledReason).toBe("Branch is up to date. No action needed.");
   });
 

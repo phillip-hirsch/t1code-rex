@@ -414,7 +414,9 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     worktreeSetupAtom: (threadId: ThreadId): WorktreeSetupAtom =>
       vcs.worktreeSetup({ environmentId, input: { threadId } }),
     cancelWorktreeSetup: (threadId: ThreadId) => runAction(vcs.cancelWorktreeSetup, { threadId }),
-    refreshVcsStatus: (cwd: string) => runAction(vcs.refreshStatus, { cwd }),
+    /** Re-reads a checkout's status; `localOnly` skips the remote fetch. */
+    refreshVcsStatus: (cwd: string, localOnly = false) =>
+      runAction(vcs.refreshStatus, { cwd, ...(localOnly ? { localOnly } : {}) }),
     switchRef: (input: VcsSwitchRefInput) =>
       trackVcs(input.cwd, "switch_ref", "Switching branch", vcs.switchRef, input),
     createRef: (input: VcsCreateRefInput) =>

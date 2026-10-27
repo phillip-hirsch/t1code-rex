@@ -28,6 +28,15 @@ export interface BranchToolbarInput {
   readonly status: VcsStatusResult | null;
   readonly statusFailed: boolean;
   readonly action: VcsActionState | null;
+  /** The last git action here that failed, until the next one starts. */
+  readonly failure: GitFailure | null;
+}
+
+/** A failed git action: the menu shows its whole message, the toolbar just that it failed. */
+export interface GitFailure {
+  readonly cwd: string;
+  readonly label: string;
+  readonly message: string;
 }
 
 /** A thread works in its worktree once it has one; a draft in the mode picked for it. */
@@ -119,6 +128,13 @@ export function describeBranchToolbar(input: BranchToolbarInput): ReadonlyArray<
       id: "action",
       text: `󱦟 ${running}`,
       tone: "info",
+      action: "git",
+    });
+  } else if (input.failure !== null) {
+    segments.push({
+      id: "action",
+      text: `✗ ${input.failure.label} failed`,
+      tone: "error",
       action: "git",
     });
   }

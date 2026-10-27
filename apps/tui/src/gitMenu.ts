@@ -79,7 +79,8 @@ export function buildGitMenuItems(input: GitMenuInput): ReadonlyArray<GitMenuIte
     items.push({
       id: "quick",
       icon: "󰋼",
-      label: quick.label,
+      // The hint says it all: nothing to run, and why.
+      label: quick.hint,
       command: { kind: "refresh" },
       disabledReason: quick.hint,
     });

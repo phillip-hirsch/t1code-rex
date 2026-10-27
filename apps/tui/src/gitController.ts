@@ -16,7 +16,12 @@ import {
   resolveBranchSelectionTarget,
   type BranchPickerItem,
 } from "./branchPicker.ts";
-import { resolveEnvMode, type EnvMode, type ToolbarSegment } from "./branchToolbar.ts";
+import {
+  resolveEnvMode,
+  type EnvMode,
+  type GitFailure,
+  type ToolbarSegment,
+} from "./branchToolbar.ts";
 import type { LaunchWorktree } from "./composerSend.ts";
 import type { ComposerStore } from "./composerStore.ts";
 import type { TuiActionResult, TuiConnection } from "./connection/tuiConnection.ts";
@@ -84,23 +89,33 @@ export function useGitControls(options: GitControlsOptions) {
   const { connection, store, target, thread, project, setStatus } = options;
   const [overlay, setOverlay] = useState<GitOverlayMode | null>(null);
   const [armedId, setArmedId] = useState<string | null>(null);
-  // Threads launched into a new worktree from here: their setup shows before they have one.
-  const [launched, setLaunched] = useState<ReadonlySet<string>>(() => new Set());
+  const [lastFailure, setLastFailure] = useState<GitFailure | null>(null);
+  // Threads launched into a new worktree from here, by base: their setup shows, and the
+  // toolbar says "Worktree", before the server gives them one.
+  const [launched, setLaunched] = useState<ReadonlyMap<string, string>>(() => new Map());
   const { overlayRef } = options;
 
   const draft = target?.kind === "draft" ? store.findNewThreadDraft(target.threadId) : undefined;
   const projectCwd = project?.workspaceRoot ?? null;
   const worktreePath = target?.kind === "thread" ? (thread?.worktreePath ?? null) : null;
-  const envMode = resolveEnvMode({
-    draft: target?.kind === "draft",
-    worktreePath,
-    draftEnvMode: draft?.envMode,
-    defaultEnvMode: project?.defaultThreadEnvMode ?? options.defaultEnvMode,
-  });
+  const preparingBase =
+    target?.kind === "thread" && worktreePath === null
+      ? (launched.get(target.threadId) ?? null)
+      : null;
+  const envMode =
+    preparingBase !== null
+      ? "worktree"
+      : resolveEnvMode({
+          draft: target?.kind === "draft",
+          worktreePath,
+          draftEnvMode: draft?.envMode,
+          defaultEnvMode: project?.defaultThreadEnvMode ?? options.defaultEnvMode,
+        });
   const threadBranch =
-    target?.kind === "thread" ? (thread?.branch ?? null) : (draft?.baseBranch ?? null);
+    target?.kind === "thread" ? (thread?.branch ?? preparingBase) : (draft?.baseBranch ?? null);
   const cwd = worktreePath ?? projectCwd;
   const pickingWorktreeBase = target?.kind === "draft" && envMode === "worktree";
+  const failure = lastFailure !== null && lastFailure.cwd === cwd ? lastFailure : null;
 
   const close = () => {
     setOverlay(null);
@@ -113,6 +128,8 @@ export function useGitControls(options: GitControlsOptions) {
     }
     setArmedId(null);
     setOverlay({ kind: "menu" });
+    // As web re-reads status when its git menu opens.
+    void connection.refreshVcsStatus(cwd, true);
   };
   const openBranchPicker = (query = "") => {
     if (target === null || cwd === null) {
@@ -121,6 +138,7 @@ export function useGitControls(options: GitControlsOptions) {
     }
     setArmedId(null);
     setOverlay({ kind: "branches", initialQuery: query });
+    void connection.refreshVcsStatus(cwd, true);
   };
 
   const currentRefName = (): string | null => {
@@ -155,12 +173,9 @@ export function useGitControls(options: GitControlsOptions) {
   const launchWorktree = (): LaunchWorktree | undefined => {
     if (target?.kind !== "draft" || envMode !== "worktree" || projectCwd === null) return undefined;
     const threadId = target.threadId;
-    setLaunched((current) => new Set(current).add(threadId));
-    return {
-      projectCwd,
-      baseBranch: draft?.baseBranch ?? currentRefName() ?? "HEAD",
-      startFromOrigin: options.startFromOrigin,
-    };
+    const baseBranch = draft?.baseBranch ?? currentRefName() ?? "HEAD";
+    setLaunched((current) => new Map(current).set(threadId, baseBranch));
+    return { projectCwd, baseBranch, startFromOrigin: options.startFromOrigin };
   };
 
   /** Points the thread at a branch and checkout, stopping its session if the checkout moves. */
@@ -182,6 +197,7 @@ export function useGitControls(options: GitControlsOptions) {
   const pickBranch = async (item: BranchPickerItem) => {
     if (target === null || cwd === null || projectCwd === null) return;
     close();
+    setLastFailure(null);
     options.onFocusComposer();
     switch (item.kind) {
       case "init": {
@@ -250,6 +266,7 @@ export function useGitControls(options: GitControlsOptions) {
       return;
     }
     close();
+    setLastFailure(null);
     const { command } = item;
     switch (command.kind) {
       case "action": {
@@ -265,14 +282,18 @@ export function useGitControls(options: GitControlsOptions) {
         });
         if (result.ok) setStatus(describeGitActionResult(result.value));
         else if (result.interrupted) setStatus(`${item.label} cancelled`);
-        else
-          setStatus(
-            `${item.label} failed: ${describeGitActionFailure(result.error, remoteMessage)}`,
-          );
+        else {
+          const message = describeGitActionFailure(result.error, remoteMessage);
+          setLastFailure({ cwd, label: item.label, message });
+          setStatus(`${item.label} failed: ${message}`);
+        }
         return;
       }
       case "pull": {
         const result = await connection.pull({ cwd });
+        if (!result.ok && !result.interrupted) {
+          setLastFailure({ cwd, label: "Pull", message: errorText(result.error) });
+        }
         setStatus(
           failed(result, "Pull") ??
             (result.ok && result.value.status === "pulled" ? "Pulled" : "Already up to date"),
@@ -341,6 +362,7 @@ export function useGitControls(options: GitControlsOptions) {
     draft: target?.kind === "draft",
     overlay,
     armedId,
+    failure,
     setupThreadId,
     openMenu,
     openBranchPicker,

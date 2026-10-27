@@ -18,6 +18,7 @@ function toolbar(overrides: Partial<BranchToolbarInput>) {
     status: vcsStatus(),
     statusFailed: false,
     action: null,
+    failure: null,
     ...overrides,
   }).map((segment) => segment.text);
 }
@@ -115,6 +116,15 @@ describe("describeBranchToolbar", () => {
       lastOutputLine: "lint ok",
     };
     expect(toolbar({ action: running })).toContain("󱦟 Committing...  lint ok");
+  });
+});
+
+describe("describeBranchToolbar failures", () => {
+  it("keeps the last failed action in view until the next one runs", () => {
+    const failure = { cwd: "/repo", label: "Create PR", message: "No provider" };
+    expect(toolbar({ failure })).toContain("✗ Create PR failed");
+    const running = { ...EMPTY_VCS_ACTION_STATE, isRunning: true, currentLabel: "Pushing..." };
+    expect(toolbar({ failure, action: running })).not.toContain("✗ Create PR failed");
   });
 });
 
