@@ -11,7 +11,8 @@ import packageJson from "../package.json" with { type: "json" };
 import { resolveTuiPaths, type TuiPaths } from "./config.ts";
 import { createTuiConnection } from "./connection/tuiConnection.ts";
 import { createT1Logger, type T1Logger } from "./log.ts";
-import { readPrefs } from "./prefs.ts";
+import { createPrefsWriter, readPrefs } from "./prefs.ts";
+import { prefsLockPath, resolvePrefsAccess } from "./prefsLock.ts";
 import {
   normalizeRendererThemeMode,
   resolveTerminalPalette,
@@ -119,11 +120,35 @@ const connection = createTuiConnection({
   appVersion: packageJson.version ?? "0.0.0",
   platformOs: HOST_PLATFORM,
 });
+// One window writes prefs.json: the first main window takes a lock next to it. Thread
+// tabs, headless runs, and main windows that find the lock held only read it.
+const headless = process.env.TR3X_HEADLESS === "1";
+const prefsAccess = resolvePrefsAccess({
+  prefsPath: paths.prefsPath,
+  wantsWrites: !threadWindowLaunch && !headless,
+});
+if (prefsAccess.kind === "owner") {
+  // The OS frees the lock when this process dies; releasing on exit just ends it sooner.
+  process.on("exit", prefsAccess.lock.release);
+} else if (prefsAccess.kind === "locked-out") {
+  logger.log("prefs.locked", {
+    lockPath: prefsLockPath(paths.prefsPath),
+    error: prefsAccess.error,
+  });
+}
 const prefs = await readPrefs(paths);
+const prefsWriter =
+  prefsAccess.kind === "owner"
+    ? createPrefsWriter(paths, (error) =>
+        logger.log("prefs.save.failed", { error: errorMessage(error) }),
+      )
+    : null;
+const prefsLockedOut = prefsAccess.kind === "locked-out";
+const launchCwd = process.cwd();
 const appTheme = prefs.appSettings?.theme ?? DEFAULT_APP_THEME;
 const tuiThemeId = normalizeTuiThemeId(prefs.tuiThemeId);
 
-if (process.env.TR3X_HEADLESS === "1") {
+if (headless) {
   const outputPath =
     process.env.TR3X_HEADLESS_FRAME_PATH?.trim() ||
     NodePath.join(paths.configHomeDir, "headless-frame.txt");
@@ -139,6 +164,9 @@ if (process.env.TR3X_HEADLESS === "1") {
       paths={paths}
       logger={logger}
       theme={resolveTuiTheme(appTheme, tuiThemeId)}
+      initialPrefs={prefs}
+      prefsWriter={null}
+      cwd={launchCwd}
       threadWindowLaunch={threadWindowLaunch}
     />,
   );
@@ -203,9 +231,10 @@ if (process.env.TR3X_HEADLESS === "1") {
     } else {
       process.exitCode = code;
     }
-    setTimeout(() => {
-      process.exit(process.exitCode ?? code);
-    }, 50).unref();
+    // Give the last prefs write a moment to land, but never hang on exit.
+    const exit = () => process.exit(process.exitCode ?? code);
+    setTimeout(exit, 500).unref();
+    void (prefsWriter?.flush() ?? Promise.resolve()).then(() => setTimeout(exit, 50).unref());
   };
 
   const renderApp = () => {
@@ -216,6 +245,10 @@ if (process.env.TR3X_HEADLESS === "1") {
         paths={paths}
         logger={logger}
         theme={rendererTheme}
+        initialPrefs={prefs}
+        prefsWriter={prefsWriter}
+        prefsLockedOut={prefsLockedOut}
+        cwd={launchCwd}
         interruptRequestToken={interruptRequestToken}
         onRequestExit={() => shutdown(0)}
         threadWindowLaunch={threadWindowLaunch}

@@ -5,38 +5,16 @@ import {
   ensureProjectExpanded,
   pruneExpandedProjects,
   resolveProjectPrimaryAction,
-  resolveProjectExpansionOnRowPress,
+  toggleProjectExpanded,
 } from "./sidebarProjects.ts";
 
 describe("sidebarProjects", () => {
-  it("expands a collapsed active project when pressed again", () => {
-    const expanded = resolveProjectExpansionOnRowPress({
-      expandedProjectIds: new Set<string>(),
-      projectId: "project-a",
-      isProjectActive: true,
-    });
+  it("toggles a project open and closed", () => {
+    const collapsed = new Set<string>();
+    const expanded = toggleProjectExpanded(collapsed, "project-a");
 
     expect([...expanded]).toEqual(["project-a"]);
-  });
-
-  it("collapses an expanded active project when pressed", () => {
-    const expanded = resolveProjectExpansionOnRowPress({
-      expandedProjectIds: new Set(["project-a"]),
-      projectId: "project-a",
-      isProjectActive: true,
-    });
-
-    expect([...expanded]).toEqual([]);
-  });
-
-  it("keeps an expanded inactive project open when selecting it", () => {
-    const expanded = resolveProjectExpansionOnRowPress({
-      expandedProjectIds: new Set(["project-a"]),
-      projectId: "project-a",
-      isProjectActive: false,
-    });
-
-    expect(expanded).toEqual(new Set(["project-a"]));
+    expect([...toggleProjectExpanded(expanded, "project-a")]).toEqual([]);
   });
 
   it("prunes deleted projects from the expanded set", () => {

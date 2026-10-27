@@ -33,16 +33,13 @@ export function pruneExpandedProjects(
   return changed ? next : expandedProjectIds;
 }
 
-export function resolveProjectExpansionOnRowPress(input: {
-  expandedProjectIds: ReadonlySet<string>;
-  projectId: string;
-  isProjectActive: boolean;
-}): ReadonlySet<string> {
-  const { expandedProjectIds, projectId, isProjectActive } = input;
-  if (!expandedProjectIds.has(projectId)) {
-    return ensureProjectExpanded(expandedProjectIds, projectId);
-  }
-  return isProjectActive ? collapseProject(expandedProjectIds, projectId) : expandedProjectIds;
+export function toggleProjectExpanded(
+  expandedProjectIds: ReadonlySet<string>,
+  projectId: string,
+): ReadonlySet<string> {
+  return expandedProjectIds.has(projectId)
+    ? collapseProject(expandedProjectIds, projectId)
+    : ensureProjectExpanded(expandedProjectIds, projectId);
 }
 
 export function resolveProjectPrimaryAction(input: {

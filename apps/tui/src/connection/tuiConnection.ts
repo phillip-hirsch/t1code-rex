@@ -7,8 +7,15 @@ import {
   ShellSnapshotLoader,
   createEnvironmentShellAtoms,
 } from "@t3tools/client-runtime/state/shell";
-import type { EnvironmentId } from "@t3tools/contracts";
+import { createEnvironmentThreadShellAtoms } from "@t3tools/client-runtime/state/threads";
+import type {
+  EnvironmentId,
+  OrchestrationProjectShell,
+  OrchestrationV2ShellSnapshot,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { Atom, AtomRegistry } from "effect/reactivity";
 
 import type { TuiServerSession } from "../serverLauncher.ts";
@@ -20,6 +27,8 @@ export interface TuiConnectionOptions {
   readonly appVersion: string;
   readonly platformOs: string;
 }
+
+const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
 
 /**
  * One atom runtime per process, wired to the single server this TUI reached.
@@ -40,6 +49,13 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     initialConfigValueAtom: sessionAtoms.initialConfigValueAtom,
   });
   const shell = createEnvironmentShellAtoms(runtime);
+  const snapshotAtom = Atom.family((id: EnvironmentId) =>
+    Atom.make((get) => Option.getOrNull(get(shell.stateValueAtom(id)).snapshot)),
+  );
+  const threadShells = createEnvironmentThreadShellAtoms({
+    catalogValueAtom: catalog.catalogValueAtom,
+    snapshotAtom,
+  });
   const serverConfigsAtom = createEnvironmentServerConfigsAtom({
     catalogValueAtom: catalog.catalogValueAtom,
     serverConfigValueAtom: server.configValueAtom,
@@ -54,6 +70,23 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     serverConfigAtom: server.configValueAtom(environmentId),
     serverConfigsAtom,
     shellStateAtom: shell.stateValueAtom(environmentId),
+    shellStatusAtom: shell.statusAtom(environmentId),
+    hasShellSnapshotAtom: shell.hasSnapshotAtom(environmentId),
+    // Thread events keep the projects array, so the sidebar's project list only changes
+    // with project events.
+    projectsAtom: Atom.make(
+      (get): ReadonlyArray<OrchestrationProjectShell> =>
+        get(snapshotAtom(environmentId))?.projects ?? NO_PROJECTS,
+    ),
+    // Shells that leave out older settled threads count them per project.
+    olderSettledAtom: Atom.make(
+      (get): OrchestrationV2ShellSnapshot["olderSettled"] =>
+        get(snapshotAtom(environmentId))?.olderSettled,
+    ),
+    // Rows keep their identity while only a running thread's streaming fields tick.
+    threadShellsAtom: threadShells.quietThreadShellsAtom,
+    threadShellAtom: (threadId: ThreadId) =>
+      threadShells.quietThreadShellAtom({ environmentId, threadId }),
     retryNow: catalog.retryNow,
     dispose: () => {
       registry.dispose();
