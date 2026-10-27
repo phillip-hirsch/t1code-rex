@@ -142,7 +142,7 @@ export function ThreadView(props: ThreadViewProps) {
   // App-owned keys, and holding the reading position when older rows arrive above it.
   const rowKeys = useMemo(() => rows.map((row) => row.key), [rows]);
   const syncAfterRows = useCallback(() => scheduleSync(false), [scheduleSync]);
-  useTranscriptScrollbox(scrollRef, rowKeys, syncAfterRows);
+  useTranscriptScrollbox(scrollRef, rowKeys, historyRowContent(history) ?? "", syncAfterRows);
 
   // A finished page can leave the view near the top, which asks for the next one.
   useLayoutEffect(() => {
@@ -293,35 +293,31 @@ function ThreadHeader(props: {
   );
 }
 
-function HistoryRow(props: {
-  hasMoreHistory: boolean;
-  loading: boolean;
-  error: string | null;
-  theme: TuiTheme;
-}) {
+interface HistoryRowState {
+  readonly hasMoreHistory: boolean;
+  readonly loading: boolean;
+  readonly error: string | null;
+}
+
+/** The hint above the first row; it also anchors scrolling when it changes. */
+function historyRowContent(history: HistoryRowState): string | null {
+  if (history.loading) return "Loading earlier messages…";
+  if (history.error !== null) {
+    return `Couldn't load earlier messages: ${history.error}. Scroll up to retry.`;
+  }
+  return history.hasMoreHistory ? "↑ Scroll up for earlier messages" : null;
+}
+
+function HistoryRow(props: HistoryRowState & { theme: TuiTheme }) {
+  const content = historyRowContent(props);
+  if (content === null) return null;
   const palette = props.theme.palette;
-  if (props.loading) {
-    return (
-      <text content="Loading earlier messages…" style={{ fg: palette.muted, marginBottom: 1 }} />
-    );
-  }
-  if (props.error !== null) {
-    return (
-      <text
-        content={`Couldn't load earlier messages: ${props.error}. Scroll up to retry.`}
-        style={{ fg: palette.warning, marginBottom: 1 }}
-      />
-    );
-  }
-  if (props.hasMoreHistory) {
-    return (
-      <text
-        content="↑ Scroll up for earlier messages"
-        style={{ fg: palette.subtle, marginBottom: 1 }}
-      />
-    );
-  }
-  return null;
+  const fg = props.loading
+    ? palette.muted
+    : props.error !== null
+      ? palette.warning
+      : palette.subtle;
+  return <text content={content} style={{ fg, marginBottom: 1 }} />;
 }
 
 interface TimelineRowViewProps {

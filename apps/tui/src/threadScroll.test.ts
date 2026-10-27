@@ -135,3 +135,23 @@ describe("PrependAnchorTracker", () => {
     expect(tracker.consume(layout({ x: 0 }), 5)).toBeNull();
   });
 });
+
+describe("PrependAnchorTracker above the rows", () => {
+  const layout = (tops: Record<string, number>) => (key: string) => tops[key] ?? null;
+
+  it("anchors the first row when the history hint above it changes", () => {
+    const tracker = new PrependAnchorTracker();
+    tracker.commit(["a", "b"], layout({ a: 2, b: 10 }), false, "↑ Scroll up");
+    // The last page landed in an earlier layout; now the hint above it goes away.
+    tracker.commit(["a", "b"], layout({ a: 2, b: 10 }), false, "");
+    expect(tracker.consume(layout({ a: 0, b: 8 }), 40)).toBe(38);
+  });
+
+  it("measures a page and the hint change together when both land before layout", () => {
+    const tracker = new PrependAnchorTracker();
+    tracker.commit(["c"], layout({ c: 2 }), false, "↑ Scroll up");
+    tracker.commit(["a", "b", "c"], layout({ c: 2 }), false, "↑ Scroll up");
+    tracker.commit(["a", "b", "c"], layout({ c: 2 }), false, "");
+    expect(tracker.consume(layout({ a: 0, b: 6, c: 12 }), 0)).toBe(10);
+  });
+});

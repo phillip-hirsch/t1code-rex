@@ -108,18 +108,32 @@ export function resolvePrependAnchor(
 export type MeasureRowTop = (key: string) => number | null;
 
 /**
- * Holds the reading position when older rows arrive above it. A page and a streaming delta
- * can both commit before OpenTUI lays out, so the anchor stays pending until a layout pass
- * consumes it, and later commits don't replace it (their rows have no layout yet).
+ * Holds the reading position when rows arrive above it, or what's above the first row (the
+ * history hint) changes. The anchor stays pending until a layout pass consumes it, since a
+ * page and a streaming delta can both commit first; later commits' rows have no layout yet.
  */
 export class PrependAnchorTracker {
   private previousKeys: ReadonlyArray<string> = [];
+  private previousAbove = "";
   private pending: { readonly key: string; readonly top: number } | null = null;
 
-  /** Call after React commits the rows, before OpenTUI's next layout pass. */
-  commit(keys: ReadonlyArray<string>, measure: MeasureRowTop, nearBottom: boolean): void {
-    const anchorKey = resolvePrependAnchor(this.previousKeys, keys);
+  /**
+   * Call after React commits, before OpenTUI's next layout pass. `above` identifies what
+   * renders above the first row; a change to it anchors the first row.
+   */
+  commit(
+    keys: ReadonlyArray<string>,
+    measure: MeasureRowTop,
+    nearBottom: boolean,
+    above = "",
+  ): void {
+    const aboveChanged = above !== this.previousAbove;
+    const firstKept = keys.length > 0 && keys[0] === this.previousKeys[0];
+    const anchorKey =
+      resolvePrependAnchor(this.previousKeys, keys) ??
+      (aboveChanged && firstKept ? (keys[0] ?? null) : null);
     this.previousKeys = keys;
+    this.previousAbove = above;
     if (this.pending !== null) {
       if (!keys.includes(this.pending.key)) this.pending = null;
       return;

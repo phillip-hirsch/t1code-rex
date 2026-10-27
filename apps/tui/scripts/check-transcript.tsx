@@ -99,7 +99,7 @@ interface TranscriptProps {
 
 function WiredTranscript({ initial, ref }: TranscriptProps) {
   const { rows, rowKeys, scrollRef } = useTranscriptHarness(initial, ref);
-  useTranscriptScrollbox(scrollRef, rowKeys);
+  useTranscriptScrollbox(scrollRef, rowKeys, "");
   return <TranscriptRows rows={rows} scrollRef={scrollRef} />;
 }
 

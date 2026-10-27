@@ -39,12 +39,13 @@ function attachTranscriptScrollbox(
 
 /**
  * Leaves keyboard scrolling to the app and keeps the reading position when rows are
- * prepended. `rowKeys` must keep its identity until the rows change; `afterCommit` runs
- * after each rows commit.
+ * prepended or what renders above them (`above`, e.g. the history hint) changes. `rowKeys`
+ * must keep its identity until the rows change; `afterCommit` runs after each commit.
  */
 export function useTranscriptScrollbox(
   scrollRef: RefObject<ScrollBoxRenderable | null>,
   rowKeys: ReadonlyArray<string>,
+  above: string,
   afterCommit?: () => void,
 ): void {
   const [anchor] = useState(() => new PrependAnchorTracker());
@@ -65,8 +66,9 @@ export function useTranscriptScrollbox(
           scrollHeight: scrollbox.scrollHeight,
           viewportHeight: scrollbox.viewport.height,
         }),
+        above,
       );
     }
     afterCommit?.();
-  }, [afterCommit, anchor, rowKeys, scrollRef]);
+  }, [above, afterCommit, anchor, rowKeys, scrollRef]);
 }
