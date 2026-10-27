@@ -1,10 +1,10 @@
 import type { KeyEvent } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from "@t3tools/client-core";
-import type { OrchestrationProjectShell } from "@t3tools/contracts";
+import type { OrchestrationProjectShell, OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
+import type { Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { TuiConnection } from "./connection/tuiConnection.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
 import {
   buildSidebarGroups,
@@ -40,8 +40,16 @@ import {
   type ThreadVisits,
 } from "./threadVisits.ts";
 
+/** The shell atoms the sidebar reads; the TUI connection provides them. */
+export interface SidebarShellSource {
+  readonly projectsAtom: Atom.Atom<ReadonlyArray<OrchestrationProjectShell>>;
+  readonly threadShellsAtom: Atom.Atom<ReadonlyArray<SidebarThread>>;
+  readonly hasShellSnapshotAtom: Atom.Atom<boolean>;
+  readonly olderSettledAtom: Atom.Atom<OrchestrationV2ShellSnapshot["olderSettled"]>;
+}
+
 export interface SidebarControllerOptions {
-  readonly connection: TuiConnection;
+  readonly connection: SidebarShellSource;
   readonly initialPrefs: TuiPrefs;
   /** Only the main window saves prefs; Rex thread tabs share the file read-only. */
   readonly prefsWriter: PrefsWriter | null;
@@ -257,7 +265,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
    * focus to the thread view.
    */
   const handleKey = useCallback(
-    (key: KeyEvent): "handled" | "open" | null => {
+    (key: Pick<KeyEvent, "name">): "handled" | "open" | null => {
       const name = key.name;
       if (name === "up" || name === "down" || name === "k" || name === "j") {
         const next = moveCursor(rows, cursorKey, name === "up" || name === "k" ? -1 : 1);
