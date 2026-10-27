@@ -198,6 +198,19 @@ async function checkPrepend(wired: boolean): Promise<void> {
   setup.renderer.destroy();
 }
 
+/** Sol round 2, N1: a few rows above the bottom isn't sticky, so a prepend must hold. */
+async function checkPrependNearBottom(): Promise<void> {
+  const { setup, transcript, scrollbox } = await renderTranscript(true, rowsFrom(10, 30));
+  scrollbox.scrollTop = scrollbox.scrollHeight - scrollbox.viewport.height - 3;
+  await settle(setup.renderOnce);
+  const firstVisible = () => setup.captureCharFrame().split("\n")[0]?.trim();
+  const reading = firstVisible();
+  act(() => transcript.setRows((rows) => [...rowsFrom(0, 10), ...rows]));
+  await setup.renderOnce();
+  check("N1: three rows above the bottom, still reading after a prepend", firstVisible(), reading);
+  setup.renderer.destroy();
+}
+
 let highlighted = 0;
 /** Counts what tree-sitter highlights. A destroyed renderer replaces the shared client. */
 function countHighlights(): void {
@@ -278,6 +291,16 @@ async function checkStreaming(coalesced: boolean): Promise<string> {
   return frame;
 }
 
+/** Sol round 2, N3: blank lines inside an HTML comment don't start a new block. */
+async function checkComment(): Promise<void> {
+  const { setup, reply } = await renderReply(false, 20);
+  act(() => reply.set("<!--\nhello\n\n**literal**\n\n-->\n\nafter", false));
+  await settle(setup.renderOnce);
+  const frame = setup.captureCharFrame();
+  check("N3: comment content stays literal", frame.includes("**literal**"), true);
+  setup.renderer.destroy();
+}
+
 async function checkFence(): Promise<void> {
   const { setup, reply } = await renderReply(false, 30);
   const message =
@@ -308,6 +331,7 @@ await checkKeys(false);
 await checkKeys(true);
 await checkPrepend(false);
 await checkPrepend(true);
+await checkPrependNearBottom();
 const before = await checkStreaming(true);
 const after = await checkStreaming(false);
 check("S3: same rendered frame as one block", after === before, true);
@@ -318,6 +342,7 @@ check(
   true,
 );
 await checkFence();
+await checkComment();
 
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

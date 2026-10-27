@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   anchoredScrollTop,
+  isAtBottom,
   isNearBottom,
   PrependAnchorTracker,
   resolvePrependAnchor,
@@ -10,6 +11,15 @@ import {
 } from "./threadScroll.ts";
 
 const idle = { hasMoreHistory: true, loading: false, error: null };
+
+describe("isAtBottom", () => {
+  it("is only true at the very bottom, unlike isNearBottom", () => {
+    expect(isAtBottom({ scrollTop: 100, scrollHeight: 120, viewportHeight: 20 })).toBe(true);
+    expect(isAtBottom({ scrollTop: 97, scrollHeight: 120, viewportHeight: 20 })).toBe(false);
+    expect(isNearBottom({ scrollTop: 97, scrollHeight: 120, viewportHeight: 20 })).toBe(true);
+    expect(isAtBottom({ scrollTop: 0, scrollHeight: 10, viewportHeight: 20 })).toBe(true);
+  });
+});
 
 describe("isNearBottom", () => {
   it("counts the last few rows as the bottom", () => {

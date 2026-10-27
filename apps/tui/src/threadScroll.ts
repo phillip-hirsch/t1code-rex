@@ -15,6 +15,14 @@ export function isNearBottom(metrics: ScrollMetrics): boolean {
   return distanceFromBottom(metrics) <= TIMELINE_BOTTOM_THRESHOLD_ROWS;
 }
 
+/**
+ * Exactly at the bottom, where OpenTUI's sticky scroll keeps the view pinned. Prepend
+ * anchoring is skipped only here; a few rows up the view doesn't stick, so it must be held.
+ */
+export function isAtBottom(metrics: ScrollMetrics): boolean {
+  return distanceFromBottom(metrics) < 1;
+}
+
 export interface HistoryPagingState {
   readonly hasMoreHistory: boolean;
   readonly loading: boolean;
