@@ -738,3 +738,55 @@ describe("composer sender, Sol audit round 3", () => {
     expect(sender.pendingCount()).toBe(0);
   });
 });
+
+describe("composer sender, Sol audit round 4", () => {
+  const approval: ComposerSettings = { ...threadSettings, runtimeMode: "approval-required" };
+
+  it("N8: Stop and Resume before a send's mode reply: queue.resume completes before its message", async () => {
+    const modeReply = deferred();
+    const resumed = deferred();
+    const { store, sender, calls } = setup([modeReply.promise, resumed.promise]);
+    void sender.send(send({ settings: approval }));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1:runtime-mode"]);
+    expect(sender.hold("t1")).toBe(1);
+    sender.resume(ThreadId.make("t1"));
+    modeReply.resolve(ok);
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1:runtime-mode", "resume"]);
+    resumed.resolve(ok);
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1:runtime-mode", "resume", "cmd-1"]);
+    expect(store.snapshot("t1").sends).toEqual([]);
+  });
+
+  it("N8: Stop during a send's mode command holds its message after the mode reply", async () => {
+    const modeReply = deferred();
+    const { store, sender, calls } = setup([modeReply.promise]);
+    void sender.send(send({ settings: approval }));
+    await settle();
+    sender.hold("t1");
+    modeReply.resolve(ok);
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1:runtime-mode"]);
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["held"]);
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    // The mode command isn't sent again: it was accepted.
+    expect(ids(calls)).toEqual(["cmd-1:runtime-mode", "resume", "cmd-1"]);
+  });
+
+  it("N8: /discard after Stop hands back a message still on its mode command", async () => {
+    const modeReply = deferred();
+    const { store, sender, calls } = setup([modeReply.promise]);
+    void sender.send(send({ settings: approval, text: "one" }));
+    await settle();
+    sender.hold("t1");
+    expect(sender.discard("t1")).toEqual({ messages: 1, resumes: 0 });
+    modeReply.resolve(ok);
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1:runtime-mode"]);
+    expect(store.getDraft("t1").text).toBe("one");
+    expect(store.snapshot("t1").notice).toBe(DISCARD_NOTICE);
+  });
+});

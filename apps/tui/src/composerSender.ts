@@ -78,6 +78,8 @@ interface ThreadQueue {
   readonly jobs: Array<Job>;
   /** Set while a drain loop owns the queue. */
   draining: Promise<void> | null;
+  /** The job whose command is going out now; not always first, as a resume can go ahead of it. */
+  current: Job | null;
   /** The head lost the connection; set while its retry waits. */
   cancelRetry: (() => void) | null;
   /** Stop held the queue: nothing more goes out until it's resumed. */
@@ -132,7 +134,13 @@ export function createComposerSender(options: ComposerSenderOptions) {
   const queueFor = (threadId: string): ThreadQueue => {
     const existing = queues.get(threadId);
     if (existing) return existing;
-    const queue: ThreadQueue = { jobs: [], draining: null, cancelRetry: null, held: false };
+    const queue: ThreadQueue = {
+      jobs: [],
+      draining: null,
+      current: null,
+      cancelRetry: null,
+      held: false,
+    };
     queues.set(threadId, queue);
     return queue;
   };
@@ -227,7 +235,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
     while (job.next < job.stages.length) {
       const stage = job.stages[job.next];
       if (stage === undefined) break;
-      if (queue.held) return HELD;
+      // Stop, or a resume that went ahead of it: it waits at this stage, before its message.
+      if (queue.held || queue.jobs[0] !== job) return HELD;
       mark(job, "sending");
       if (stage.kind === "start-turn") job.dispatched = true;
       const result = await attempt(job, () => runStage(job.send, stage));
@@ -273,12 +282,14 @@ export function createComposerSender(options: ComposerSenderOptions) {
       try {
         for (let job = queue.jobs[0]; job !== undefined; job = queue.jobs[0]) {
           if (disposed || queue.held) break;
+          queue.current = job;
           const result = await runJob(queue, job);
-          if (disposed || result === HELD) break;
-          // Resent (the same job is still first) or dropped (it's gone): carry on either way.
-          if (result === ABANDONED) continue;
+          queue.current = null;
+          if (disposed) break;
+          // Paused (held, or a resume went ahead), resent, or dropped: the next pass decides.
+          if (result === HELD || result === ABANDONED) continue;
           if (result.ok) {
-            queue.jobs.shift();
+            queue.jobs.splice(queue.jobs.indexOf(job), 1);
             finish(job);
             continue;
           }
@@ -288,15 +299,17 @@ export function createComposerSender(options: ComposerSenderOptions) {
             const reason = describeSendFailure(result.error);
             if (job.kind === "resume") {
               // The server still holds its queue, so the messages held here stay held.
-              queue.jobs.shift();
+              queue.jobs.splice(queue.jobs.indexOf(job), 1);
               queue.held = true;
               store.setNotice(job.threadId, `Resume failed: ${reason} (/resume, /discard)`);
               break;
             }
             // What waited behind it was planned on top of it: all of it goes back, in order.
+            // A resume ahead of it still goes out.
             for (const entry of sendJobs(queue).reverse()) store.restoreSend(entry.send, reason);
-            queue.jobs.splice(0);
-            break;
+            const resumes = queue.jobs.filter((entry) => entry.kind === "resume");
+            queue.jobs.splice(0, queue.jobs.length, ...resumes);
+            continue;
           }
           job.attempt += 1;
           for (const entry of queue.jobs) mark(entry, "waiting");
@@ -309,6 +322,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
       } finally {
         // Runs in the same tick as the loop's last check, so no send can slip in between.
         queue.draining = null;
+        queue.current = null;
         if (queue.held) for (const entry of sendJobs(queue)) mark(entry, "held");
         dropIfIdle(threadId, queue);
       }
@@ -318,8 +332,11 @@ export function createComposerSender(options: ComposerSenderOptions) {
   };
 
   /** The job whose command is going out now, if any. */
-  const inFlight = (queue: ThreadQueue): Job | undefined =>
-    queue.draining === null ? undefined : queue.jobs[0];
+  const inFlight = (queue: ThreadQueue): Job | undefined => queue.current ?? undefined;
+
+  /** A command in flight that must finish where it is: a resume, or a message that went out. */
+  const committed = (job: Job | undefined): job is Job =>
+    job !== undefined && (job.kind === "resume" || job.dispatched);
 
   const resumeJob = (threadId: ThreadId): ResumeJob => ({
     kind: "resume",
@@ -331,13 +348,15 @@ export function createComposerSender(options: ComposerSenderOptions) {
   });
 
   /**
-   * Lifts a hold. A `queue.resume` goes ahead of the held messages, behind any command in
-   * flight, so the server's held runs (sent earlier) stay ahead of them.
+   * Lifts a hold. A `queue.resume` goes ahead of the held messages, so the server's held runs
+   * (sent earlier) stay ahead of them. Only a resume or a message already out stays ahead of
+   * it; a message still on its mode commands waits for the resume.
    */
   const release = (threadId: ThreadId, queue: ThreadQueue) => {
     if (!queue.held) return;
     queue.held = false;
-    const at = inFlight(queue) === undefined ? 0 : 1;
+    const current = inFlight(queue);
+    const at = committed(current) ? queue.jobs.indexOf(current) + 1 : 0;
     if (queue.jobs[at]?.kind !== "resume") queue.jobs.splice(at, 0, resumeJob(threadId));
     for (const job of sendJobs(queue)) if (job.status === "held") mark(job, "sending");
   };
@@ -346,7 +365,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
     disposed = true;
     for (const queue of queues.values()) {
       queue.cancelRetry?.();
-      queue.jobs[0]?.abandon?.();
+      queue.current?.abandon?.();
     }
     queues.clear();
     accepted.clear();
@@ -373,7 +392,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
 
     /**
      * Stop: holds unsent jobs, so the server doesn't take a message as a new send and
-     * release its own held queue. A command in flight finishes. Returns how many are held.
+     * release its own held queue. A command in flight finishes; a message still on its mode
+     * commands stops after the one in flight. Returns how many messages are held.
      */
     hold(threadId: string): number {
       const queue = queues.get(threadId);
@@ -381,8 +401,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
       queue.held = true;
       stopRetry(queue);
       const current = inFlight(queue);
-      const held = sendJobs(queue).filter((job) => job !== current);
-      for (const job of held) mark(job, "held");
+      const held = sendJobs(queue).filter((job) => job !== current || !job.dispatched);
+      for (const job of held) if (job !== current) mark(job, "held");
       return held.length;
     },
 
@@ -403,19 +423,21 @@ export function createComposerSender(options: ComposerSenderOptions) {
 
     /**
      * Hands the thread's pending messages back to the composer and drops pending resumes,
-     * except a command in flight that isn't stuck. A message that went out unconfirmed comes
-     * back marked "may have been sent", so it's neither lost nor resent behind the user's back.
+     * except a resume or message in flight that isn't stuck. A message that went out
+     * unconfirmed comes back marked "may have been sent", so it's neither lost nor resent
+     * behind the user's back.
      */
     discard(threadId: string): { readonly messages: number; readonly resumes: number } {
       const queue = queues.get(threadId);
       if (!queue) return { messages: 0, resumes: 0 };
       const current = inFlight(queue);
-      const kept = current !== undefined && current.status !== "stuck" ? 1 : 0;
-      const dropped = queue.jobs.splice(kept);
+      const kept = committed(current) && current.status !== "stuck" ? current : undefined;
+      const dropped = queue.jobs.filter((job) => job !== kept);
       if (dropped.length === 0) return { messages: 0, resumes: 0 };
+      queue.jobs.splice(0, queue.jobs.length, ...(kept === undefined ? [] : [kept]));
       stopRetry(queue);
       queue.held = false;
-      dropped[0]?.abandon?.();
+      if (current !== kept) current?.abandon?.();
       const messages = dropped.filter((job): job is SendJob => job.kind === "send");
       for (const job of dropped) if (job.kind === "resume") mark(job, "sending");
       const notice = messages.some((job) => job.dispatched) ? MAYBE_SENT_NOTICE : DISCARD_NOTICE;
@@ -429,8 +451,9 @@ export function createComposerSender(options: ComposerSenderOptions) {
       const drains: Array<Promise<void>> = [];
       for (const [threadId, queue] of queues) {
         if (queue.held || queue.jobs.length === 0) continue;
+        const current = inFlight(queue);
         if (queue.draining === null) drains.push(drain(threadId, queue));
-        else if (queue.jobs[0]?.status === "stuck") queue.jobs[0].abandon?.();
+        else if (current?.status === "stuck") current.abandon?.();
       }
       return Promise.all(drains).then(() => undefined);
     },
