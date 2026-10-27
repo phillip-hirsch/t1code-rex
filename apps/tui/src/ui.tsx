@@ -58,6 +58,12 @@ import {
 import { createComposerStore } from "./composerStore.ts";
 import type { TuiPaths } from "./config.ts";
 import type { TuiConnection } from "./connection/tuiConnection.ts";
+import {
+  createStopNotice,
+  resolveFooterStatus,
+  STOPPING,
+  type FooterStatus,
+} from "./footerStatus.ts";
 import { resolveTuiShortcutCommand } from "./keybindings.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
@@ -332,7 +338,7 @@ function Shell(props: AppProps) {
   const [focusArea, setFocusArea] = useState<FocusArea>("sidebar");
   const [sidebarCollapsedPreference, setSidebarCollapsedPreference] = useState(false);
   const [sidebarOverlayOpen, setSidebarOverlayOpen] = useState(false);
-  const [status, setStatus] = useState<string | null>(null);
+  const [status, setStatus] = useState<FooterStatus>(null);
 
   const markdownStyles = useMarkdownStyles(theme);
   const threadViewRef = useRef<ThreadViewHandle | null>(null);
@@ -785,9 +791,12 @@ function Shell(props: AppProps) {
     // Messages not sent yet stay here until resumed, like the queue the server holds.
     const held = sender.hold(activeThread.id);
     setStatus(
-      held === 0
-        ? "Stopping"
-        : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. Enter or /resume sends, /discard edits`,
+      createStopNotice(
+        activeThread,
+        held === 0
+          ? STOPPING
+          : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. Enter or /resume sends, /discard edits`,
+      ),
     );
     void connection
       .interruptTurn({
@@ -1049,8 +1058,7 @@ function Shell(props: AppProps) {
     : null;
   const sidebarWidth = TUI_SIDEBAR_WIDTH;
   const emptyLabel = sidebar.hasSnapshot ? "No projects yet" : "Loading projects…";
-  // "Stopping" ends with the run.
-  const statusText = status === "Stopping" && !running ? "Stopped" : status;
+  const statusText = resolveFooterStatus(status, activeThread);
   const footerHints = modelPicker
     ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
     : sidebarFocused
@@ -1237,12 +1245,12 @@ function Shell(props: AppProps) {
         {props.prefsLockedOut ? (
           <text
             wrapMode="none"
-            content={status ? `  ${PREFS_LOCKED_OUT_NOTE}  ·  ` : `  ${PREFS_LOCKED_OUT_NOTE}`}
+            content={statusText ? `  ${PREFS_LOCKED_OUT_NOTE}  ·  ` : `  ${PREFS_LOCKED_OUT_NOTE}`}
             // The hints truncate first, so the note always shows whole.
             style={{ fg: palette.subtle, flexShrink: 0 }}
           />
         ) : null}
-        {status ? (
+        {statusText ? (
           // The hints truncate first, so a status reads whole.
           <text
             wrapMode="none"
