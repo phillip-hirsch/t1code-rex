@@ -52,7 +52,7 @@ describe("terminalRowRuns", () => {
     ]);
   });
 
-  it("finds a wide character by the spacer after it, as Ghostty reports it", () => {
+  it("finds a wide character by the spacer after it, as Ghostty reports it, without its ZWJ", () => {
     const runs = terminalRowRuns({
       cells: [
         cell("a"),
@@ -65,7 +65,7 @@ describe("terminalRowRuns", () => {
     });
     expect(runs.map((run) => [run.x, run.text])).toEqual([
       [0, "a"],
-      [1, "👨‍"],
+      [1, "👨"],
       [3, "  "],
       [5, "b"],
     ]);

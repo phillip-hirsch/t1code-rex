@@ -94,12 +94,14 @@ function bufferOf(
   };
 }
 
+/** The failure's message without its final period, so it can sit inside a sentence. */
 function failureMessage(
   result: { readonly cause: Cause.Cause<unknown> },
   fallback: string,
 ): string {
   const error = squashAtomCommandFailure(result);
-  return error instanceof Error && error.message.length > 0 ? error.message : fallback;
+  const message = error instanceof Error ? error.message.replace(/\.$/u, "") : "";
+  return message.length > 0 ? message : fallback;
 }
 
 /**

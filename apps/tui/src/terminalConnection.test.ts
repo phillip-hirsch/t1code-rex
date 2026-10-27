@@ -110,12 +110,14 @@ describe("connectServerTerminal", () => {
     connection.subscribe((buffer) => seen.push(buffer.error));
     connection.write("echo ");
     connection.write("hello\r");
-    writes[0]?.reply(failed("socket closed"));
+    writes[0]?.reply(failed("socket closed."));
     await settle();
     connection.write("x");
     await settle();
     expect(writes.map((write) => write.data)).toEqual(["echo "]);
-    expect(connection.read().error).toContain("Input not sent: socket closed");
+    expect(connection.read().error).toBe(
+      "Input not sent: socket closed. Typing resumes when the terminal reconnects.",
+    );
     expect(seen.at(-1)).toContain("Input not sent");
 
     // Reattaching starts a new lifecycle; input flows again.

@@ -10,6 +10,7 @@ export const CELL_ATTRIBUTES = {
 
 const WIDE = 1;
 const SPACER_TAIL = 2;
+const TRAILING_ZWJ = /\u200d+$/u;
 
 /** Consecutive cells with one style, drawn with one call. */
 export interface TerminalCellRun {
@@ -55,7 +56,8 @@ export function terminalRowRuns(row: TerminalRow): ReadonlyArray<TerminalCellRun
     if (cell.wide === SPACER_TAIL) return;
     const wide = cell.wide === WIDE || row.cells[x + 1]?.wide === SPACER_TAIL;
     const blank = cell.invisible || cell.text.length === 0;
-    const text = blank ? (wide ? "  " : " ") : cell.text;
+    // A cell's trailing ZWJ would let the outer terminal join it to the next cell's emoji.
+    const text = blank ? (wide ? "  " : " ") : cell.text.replace(TRAILING_ZWJ, "");
     const attributes = cellAttributes(cell);
     if (wide) {
       flush();
