@@ -336,6 +336,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
   );
 
   return {
+    settings,
     initialized,
     hasSnapshot,
     rows,

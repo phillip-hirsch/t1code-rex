@@ -23,7 +23,8 @@
     "build": "bun run scripts/build-runtime.mjs && node scripts/bundle-server-dist.mjs",
     "start": "bun dist/index.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vp test run"
+    "test": "vp test run",
+    "check:transcript": "bun scripts/check-transcript.tsx"
   },
   "dependencies": {
     "@effect/atom-react": "catalog:",

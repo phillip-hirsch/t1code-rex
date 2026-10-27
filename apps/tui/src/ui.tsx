@@ -8,7 +8,7 @@ import {
   connectionProjectionPhase,
   type SupervisorConnectionState,
 } from "@t3tools/client-runtime/connection";
-import type { ServerProvider } from "@t3tools/contracts";
+import type { ServerConfig, ServerProvider, ThreadId } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
@@ -20,7 +20,6 @@ import type { TuiPaths } from "./config.ts";
 import type { TuiConnection } from "./connection/tuiConnection.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
-import { formatRelativeTime } from "./relativeTime.ts";
 import {
   resolveTuiResponsiveLayout,
   toggleSidebarState,
@@ -39,8 +38,6 @@ import {
   type ThreadContextMenuItem,
 } from "./sidebarContextMenu.ts";
 import { useSidebarController } from "./sidebarController.ts";
-import { threadStatusColor } from "./sidebarStatus.ts";
-import { RELATIVE_TIME_TICKER, useTicker } from "./ticker.ts";
 import type { TuiTheme } from "./theme.ts";
 import {
   buildThreadWindowCommand,
@@ -49,9 +46,10 @@ import {
   writeThreadWindowLaunch,
 } from "./threadWindowLaunch.ts";
 import { DEFAULT_THREAD_TITLE, truncateTitle } from "./threadTitle.ts";
+import { ThreadView, type ThreadViewHandle } from "./threadView.tsx";
+import { useMarkdownStyles } from "./messageMarkdownView.tsx";
 
 const APP_VERSION = packageJson.version ?? "0.0.0";
-const PLACEHOLDER = "Porting to orchestration v2";
 const HEADER_THREAD_TITLE_MAX_LENGTH = 44;
 const CONTEXT_MENU_WIDTH = 24;
 
@@ -91,6 +89,8 @@ interface ContextMenuState {
 }
 
 type FocusArea = "sidebar" | "thread";
+
+type ServerConfigEnvironment = ServerConfig["environment"];
 
 function describeConnection(
   state: SupervisorConnectionState | null,
@@ -152,6 +152,77 @@ function useEventCallback<Args extends unknown[], Result>(
   return useCallback((...args: Args) => latest.current(...args), []);
 }
 
+function ServerSummary(props: {
+  connection: TuiConnection;
+  environment: ServerConfigEnvironment | null;
+  providers: ReadonlyArray<ServerProvider>;
+  theme: TuiTheme;
+  emptyLabel: string;
+}) {
+  const { connection, environment, providers } = props;
+  const palette = props.theme.palette;
+  return (
+    <box style={{ flexDirection: "column" }}>
+      <text
+        wrapMode="none"
+        truncate
+        content={props.emptyLabel}
+        style={{ fg: palette.muted, marginBottom: 1 }}
+      />
+      <text wrapMode="none" truncate content="Server" style={{ fg: palette.subtle }} />
+      {environment ? (
+        <box style={{ flexDirection: "column" }}>
+          <text
+            wrapMode="none"
+            truncate
+            content={`${environment.label}  ·  T3 Code server ${environment.serverVersion}  ·  ${environment.platform.os}/${environment.platform.arch}`}
+            style={{ fg: palette.text }}
+          />
+          <text
+            wrapMode="none"
+            truncate
+            content={`${connection.session.httpBaseUrl}  ·  orchestration protocol ${environment.orchestrationProtocolVersion ?? 1}  ·  environment ${environment.environmentId}`}
+            style={{ fg: palette.muted }}
+          />
+        </box>
+      ) : (
+        <text
+          wrapMode="none"
+          truncate
+          content="Waiting for server config…"
+          style={{ fg: palette.muted }}
+        />
+      )}
+      <text
+        wrapMode="none"
+        truncate
+        content="Providers"
+        style={{ fg: palette.subtle, marginTop: 1 }}
+      />
+      {providers.length === 0 ? (
+        <text
+          wrapMode="none"
+          truncate
+          content="No providers reported yet"
+          style={{ fg: palette.muted }}
+        />
+      ) : (
+        providers.map((provider) => (
+          <text
+            key={provider.instanceId}
+            wrapMode="none"
+            truncate
+            content={`  ${(provider.displayName ?? provider.driver).padEnd(18)} ${providerStatusLabel(provider).padEnd(16)} ${provider.version ?? "no version"}  ${provider.models.length} models`}
+            style={{
+              fg: provider.enabled && provider.installed ? palette.text : palette.muted,
+            }}
+          />
+        ))
+      )}
+    </box>
+  );
+}
+
 export function App(props: AppProps) {
   return (
     <RegistryContext.Provider value={props.connection.registry}>
@@ -183,7 +254,8 @@ function Shell(props: AppProps) {
   const [sidebarOverlayOpen, setSidebarOverlayOpen] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
 
-  const clock = useTicker(RELATIVE_TIME_TICKER);
+  const markdownStyles = useMarkdownStyles(theme);
+  const threadViewRef = useRef<ThreadViewHandle | null>(null);
   const sidebar = useSidebarController({
     connection,
     initialPrefs: props.initialPrefs,
@@ -264,6 +336,16 @@ function Shell(props: AppProps) {
     },
     [connection.session, paths, projectsById, rex, threadsById],
   );
+
+  const copyToClipboard = useCallback((value: string, message: string) => {
+    copyTextToClipboard(value)
+      .then(() => setStatus(message))
+      .catch((error: unknown) => setStatus(errorMessage(error)));
+  }, []);
+  const activateThreadView = useCallback(() => {
+    setContextMenu(null);
+    setFocusArea("thread");
+  }, []);
 
   const runTask = useCallback(
     (id: string, task: () => void | Promise<void>) => {
@@ -450,6 +532,13 @@ function Shell(props: AppProps) {
       setFocusArea("thread");
       return;
     }
+    // Paging the transcript works from either pane.
+    if (
+      (key.name === "pageup" || key.name === "pagedown") &&
+      threadViewRef.current?.handleKey(key)
+    ) {
+      return;
+    }
     if (key.name === "tab") {
       setFocusArea((area) => (area === "sidebar" || !sidebarVisible ? "thread" : "sidebar"));
       return;
@@ -466,6 +555,7 @@ function Shell(props: AppProps) {
       }
       if (outcome !== null) return;
     }
+    if (!sidebarFocused && threadViewRef.current?.handleKey(key)) return;
     if (key.name === "q") onRequestExit?.();
     if (key.name === "r") retryNow();
   });
@@ -479,6 +569,7 @@ function Shell(props: AppProps) {
   const title = threadWindowLaunch ? "tr3x thread tab" : "tr3x";
   const activeStatus =
     selection.threadId === null ? null : (sidebar.statusByThread.get(selection.threadId) ?? null);
+  const threadFocused = !sidebarFocused;
   const headerThreadTitle = activeThread
     ? truncateTitle(activeThread.title || DEFAULT_THREAD_TITLE, HEADER_THREAD_TITLE_MAX_LENGTH)
     : null;
@@ -486,7 +577,7 @@ function Shell(props: AppProps) {
   const emptyLabel = sidebar.hasSnapshot ? "No projects yet" : "Loading projects…";
   const footerHints = sidebarFocused
     ? "↑↓ move  ←→ fold  ⏎ open  m menu  tab focus  ⌘K palette  q quit"
-    : `tab sidebar${layout.showSidebar ? "" : "  ctrl+b show sidebar"}  ⌘K palette  r reconnect  q quit`;
+    : `↑↓ scroll  PgUp/PgDn page  End bottom  tab sidebar${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette  q quit`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -559,100 +650,33 @@ function Shell(props: AppProps) {
       </box>
       <box style={{ flexDirection: "row", flexGrow: 1, minHeight: 0 }}>
         {layout.showSidebar ? sidebarElement : null}
-        <box style={{ flexDirection: "column", flexGrow: 1, padding: 1 }}>
-          {activeThread ? (
-            <box style={{ flexDirection: "column", marginBottom: 1 }}>
-              <text
-                wrapMode="none"
-                truncate
-                content={activeThread.title || DEFAULT_THREAD_TITLE}
-                style={{ fg: palette.text }}
-              />
-              <box style={{ flexDirection: "row", height: 1 }}>
-                <text
-                  wrapMode="none"
-                  truncate
-                  content={`${activeProject?.title ?? "Unknown project"}  ·  updated ${formatRelativeTime(activeThread.updatedAt, clock.nowMs)}`}
-                  style={{ fg: palette.muted }}
-                />
-                {activeStatus ? (
-                  <text
-                    wrapMode="none"
-                    content={`  ·  ${activeStatus.label}`}
-                    style={{ fg: threadStatusColor(activeStatus.label, theme) }}
-                  />
-                ) : null}
-              </box>
-              <text
-                wrapMode="none"
-                truncate
-                content={`Thread view, composer, approvals: ${PLACEHOLDER}`}
-                style={{ fg: palette.subtle, marginTop: 1 }}
-              />
-            </box>
+        <box style={{ flexDirection: "column", flexGrow: 1, minWidth: 0, padding: 1 }}>
+          {selection.threadId !== null ? (
+            <ThreadView
+              key={selection.threadId}
+              ref={threadViewRef}
+              connection={connection}
+              threadId={selection.threadId as ThreadId}
+              thread={activeThread}
+              project={activeProject}
+              statusPill={activeStatus}
+              theme={theme}
+              styles={markdownStyles}
+              timestampFormat={sidebar.settings.timestampFormat}
+              focused={threadFocused}
+              onActivate={activateThreadView}
+              onCopy={copyToClipboard}
+            />
           ) : (
-            <text
-              wrapMode="none"
-              truncate
-              content={
-                selection.threadId !== null
-                  ? `Thread ${selection.threadId} is not in the sidebar`
-                  : sidebar.hasSnapshot
-                    ? "Select a thread in the sidebar"
-                    : "Loading threads…"
+            <ServerSummary
+              connection={connection}
+              environment={environment}
+              providers={providers}
+              theme={theme}
+              emptyLabel={
+                sidebar.hasSnapshot ? "Select a thread in the sidebar" : "Loading threads…"
               }
-              style={{ fg: palette.muted, marginBottom: 1 }}
             />
-          )}
-          <text wrapMode="none" truncate content="Server" style={{ fg: palette.subtle }} />
-          {environment ? (
-            <box style={{ flexDirection: "column" }}>
-              <text
-                wrapMode="none"
-                truncate
-                content={`${environment.label}  ·  T3 Code server ${environment.serverVersion}  ·  ${environment.platform.os}/${environment.platform.arch}`}
-                style={{ fg: palette.text }}
-              />
-              <text
-                wrapMode="none"
-                truncate
-                content={`${connection.session.httpBaseUrl}  ·  orchestration protocol ${environment.orchestrationProtocolVersion ?? 1}  ·  environment ${environment.environmentId}`}
-                style={{ fg: palette.muted }}
-              />
-            </box>
-          ) : (
-            <text
-              wrapMode="none"
-              truncate
-              content="Waiting for server config…"
-              style={{ fg: palette.muted }}
-            />
-          )}
-          <text
-            wrapMode="none"
-            truncate
-            content="Providers"
-            style={{ fg: palette.subtle, marginTop: 1 }}
-          />
-          {providers.length === 0 ? (
-            <text
-              wrapMode="none"
-              truncate
-              content="No providers reported yet"
-              style={{ fg: palette.muted }}
-            />
-          ) : (
-            providers.map((provider) => (
-              <text
-                key={provider.instanceId}
-                wrapMode="none"
-                truncate
-                content={`  ${(provider.displayName ?? provider.driver).padEnd(18)} ${providerStatusLabel(provider).padEnd(16)} ${provider.version ?? "no version"}  ${provider.models.length} models`}
-                style={{
-                  fg: provider.enabled && provider.installed ? palette.text : palette.muted,
-                }}
-              />
-            ))
           )}
         </box>
       </box>

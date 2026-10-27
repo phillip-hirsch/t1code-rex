@@ -7,13 +7,21 @@ import {
   ShellSnapshotLoader,
   createEnvironmentShellAtoms,
 } from "@t3tools/client-runtime/state/shell";
-import { createEnvironmentThreadShellAtoms } from "@t3tools/client-runtime/state/threads";
+import { createRuntimeCommand } from "@t3tools/client-runtime/state/runtime";
+import {
+  BoundedThreadSnapshotLoader,
+  ThreadHistoryController,
+  createEnvironmentThreadDetailAtoms,
+  createEnvironmentThreadShellAtoms,
+  createEnvironmentThreadStateAtoms,
+} from "@t3tools/client-runtime/state/threads";
 import type {
   EnvironmentId,
   OrchestrationProjectShell,
   OrchestrationV2ShellSnapshot,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { Atom, AtomRegistry } from "effect/reactivity";
@@ -36,7 +44,11 @@ const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
  */
 export function createTuiConnection(options: TuiConnectionOptions) {
   const layerPlatform = Platform.layer(options);
-  const layerConnection = ShellSnapshotLoader.layer.pipe(
+  const layerConnection = Layer.mergeAll(
+    ShellSnapshotLoader.layer,
+    BoundedThreadSnapshotLoader.layer,
+    ThreadHistoryController.layer,
+  ).pipe(
     Layer.provideMerge(Connection.layerWithOptions({})),
     Layer.provideMerge(Layer.mergeAll(Runtime.layer, layerPlatform)),
   );
@@ -55,6 +67,17 @@ export function createTuiConnection(options: TuiConnectionOptions) {
   const threadShells = createEnvironmentThreadShellAtoms({
     catalogValueAtom: catalog.catalogValueAtom,
     snapshotAtom,
+  });
+  const threadStates = createEnvironmentThreadStateAtoms(runtime);
+  const threadDetails = createEnvironmentThreadDetailAtoms(threadStates.stateAtom);
+  // One page request per thread at a time; repeats while it runs share its result.
+  const loadEarlierHistory = createRuntimeCommand(runtime, {
+    label: "tr3x:thread:load-earlier",
+    concurrency: { mode: "singleFlight", key: (threadId: ThreadId) => threadId },
+    execute: (threadId: ThreadId) =>
+      ThreadHistoryController.ThreadHistoryController.pipe(
+        Effect.flatMap((controller) => controller.loadEarlier(environmentId, threadId)),
+      ),
   });
   const serverConfigsAtom = createEnvironmentServerConfigsAtom({
     catalogValueAtom: catalog.catalogValueAtom,
@@ -87,6 +110,18 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     threadShellsAtom: threadShells.quietThreadShellsAtom,
     threadShellAtom: (threadId: ThreadId) =>
       threadShells.quietThreadShellAtom({ environmentId, threadId }),
+    /** Detail for one thread, fed by orchestration.subscribeThread while something reads it. */
+    thread: (threadId: ThreadId) => {
+      const ref = { environmentId, threadId };
+      return {
+        visibleTurnItemsAtom: threadDetails.visibleTurnItemsAtom(ref),
+        statusAtom: threadDetails.statusAtom(ref),
+        errorAtom: threadDetails.errorAtom(ref),
+        historyAtom: threadDetails.historyAtom(ref),
+        pendingRequestsAtom: threadDetails.pendingRequestsAtom(ref),
+      };
+    },
+    loadEarlierHistory,
     retryNow: catalog.retryNow,
     dispose: () => {
       registry.dispose();
