@@ -8,11 +8,29 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 // Its own tmux server with no config, so the user's tmux sessions and settings never apply.
-const TMUX = ["-L", "tr3x-shot", "-f", "/dev/null"];
+// TR3X_SHOT_SOCKET picks another server; agents running side by side share this one, so
+// each uses its own session name and stops only that session.
+const TMUX = ["-L", process.env.TR3X_SHOT_SOCKET || "tr3x-shot", "-f", "/dev/null"];
 const args = process.argv.slice(2);
 const USAGE = `usage:
   screenshot.mjs start <name> [--size 140x40] -- <command...>   start the TUI in a detached tmux session
-  screenshot.mjs <name> <out.png>                                capture that session to a PNG`;
+  screenshot.mjs <name> <out.png>                                capture that session to a PNG
+  screenshot.mjs stop <name>                                     stop that session only`;
+
+if (args[0] === "stop") {
+  if (!args[1]) {
+    console.error(USAGE);
+    process.exit(2);
+  }
+  try {
+    NodeChildProcess.execFileSync("tmux", [...TMUX, "kill-session", "-t", args[1]], {
+      stdio: "ignore",
+    });
+  } catch {
+    // Already gone.
+  }
+  process.exit(0);
+}
 
 if (args[0] === "start") {
   const name = args[1];
