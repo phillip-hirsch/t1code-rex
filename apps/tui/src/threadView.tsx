@@ -63,7 +63,6 @@ export interface ThreadViewProps {
   readonly theme: TuiTheme;
   readonly styles: MarkdownStyles;
   readonly timestampFormat: TimestampFormat;
-  readonly focused: boolean;
   readonly onActivate: () => void;
   readonly onCopy: (value: string, message: string) => void;
   readonly ref?: Ref<ThreadViewHandle>;
@@ -97,7 +96,6 @@ export function ThreadView(props: ThreadViewProps) {
     theme,
     styles,
     timestampFormat,
-    focused,
     onActivate,
     onCopy,
   } = props;
@@ -252,7 +250,6 @@ export function ThreadView(props: ThreadViewProps) {
       ) : null}
       {runStatus ? <RunStatusRow status={runStatus} theme={theme} /> : null}
       <PendingRequestsNotice pending={pending} theme={theme} />
-      <ComposerPlaceholder theme={theme} focused={focused} />
     </box>
   );
 }
@@ -619,31 +616,6 @@ function PendingRequestsNotice(props: { pending: PendingThreadRequests | null; t
         wrapMode="none"
         truncate
         content="Answering from tr3x isn't ported yet; respond in T3 Code web or mobile."
-        style={{ fg: palette.subtle }}
-      />
-    </box>
-  );
-}
-
-function ComposerPlaceholder(props: { theme: TuiTheme; focused: boolean }) {
-  const palette = props.theme.palette;
-  return (
-    <box
-      style={{
-        flexShrink: 0,
-        marginTop: 1,
-        height: 3,
-        border: true,
-        borderStyle: "rounded",
-        borderColor: props.focused ? palette.composerBorder : palette.composerBorderMuted,
-        paddingLeft: 1,
-        paddingRight: 1,
-      }}
-    >
-      <text
-        wrapMode="none"
-        truncate
-        content="Read-only for now; the composer comes next."
         style={{ fg: palette.subtle }}
       />
     </box>

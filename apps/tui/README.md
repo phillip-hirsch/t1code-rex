@@ -26,6 +26,17 @@ Linux notes:
 - Bundled T3 Code server (orchestration v2) for local use
 - Codex-first workflow tuned for terminal usage
 
+## Composer
+
+Keys match upstream T3 Code's web app:
+
+- **Enter** sends. While a run is busy, Enter steers it, the way upstream's default "Follow-up behavior" does. **Cmd+Enter** or **Ctrl+Enter** queues the message behind the run instead. Many terminals only report Cmd or Ctrl with Enter under the kitty keyboard protocol, so **Alt+Enter** queues too. `/steer <message>` and `/queue <message>` do the same from any terminal. Set `"followUpBehavior": "queue"` in `prefs.json` to swap Enter and the alternate key, like upstream's setting.
+- **Shift+Enter** or **Ctrl+J** adds a newline.
+- **Esc** stops a run. Ctrl+C clears the text, then stops a run, then quits. Enter on an empty composer stops a busy run too.
+- After a stop, messages that hadn't gone out yet are held, like the queue the server holds. Enter on the empty composer or `/resume` sends them; `/discard` puts them back in the composer. Sending a new message releases the hold too. Either way, the server's held queue is released first, so messages go out in the order you sent them. If that release fails, the messages stay held and the composer says why. `/resume` with nothing held here just releases the server's queue.
+- A message that gets no reply for 30 seconds shows as stuck. `/resume` sends it again with the same ids, so the server doesn't take it twice, and `/discard` puts it back in the composer. If it may already have been sent, the composer says so.
+- On quit, unsent messages go back into their thread's composer. A message that went out without a reply yet is saved by id; on the next launch tr3x looks for it on the thread, and if it isn't there, puts it back in the composer with a note that it may not have been sent. tr3x never sends anything again on its own. A window that can't save prefs (a Rex thread tab, or a second main window) asks you to quit again before dropping unsent messages.
+
 ## Server and data
 
 tr3x starts upstream's T3 Code server in `desktop` mode on `127.0.0.1` and keeps its data under `~/.tr3x` (`TR3X_HOME`), so it never shares a data directory with a T3 Code install in `~/.t3`. The server needs Node 24 or newer on your `PATH`; set `TR3X_NODE_BIN` to use another binary.

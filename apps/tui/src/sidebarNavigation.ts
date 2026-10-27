@@ -61,9 +61,19 @@ export function resolveInitialSelection(input: {
   readonly savedProjectId: string | undefined;
   readonly savedThreadId: string | undefined;
   readonly cwd: string | undefined;
+  readonly isNewThreadDraft?: ((threadId: string) => boolean) | undefined;
 }): SidebarSelection {
   const { groups, launch } = input;
   if (launch) return { projectId: launch.projectId, threadId: launch.threadId };
+  // A new-thread draft that was open at quit reopens, if its project is still here.
+  if (
+    input.savedThreadId !== undefined &&
+    input.savedProjectId !== undefined &&
+    input.isNewThreadDraft?.(input.savedThreadId) === true &&
+    groups.some((group) => group.project.id === input.savedProjectId)
+  ) {
+    return { projectId: input.savedProjectId, threadId: input.savedThreadId };
+  }
   if (input.savedThreadId !== undefined) {
     for (const group of groups) {
       if (group.threads.some((thread) => thread.id === input.savedThreadId)) {

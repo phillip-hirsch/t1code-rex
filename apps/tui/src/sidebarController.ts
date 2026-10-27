@@ -52,6 +52,8 @@ export interface SidebarShellSource {
 export interface SidebarControllerOptions {
   readonly connection: SidebarShellSource;
   readonly initialPrefs: TuiPrefs;
+  /** New-thread drafts the saved selection may point at; they aren't listed threads yet. */
+  readonly isNewThreadDraft?: (threadId: string) => boolean;
   /** Only the main window saves prefs; Rex thread tabs share the file read-only. */
   readonly prefsWriter: PrefsWriter | null;
   readonly launch: ThreadWindowLaunch | null;
@@ -70,7 +72,7 @@ function isEnter(name: string): boolean {
  * streaming run re-renders only its own status dot.
  */
 export function useSidebarController(options: SidebarControllerOptions) {
-  const { connection, initialPrefs, prefsWriter, launch, cwd } = options;
+  const { connection, initialPrefs, prefsWriter, launch, cwd, isNewThreadDraft } = options;
   const projects = useAtomValue(connection.projectsAtom);
   const threads = useAtomValue(connection.threadShellsAtom);
   const hasSnapshot = useAtomValue(connection.hasShellSnapshotAtom);
@@ -196,6 +198,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
       savedProjectId: initialPrefs.selectedProjectId,
       savedThreadId: initialPrefs.selectedThreadId,
       cwd,
+      isNewThreadDraft,
     });
     setInitialized(true);
     setSelection(start);
@@ -357,6 +360,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
     handleKey,
     pressRow,
     focusRow,
+    selectThread,
     markUnread,
   };
 }

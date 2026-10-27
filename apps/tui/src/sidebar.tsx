@@ -31,6 +31,8 @@ export interface SidebarPress {
   readonly secondary: boolean;
   readonly x: number;
   readonly y: number;
+  /** The project row's "+" button: start a new thread there. */
+  readonly newThread?: boolean;
 }
 
 export interface SidebarProps {
@@ -163,6 +165,22 @@ const ProjectRow = memo(function ProjectRow(props: {
           flexGrow: 1,
         }}
       />
+      <box
+        onMouseDown={(event: MouseEvent) => {
+          event.preventDefault();
+          event.stopPropagation();
+          props.onPress({
+            row: props.row,
+            secondary: false,
+            x: event.x,
+            y: event.y,
+            newThread: true,
+          });
+        }}
+        style={{ width: 2, flexShrink: 0, alignItems: "flex-end" }}
+      >
+        <text content="+" style={{ fg: theme.palette.subtle }} />
+      </box>
     </SidebarRowBox>
   );
 });
