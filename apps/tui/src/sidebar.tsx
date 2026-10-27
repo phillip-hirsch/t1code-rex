@@ -31,6 +31,9 @@ export interface SidebarPress {
   readonly secondary: boolean;
   readonly x: number;
   readonly y: number;
+  /** Ctrl+click toggles a thread in the multi-selection; Shift+click extends it. */
+  readonly ctrl?: boolean;
+  readonly shift?: boolean;
   /** The project row's "+" button: start a new thread there. */
   readonly newThread?: boolean;
 }
@@ -50,6 +53,8 @@ export interface SidebarProps {
   readonly activeProjectId: string | null;
   readonly activeThreadId: string | null;
   readonly cursorKey: string | null;
+  /** Threads picked for a bulk action. */
+  readonly multiSelectedThreadIds: ReadonlySet<string>;
   readonly emptyLabel: string;
   readonly onPress: (press: SidebarPress) => void;
 }
@@ -81,7 +86,14 @@ function SidebarRowBox(props: {
       onMouseDown={(event: MouseEvent) => {
         event.preventDefault();
         event.stopPropagation();
-        onPress({ row, secondary: event.button === 2, x: event.x, y: event.y });
+        onPress({
+          row,
+          secondary: event.button === 2,
+          x: event.x,
+          y: event.y,
+          ctrl: event.modifiers.ctrl,
+          shift: event.modifiers.shift,
+        });
       }}
       style={{
         height: 1,
@@ -193,11 +205,14 @@ const ThreadRow = memo(function ThreadRow(props: {
   readonly active: boolean;
   readonly highlight: RowHighlight;
   readonly status: ThreadStatusPill | null;
+  readonly multiSelected: boolean;
   readonly onPress: (press: SidebarPress) => void;
 }) {
   const { theme, thread } = props;
   const selected = props.highlight === "cursor";
-  const title = truncateTitle(thread.title || DEFAULT_THREAD_TITLE, props.titleWidth - 3);
+  const pin = thread.pinnedAt !== null ? "󰐃 " : "";
+  const title = `${pin}${truncateTitle(thread.title || DEFAULT_THREAD_TITLE, props.titleWidth - 3 - pin.length)}`;
+  const settled = thread.settledOverride === "settled";
   return (
     <SidebarRowBox
       theme={theme}
@@ -208,7 +223,11 @@ const ThreadRow = memo(function ThreadRow(props: {
       onPress={props.onPress}
     >
       <box style={{ width: STATUS_WIDTH, flexShrink: 0 }}>
-        {props.status ? <StatusDot theme={theme} status={props.status} /> : null}
+        {props.multiSelected ? (
+          <text content="✓" style={{ fg: theme.palette.accent }} />
+        ) : props.status ? (
+          <StatusDot theme={theme} status={props.status} />
+        ) : null}
       </box>
       <box style={{ width: props.titleWidth, flexShrink: 0, overflow: "hidden", height: 1 }}>
         <text
@@ -219,7 +238,9 @@ const ThreadRow = memo(function ThreadRow(props: {
               ? theme.colors.selectedText
               : props.active
                 ? theme.palette.text
-                : theme.palette.muted,
+                : settled
+                  ? theme.palette.subtle
+                  : theme.palette.muted,
           }}
         />
       </box>
@@ -374,6 +395,7 @@ export const Sidebar = memo(function Sidebar(props: SidebarProps) {
           active={active}
           highlight={highlightFor(line.key, props, active)}
           status={props.statusByThread.get(line.threadId) ?? null}
+          multiSelected={props.multiSelectedThreadIds.has(line.threadId)}
           onPress={props.onPress}
         />
       );

@@ -1,7 +1,20 @@
 import { Connection, EnvironmentSupervisor } from "@t3tools/client-runtime/connection";
 import type { ResumeThreadQueueInput } from "@t3tools/client-runtime/operations";
 import { createEnvironmentCatalogAtoms } from "@t3tools/client-runtime/state/connections";
-import { createEnvironmentServerConfigsAtom } from "@t3tools/client-runtime/state/shell";
+import { createFilesystemEnvironmentAtoms } from "@t3tools/client-runtime/state/filesystem";
+import { createOrchestrationEnvironmentAtoms } from "@t3tools/client-runtime/state/orchestration";
+import {
+  createEnvironmentProjectAtoms,
+  createProjectEnvironmentAtoms,
+  type CreateProjectInput,
+  type DeleteProjectInput,
+  type UpdateProjectInput,
+} from "@t3tools/client-runtime/state/projects";
+import { createSourceControlEnvironmentAtoms } from "@t3tools/client-runtime/state/source-control";
+import {
+  createEnvironmentServerConfigsAtom,
+  createShellEnvironmentAtoms,
+} from "@t3tools/client-runtime/state/shell";
 import { createServerEnvironmentAtoms } from "@t3tools/client-runtime/state/server";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import {
@@ -23,20 +36,33 @@ import {
   createEnvironmentThreadShellAtoms,
   createEnvironmentThreadStateAtoms,
   createThreadEnvironmentAtoms,
+  type ArchiveThreadInput,
+  type DeleteThreadInput,
   type DismissThreadUserInputInput,
   fetchEnvironmentThreadSnapshot,
   type InterruptThreadTurnInput,
+  type PinThreadInput,
   type RespondToThreadApprovalInput,
   type RespondToThreadUserInputInput,
   type SetThreadInteractionModeInput,
   type SetThreadRuntimeModeInput,
+  type SettleThreadInput,
   type StartThreadTurnInput,
   type ThreadSnapshotLoadResult,
+  type UnarchiveThreadInput,
+  type UnpinThreadInput,
+  type UnsettleThreadInput,
+  type UpdateThreadMetadataInput,
 } from "@t3tools/client-runtime/state/threads";
 import type {
   EnvironmentId,
+  FilesystemBrowseInput,
+  LaunchEditorInput,
   OrchestrationProjectShell,
   OrchestrationV2ShellSnapshot,
+  ProjectCloneStartInput,
+  ProjectSearchEntriesInput,
+  SourceControlCloneRepositoryInput,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -59,6 +85,20 @@ export interface TuiConnectionOptions {
 }
 
 const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
+
+/** A management action's outcome: its value, or the failure to show. */
+export type TuiActionResult<A> =
+  | { readonly ok: true; readonly value: A }
+  | { readonly ok: false; readonly error: unknown; readonly interrupted: boolean };
+
+function toActionResult<A, E>(result: AtomCommandResult<A, E>): TuiActionResult<A> {
+  if (AsyncResult.isSuccess(result)) return { ok: true, value: result.value };
+  return {
+    ok: false,
+    error: Cause.squash(result.cause),
+    interrupted: Cause.hasInterruptsOnly(result.cause),
+  };
+}
 
 function toCommandResult<A, E>(result: AtomCommandResult<A, E>): ComposerCommandResult {
   if (AsyncResult.isSuccess(result)) return { ok: true };
@@ -149,6 +189,31 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     runAtomCommand(registry, command, { environmentId, input }, { reportFailure: false }).then(
       toCommandResult,
     );
+  const runAction = <Input, A, E>(
+    command: AtomCommand<{ environmentId: EnvironmentId; input: Input }, A, E>,
+    input: Input,
+  ) =>
+    runAtomCommand(registry, command, { environmentId, input }, { reportFailure: false }).then(
+      toActionResult,
+    );
+  // Projects, clones, file search, editors, and archived threads: the same atoms web and
+  // mobile build, on this runtime.
+  const environmentProjects = createEnvironmentProjectAtoms({
+    catalogValueAtom: catalog.catalogValueAtom,
+    snapshotAtom,
+    serverConfigValueAtom: server.configValueAtom,
+  });
+  const projectCommands = createProjectEnvironmentAtoms(runtime, {
+    projectAtom: environmentProjects.projectAtom,
+  });
+  const sourceControl = createSourceControlEnvironmentAtoms(runtime);
+  const filesystem = createFilesystemEnvironmentAtoms(runtime);
+  const shellCommands = createShellEnvironmentAtoms(runtime);
+  const orchestration = createOrchestrationEnvironmentAtoms(runtime);
+  const archivedShellSnapshotAtom = orchestration.archivedShellSnapshot({
+    environmentId,
+    input: {},
+  });
   const serverConfigsAtom = createEnvironmentServerConfigsAtom({
     catalogValueAtom: catalog.catalogValueAtom,
     serverConfigValueAtom: server.configValueAtom,
@@ -219,6 +284,31 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       runThreadCommand(threadCommands.respondToUserInput, input),
     dismissUserInput: (input: DismissThreadUserInputInput) =>
       runThreadCommand(threadCommands.dismissUserInput, input),
+    archiveThread: (input: ArchiveThreadInput) => runAction(threadCommands.archive, input),
+    unarchiveThread: (input: UnarchiveThreadInput) => runAction(threadCommands.unarchive, input),
+    deleteThread: (input: DeleteThreadInput) => runAction(threadCommands.delete, input),
+    updateThreadMetadata: (input: UpdateThreadMetadataInput) =>
+      runAction(threadCommands.updateMetadata, input),
+    pinThread: (input: PinThreadInput) => runAction(threadCommands.pin, input),
+    unpinThread: (input: UnpinThreadInput) => runAction(threadCommands.unpin, input),
+    settleThread: (input: SettleThreadInput) => runAction(threadCommands.settle, input),
+    unsettleThread: (input: UnsettleThreadInput) => runAction(threadCommands.unsettle, input),
+    createProject: (input: CreateProjectInput) => runAction(projectCommands.create, input),
+    updateProject: (input: UpdateProjectInput) => runAction(projectCommands.update, input),
+    deleteProject: (input: DeleteProjectInput) => runAction(projectCommands.delete, input),
+    /** Clone-backed project creation; the clone itself runs on in the background. */
+    startProjectClone: (input: ProjectCloneStartInput) =>
+      runAction(sourceControl.startProjectClone, input),
+    /** Older servers' blocking clone, for those without clone tracking. */
+    cloneRepository: (input: SourceControlCloneRepositoryInput) =>
+      runAction(sourceControl.cloneRepository, input),
+    projectClonesAtom: sourceControl.projectClones({ environmentId, input: {} }),
+    openInEditor: (input: LaunchEditorInput) => runAction(shellCommands.openInEditor, input),
+    searchEntriesAtom: (input: ProjectSearchEntriesInput) =>
+      projectCommands.searchEntries({ environmentId, input }),
+    browseAtom: (input: FilesystemBrowseInput) => filesystem.browse({ environmentId, input }),
+    archivedShellSnapshotAtom,
+    refreshArchivedThreads: () => registry.refresh(archivedShellSnapshotAtom),
     retryNow: catalog.retryNow,
     dispose: () => {
       registry.dispose();

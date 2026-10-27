@@ -223,3 +223,23 @@ describe("shareSidebarRows", () => {
     expect(shared[5]).toMatchObject({ kind: "more", hiddenCount: 1 });
   });
 });
+
+describe("pinned threads", () => {
+  it("lead their project and keep the sort order within each part", () => {
+    const groups = buildSidebarGroups({
+      projects: [alpha],
+      threads: [
+        thread("newest", "alpha", "2026-06-03T00:00:00.000Z"),
+        presentedThread("pinned-old", "alpha", {
+          createdAt: at("2026-06-01T00:00:00.000Z"),
+          updatedAt: at("2026-06-01T00:00:00.000Z"),
+          pinnedAt: at("2026-06-04T00:00:00.000Z"),
+        }),
+        thread("middle", "alpha", "2026-06-02T00:00:00.000Z"),
+      ],
+      projectSortOrder: "manual",
+      threadSortOrder: "updated_at",
+    });
+    expect(groups[0]?.threads.map((entry) => entry.id)).toEqual(["pinned-old", "newest", "middle"]);
+  });
+});

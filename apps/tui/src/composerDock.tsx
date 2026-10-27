@@ -34,6 +34,8 @@ export type DockFocus = "composer" | "requests";
 export interface ComposerDockHandle {
   /** Keys while the dock has focus; true when it used the key. */
   readonly handleKey: (key: KeyEvent) => boolean;
+  /** Types text into the composer at its cursor, for keys typed while another pane had focus. */
+  readonly insertText: (text: string) => void;
 }
 
 export interface ComposerDockRequests {
@@ -180,6 +182,7 @@ export function ComposerDock(props: ComposerDockProps) {
       }
       return false;
     },
+    insertText: (text: string) => composerRef.current?.insertText(text),
   }));
 
   return (
