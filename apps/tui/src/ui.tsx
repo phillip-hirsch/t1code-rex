@@ -255,6 +255,7 @@ import {
 } from "./serverSupervisor";
 import {
   buildThreadWindowCommand,
+  expireThreadWindowLaunch,
   type ThreadWindowLaunch,
   type ThreadWindowServer,
   writeThreadWindowLaunch,
@@ -5252,6 +5253,7 @@ export function App({
   const activeThreadGitSyncKey = resolveThreadGitSyncKey(activeThread);
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
   const activeRexCwd = activeWorktreePath ?? activeProjectCwd;
+  const activeThreadTitle = activeThread?.title ?? null;
   const hasServerThread = activeThread !== null;
   const assistantStreamingEnabled =
     serverSettings?.enableAssistantStreaming ?? appSettings.enableAssistantStreaming;
@@ -6086,15 +6088,20 @@ export function App({
       })),
       ...(rex
         ? [
-            {
-              id: "rex:thread",
-              section: "Rex",
-              icon: "󰓩",
-              label: "Open thread in Rex tab",
-              description: activeThread ? activeThread.title : "Select a saved thread first",
-              keywords: ["rex", "tab", "window", "thread"],
-              disabled: !activeThread,
-            },
+            // Thread tabs track their tabs per window, so only the main window opens them.
+            ...(threadWindowLaunch
+              ? []
+              : [
+                  {
+                    id: "rex:thread",
+                    section: "Rex",
+                    icon: "󰓩",
+                    label: "Open thread in Rex tab",
+                    description: activeThreadTitle ?? "Select a saved thread first",
+                    keywords: ["rex", "tab", "window", "thread"],
+                    disabled: activeThreadTitle === null,
+                  },
+                ]),
             {
               id: "rex:terminal",
               section: "Rex",
@@ -6115,7 +6122,7 @@ export function App({
           ]
         : []),
     ],
-    [activeProject, activeProjectId, activeRexCwd, activeThread, rex],
+    [activeProject, activeProjectId, activeRexCwd, activeThreadTitle, rex, threadWindowLaunch],
   );
   const commandPaletteProjectItems = useMemo<CommandPaletteItem[]>(
     () =>
@@ -7333,7 +7340,7 @@ export function App({
     const thread = snapshot?.threads.find((entry) => entry.id === threadId);
     return buildThreadContextMenuItems({
       archived: thread?.archivedAt !== null && thread?.archivedAt !== undefined,
-      rex: rex !== null,
+      rex: rex !== null && !threadWindowLaunch,
     });
   }
 
@@ -7627,11 +7634,13 @@ export function App({
           return await rex.client.openWindow({
             label: rexTabLabel(thread.title),
             cwd: resolveThreadWorkspacePath(thread) ?? undefined,
-            command: buildThreadWindowCommand(launchFile),
+            command: buildThreadWindowCommand(launchFile, paths),
           });
         } catch (error) {
           await fs.rm(launchFile, { force: true });
           throw error;
+        } finally {
+          expireThreadWindowLaunch(launchFile);
         }
       });
       return reused ? "Focused Rex tab" : "Opened thread in Rex tab";

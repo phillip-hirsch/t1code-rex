@@ -78,7 +78,13 @@ if (process.env.T1CODE_HEADLESS === "1") {
 } else {
   let shuttingDown = false;
   let interruptRequestToken = 0;
-  const threadWindowLaunch = consumeThreadWindowLaunch();
+  let threadWindowLaunch: ReturnType<typeof consumeThreadWindowLaunch>;
+  try {
+    threadWindowLaunch = consumeThreadWindowLaunch();
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
   const paths = resolveTuiPaths();
   const prefs = await readPrefs(paths);
   const appTheme = prefs.appSettings?.theme ?? DEFAULT_APP_THEME;
