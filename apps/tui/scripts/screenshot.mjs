@@ -9,7 +9,8 @@ import * as NodePath from "node:path";
 
 // Its own tmux server with no config, so the user's tmux sessions and settings never apply.
 // TR3X_SHOT_SOCKET picks another server; agents running side by side share this one, so
-// each uses its own session name and stops only that session.
+// each uses its own session name and stops only that session. Targets are exact ("=name"):
+// tmux otherwise matches a session name by prefix.
 const TMUX = ["-L", process.env.TR3X_SHOT_SOCKET || "tr3x-shot", "-f", "/dev/null"];
 const args = process.argv.slice(2);
 const USAGE = `usage:
@@ -23,7 +24,7 @@ if (args[0] === "stop") {
     process.exit(2);
   }
   try {
-    NodeChildProcess.execFileSync("tmux", [...TMUX, "kill-session", "-t", args[1]], {
+    NodeChildProcess.execFileSync("tmux", [...TMUX, "kill-session", "-t", `=${args[1]}`], {
       stdio: "ignore",
     });
   } catch {
@@ -49,9 +50,9 @@ if (args[0] === "start") {
     .join(" ");
   tmux("new-session", "-d", "-s", name, "-x", width, "-y", height, command);
   // Without the status bar and with a fixed size, the pane is exactly width x height.
-  tmux("set", "-t", name, "status", "off");
-  tmux("set", "-t", name, "window-size", "manual");
-  tmux("resize-window", "-t", name, "-x", width, "-y", height);
+  tmux("set", "-t", `=${name}:`, "status", "off");
+  tmux("set", "-t", `=${name}:`, "window-size", "manual");
+  tmux("resize-window", "-t", `=${name}:`, "-x", width, "-y", height);
   process.exit(0);
 }
 
@@ -74,7 +75,7 @@ const DEFAULT_BG = "#1b1b1b";
 
 const [cols, rows] = NodeChildProcess.execFileSync(
   "tmux",
-  [...TMUX, "display", "-p", "-t", target, "#{pane_width} #{pane_height}"],
+  [...TMUX, "display", "-p", "-t", `=${target}:`, "#{pane_width} #{pane_height}"],
   {
     encoding: "utf8",
   },
@@ -84,7 +85,7 @@ const [cols, rows] = NodeChildProcess.execFileSync(
   .map(Number);
 const ansi = NodeChildProcess.execFileSync(
   "tmux",
-  [...TMUX, "capture-pane", "-p", "-e", "-N", "-t", target],
+  [...TMUX, "capture-pane", "-p", "-e", "-N", "-t", `=${target}:`],
   {
     encoding: "utf8",
   },
