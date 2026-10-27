@@ -1,10 +1,10 @@
-import { Cause } from "effect";
-import { Effect } from "effect";
-import { Queue } from "effect";
-import { Sink } from "effect";
-import { Stdio } from "effect";
-import { Stream } from "effect";
-import { ChildProcessSpawner } from "effect/unstable/process";
+import * as Cause from "effect/Cause";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Sink from "effect/Sink";
+import * as Stdio from "effect/Stdio";
+import * as Stream from "effect/Stream";
+import { ChildProcessSpawner } from "effect/process";
 
 import * as CodexError from "../errors.ts";
 
@@ -44,14 +44,20 @@ export const makeInMemoryStdio = Effect.fn("makeInMemoryStdio")(function* () {
   };
 });
 
+type ChildProcessTerminationHandle = Pick<
+  ChildProcessSpawner.ChildProcessHandle,
+  "exitCode" | "pid"
+>;
+
 export const makeTerminationError = (
-  handle: ChildProcessSpawner.ChildProcessHandle,
+  handle: ChildProcessTerminationHandle,
 ): Effect.Effect<CodexError.CodexAppServerError> =>
   Effect.match(handle.exitCode, {
     onFailure: (cause) =>
       new CodexError.CodexAppServerTransportError({
-        detail: "Failed to determine Codex App Server process exit status",
+        operation: "read-process-exit-status",
+        pid: handle.pid,
         cause,
       }),
-    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code }),
+    onSuccess: (code) => new CodexError.CodexAppServerProcessExitedError({ code, pid: handle.pid }),
   });

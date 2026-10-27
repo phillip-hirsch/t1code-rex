@@ -1,49 +1,39 @@
-import { describe, expect, it } from "vitest";
-import { Schema } from "effect";
+import { describe, expect, it } from "vite-plus/test";
+import * as Schema from "effect/Schema";
 
 import {
-  GitCreateWorktreeInput,
-  GitPreparePullRequestThreadInput,
+  GitCommandError,
+  GitPreparePullRequestThreadResult,
   GitRunStackedActionInput,
-  GitResolvePullRequestResult,
-} from "./git";
+} from "./git.ts";
 
-const decodeCreateWorktreeInput = Schema.decodeUnknownSync(GitCreateWorktreeInput);
-const decodePreparePullRequestThreadInput = Schema.decodeUnknownSync(
-  GitPreparePullRequestThreadInput,
+const decodeGitCommandError = Schema.decodeUnknownSync(Schema.toCodecJson(GitCommandError));
+const decodePreparePullRequestThreadResult = Schema.decodeUnknownSync(
+  GitPreparePullRequestThreadResult,
 );
 const decodeRunStackedActionInput = Schema.decodeUnknownSync(GitRunStackedActionInput);
-const decodeResolvePullRequestResult = Schema.decodeUnknownSync(GitResolvePullRequestResult);
 
-describe("GitCreateWorktreeInput", () => {
-  it("accepts omitted newBranch for existing-branch worktrees", () => {
-    const parsed = decodeCreateWorktreeInput({
+describe("GitCommandError", () => {
+  it("decodes an unknown failure reason as absent", () => {
+    const error = decodeGitCommandError({
+      _tag: "GitCommandError",
+      operation: "GitVcsDriver.createWorktree",
+      command: "git",
       cwd: "/repo",
-      branch: "feature/existing",
-      path: "/tmp/worktree",
+      detail: "git worktree add failed",
+      reason: "added_by_a_newer_server",
     });
 
-    expect(parsed.newBranch).toBeUndefined();
-    expect(parsed.branch).toBe("feature/existing");
+    expect(error.reason).toBeUndefined();
+    expect(error.message).toBe(
+      "Git command failed in GitVcsDriver.createWorktree (/repo): git worktree add failed",
+    );
   });
 });
 
-describe("GitPreparePullRequestThreadInput", () => {
-  it("accepts pull request references and mode", () => {
-    const parsed = decodePreparePullRequestThreadInput({
-      cwd: "/repo",
-      reference: "#42",
-      mode: "worktree",
-    });
-
-    expect(parsed.reference).toBe("#42");
-    expect(parsed.mode).toBe("worktree");
-  });
-});
-
-describe("GitResolvePullRequestResult", () => {
-  it("decodes resolved pull request metadata", () => {
-    const parsed = decodeResolvePullRequestResult({
+describe("GitPreparePullRequestThreadResult", () => {
+  it("defaults legacy responses to the pull request head", () => {
+    const parsed = decodePreparePullRequestThreadResult({
       pullRequest: {
         number: 42,
         title: "PR threads",
@@ -52,22 +42,23 @@ describe("GitResolvePullRequestResult", () => {
         headBranch: "feature/pr-threads",
         state: "open",
       },
+      branch: "feature/pr-threads",
+      worktreePath: "/tmp/pr-threads",
     });
 
-    expect(parsed.pullRequest.number).toBe(42);
-    expect(parsed.pullRequest.headBranch).toBe("feature/pr-threads");
+    expect(parsed.isOnPullRequestHead).toBe(true);
   });
 });
 
 describe("GitRunStackedActionInput", () => {
-  it("requires a client-provided actionId for progress correlation", () => {
+  it("preserves leading and trailing whitespace in file paths", () => {
     const parsed = decodeRunStackedActionInput({
       actionId: "action-1",
       cwd: "/repo",
       action: "commit",
+      filePaths: [" leading.txt", "trailing.txt "],
     });
 
-    expect(parsed.actionId).toBe("action-1");
-    expect(parsed.action).toBe("commit");
+    expect(parsed.filePaths).toEqual([" leading.txt", "trailing.txt "]);
   });
 });

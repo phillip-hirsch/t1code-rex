@@ -1,20 +1,8 @@
-import { Effect, Schema, SchemaTransformation } from "effect";
-import type { ProviderKind } from "./orchestration";
-import { TrimmedNonEmptyString } from "./baseSchemas";
-
-export const CODEX_REASONING_EFFORT_OPTIONS = ["xhigh", "high", "medium", "low"] as const;
-export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORT_OPTIONS)[number];
-export const CLAUDE_CODE_EFFORT_OPTIONS = [
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultracode",
-  "ultrathink",
-] as const;
-export type ClaudeCodeEffort = (typeof CLAUDE_CODE_EFFORT_OPTIONS)[number];
-export type ProviderReasoningEffort = CodexReasoningEffort | ClaudeCodeEffort;
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as SchemaTransformation from "effect/SchemaTransformation";
+import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ProviderOptionDescriptorType = Schema.Literals(["select", "boolean"]);
 export type ProviderOptionDescriptorType = typeof ProviderOptionDescriptorType.Type;
@@ -69,7 +57,7 @@ const LegacyProviderOptionSelectionsObject = Schema.Record(Schema.String, Schema
 const ProviderOptionSelectionsFromLegacyObject = LegacyProviderOptionSelectionsObject.pipe(
   Schema.decodeTo(
     Schema.Array(ProviderOptionSelection),
-    SchemaTransformation.transformOrFail({
+    SchemaTransformation.transformEffect({
       decode: (record) => Effect.succeed(coerceLegacyOptionsObjectToArray(record)),
       encode: (selections) => Effect.succeed(canonicalSelectionsToLegacyObject(selections)),
     }),
@@ -114,66 +102,69 @@ export const ModelCapabilities = Schema.Struct({
 });
 export type ModelCapabilities = typeof ModelCapabilities.Type;
 
-export const CodexModelOptions = Schema.Struct({
-  reasoningEffort: Schema.optional(Schema.Literals(CODEX_REASONING_EFFORT_OPTIONS)),
-  fastMode: Schema.optional(Schema.Boolean),
+export const CustomModelEntry = Schema.Struct({
+  slug: TrimmedNonEmptyString,
+  name: Schema.optional(TrimmedNonEmptyString),
+  capabilities: Schema.optional(ModelCapabilities),
 });
-export type CodexModelOptions = typeof CodexModelOptions.Type;
+export type CustomModelEntry = typeof CustomModelEntry.Type;
 
-export const ClaudeModelOptions = Schema.Struct({
-  thinking: Schema.optional(Schema.Boolean),
-  effort: Schema.optional(Schema.Literals(CLAUDE_CODE_EFFORT_OPTIONS)),
-  fastMode: Schema.optional(Schema.Boolean),
-});
-export type ClaudeModelOptions = typeof ClaudeModelOptions.Type;
+export const CustomModelSetting = Schema.Union([Schema.String, CustomModelEntry]);
+export type CustomModelSetting = typeof CustomModelSetting.Type;
 
-export const ProviderModelOptions = Schema.Struct({
-  codex: Schema.optional(CodexModelOptions),
-  claudeAgent: Schema.optional(ClaudeModelOptions),
-  cursor: Schema.optional(Schema.Record(Schema.String, Schema.Any)),
-  opencode: Schema.optional(Schema.Record(Schema.String, Schema.Any)),
-});
-export type ProviderModelOptions = typeof ProviderModelOptions.Type;
+const CODEX_DRIVER_KIND = ProviderDriverKind.make("codex");
+const CLAUDE_DRIVER_KIND = ProviderDriverKind.make("claudeAgent");
+const CURSOR_DRIVER_KIND = ProviderDriverKind.make("cursor");
+const GROK_DRIVER_KIND = ProviderDriverKind.make("grok");
+const MUSE_DRIVER_KIND = ProviderDriverKind.make("muse");
+const PI_DRIVER_KIND = ProviderDriverKind.make("pi");
+const ACP_REGISTRY_DRIVER_KIND = ProviderDriverKind.make("acpRegistry");
+const OPENCODE_DRIVER_KIND = ProviderDriverKind.make("opencode");
 
-type ModelOption = {
-  readonly slug: string;
-  readonly name: string;
+export const DEFAULT_MODEL = "gpt-6-astra";
+
+/** First model present in model/list wins; otherwise use Codex's isDefault. */
+export const PREFERRED_DEFAULT_CODEX_MODELS: ReadonlyArray<string> = [
+  DEFAULT_MODEL,
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+];
+export const DEFAULT_TEXT_GENERATION_MODEL = "gpt-6-luna";
+/** Keep the official Antigravity session's current model. Never send this ID to ACP. */
+export const ANTIGRAVITY_DEFAULT_MODEL = "antigravity-default";
+export const DEFAULT_TEXT_GENERATION_REASONING_EFFORT = "low";
+
+/** Let Muse pick the account's default model. Never send this ID to Muse. */
+export const MUSE_DEFAULT_MODEL = "default";
+
+export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, string>> = {
+  [CODEX_DRIVER_KIND]: DEFAULT_MODEL,
+  [CLAUDE_DRIVER_KIND]: "claude-fable-5-1",
+  [CURSOR_DRIVER_KIND]: "auto",
+  // Product slug meaning the current session model, never an ACP model id.
+  [GROK_DRIVER_KIND]: "grok-build",
+  [MUSE_DRIVER_KIND]: MUSE_DEFAULT_MODEL,
+  [ACP_REGISTRY_DRIVER_KIND]: "default",
+  // "default" defers to the user's own Pi settings.json model selection.
+  [PI_DRIVER_KIND]: "default",
+  [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
+  [ProviderDriverKind.make("antigravity")]: ANTIGRAVITY_DEFAULT_MODEL,
 };
 
-export const MODEL_OPTIONS_BY_PROVIDER = {
-  codex: [
-    { slug: "gpt-5.4", name: "GPT-5.4" },
-    { slug: "gpt-5.4-mini", name: "GPT-5.4 Mini" },
-    { slug: "gpt-5.3-codex", name: "GPT-5.3 Codex" },
-    { slug: "gpt-5.3-codex-spark", name: "GPT-5.3 Codex Spark" },
-    { slug: "gpt-5.2-codex", name: "GPT-5.2 Codex" },
-    { slug: "gpt-5.2", name: "GPT-5.2" },
-  ],
-  claudeAgent: [
-    { slug: "claude-opus-4-8", name: "Claude Opus 4.8" },
-    { slug: "claude-opus-4-7", name: "Claude Opus 4.7" },
-    { slug: "claude-opus-4-6", name: "Claude Opus 4.6" },
-    { slug: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" },
-    { slug: "claude-haiku-4-5", name: "Claude Haiku 4.5" },
-  ],
-} as const satisfies Record<ProviderKind, readonly ModelOption[]>;
-export type ModelOptionsByProvider = typeof MODEL_OPTIONS_BY_PROVIDER;
-
-type BuiltInModelSlug = (typeof MODEL_OPTIONS_BY_PROVIDER)[ProviderKind][number]["slug"];
-export type ModelSlug = BuiltInModelSlug | (string & {});
-
-export const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderKind, ModelSlug> = {
-  codex: "gpt-5.4",
-  claudeAgent: "claude-sonnet-4-6",
+export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
+  Record<ProviderDriverKind, string>
+> = {
+  [CODEX_DRIVER_KIND]: DEFAULT_TEXT_GENERATION_MODEL,
+  [ProviderDriverKind.make("antigravity")]: ANTIGRAVITY_DEFAULT_MODEL,
+  [CLAUDE_DRIVER_KIND]: "claude-haiku-5-5",
+  [CURSOR_DRIVER_KIND]: "composer-2",
+  [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
 };
 
-// Backward compatibility for existing Codex-only call sites.
-export const MODEL_OPTIONS = MODEL_OPTIONS_BY_PROVIDER.codex;
-export const DEFAULT_MODEL = DEFAULT_MODEL_BY_PROVIDER.codex;
-export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini" as const;
-
-export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string, ModelSlug>> = {
-  codex: {
+export const MODEL_SLUG_ALIASES_BY_PROVIDER: Partial<
+  Record<ProviderDriverKind, Record<string, string>>
+> = {
+  [CODEX_DRIVER_KIND]: {
     "gpt-5-codex": "gpt-5.4",
     "5.4": "gpt-5.4",
     "5.3": "gpt-5.3-codex",
@@ -181,32 +172,29 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
     "5.3-spark": "gpt-5.3-codex-spark",
     "gpt-5.3-spark": "gpt-5.3-codex-spark",
   },
-  claudeAgent: {
-    opus: "claude-opus-4-6",
-    "opus-4.8": "claude-opus-4-8",
-    "claude-opus-4.8": "claude-opus-4-8",
-    "opus-4.7": "claude-opus-4-7",
-    "claude-opus-4.7": "claude-opus-4-7",
+  [CLAUDE_DRIVER_KIND]: {},
+  [CURSOR_DRIVER_KIND]: {
+    composer: "composer-2",
+    "composer-1.5": "composer-1.5",
+    "composer-1": "composer-1.5",
+    "opus-4.6-thinking": "claude-opus-4-6",
     "opus-4.6": "claude-opus-4-6",
-    "claude-opus-4.6": "claude-opus-4-6",
-    "claude-opus-4-6-20251117": "claude-opus-4-6",
-    sonnet: "claude-sonnet-4-6",
+    "sonnet-4.6-thinking": "claude-sonnet-4-6",
     "sonnet-4.6": "claude-sonnet-4-6",
-    "claude-sonnet-4.6": "claude-sonnet-4-6",
-    "claude-sonnet-4-6-20251117": "claude-sonnet-4-6",
-    haiku: "claude-haiku-4-5",
-    "haiku-4.5": "claude-haiku-4-5",
-    "claude-haiku-4.5": "claude-haiku-4-5",
-    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
+    "opus-4.5-thinking": "claude-opus-4-5",
+    "opus-4.5": "claude-opus-4-5",
   },
+  [OPENCODE_DRIVER_KIND]: {},
 };
 
-export const REASONING_EFFORT_OPTIONS_BY_PROVIDER = {
-  codex: CODEX_REASONING_EFFORT_OPTIONS,
-  claudeAgent: CLAUDE_CODE_EFFORT_OPTIONS,
-} as const satisfies Record<ProviderKind, readonly ProviderReasoningEffort[]>;
-
-export const DEFAULT_REASONING_EFFORT_BY_PROVIDER = {
-  codex: "high",
-  claudeAgent: "high",
-} as const satisfies Record<ProviderKind, ProviderReasoningEffort>;
+export const PROVIDER_DISPLAY_NAMES: Partial<Record<ProviderDriverKind, string>> = {
+  [ProviderDriverKind.make("antigravity")]: "Antigravity",
+  [CODEX_DRIVER_KIND]: "Codex",
+  [CLAUDE_DRIVER_KIND]: "Claude",
+  [CURSOR_DRIVER_KIND]: "Cursor",
+  [GROK_DRIVER_KIND]: "Grok",
+  [MUSE_DRIVER_KIND]: "Muse Code",
+  [ACP_REGISTRY_DRIVER_KIND]: "ACP Registry",
+  [PI_DRIVER_KIND]: "Pi",
+  [OPENCODE_DRIVER_KIND]: "OpenCode",
+};
