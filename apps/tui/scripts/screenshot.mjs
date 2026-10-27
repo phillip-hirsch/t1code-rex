@@ -102,6 +102,11 @@ function color256(n) {
   return `rgb(${g},${g},${g})`;
 }
 
+// Terminal cell width of a grapheme: wide East Asian characters and emoji take two cells.
+const WIDE =
+  /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}|\uFE0F/u;
+const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
 const escapeHtml = (text) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -127,7 +132,14 @@ function renderLine(line) {
     if (style.dim) css.push("opacity:.6");
     if (style.italic) css.push("font-style:italic");
     if (style.underline) css.push("text-decoration:underline");
-    html += `<span style="${css.join(";")}">${escapeHtml(text)}</span>`;
+    // Each grapheme gets its terminal cells' width, so wide glyphs and font fallbacks can't
+    // shift the columns after them.
+    let cells = "";
+    for (const { segment } of segmenter.segment(text)) {
+      const width = (WIDE.test(segment) ? 2 : 1) * CHAR_PX;
+      cells += `<i style="display:inline-block;width:${width}px;font-style:inherit">${escapeHtml(segment)}</i>`;
+    }
+    html += `<span style="${css.join(";")}">${cells}</span>`;
   };
   const parts = line.split(/\x1b\[([0-9;:]*)m/);
   for (let i = 0; i < parts.length; i += 1) {
@@ -186,23 +198,34 @@ html,body{margin:0;background:${DEFAULT_BG};}
 .row{height:${LINE_PX}px;}
 </style></head><body><div class="screen">${body}</div></body></html>`;
 
+const out = NodePath.resolve(outPath);
+NodeFS.mkdirSync(NodePath.dirname(out), { recursive: true });
+NodeFS.rmSync(out, { force: true });
 const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "tr3x-shot-"));
-const htmlPath = NodePath.join(dir, "screen.html");
-NodeFS.writeFileSync(htmlPath, page);
-const width = Math.ceil(cols * CHAR_PX) + PAD_PX * 2;
-const height = rows * LINE_PX + PAD_PX * 2;
-NodeChildProcess.execFileSync(
-  CHROME,
-  [
-    "--headless=new",
-    "--disable-gpu",
-    "--hide-scrollbars",
-    "--force-device-scale-factor=2",
-    `--window-size=${width},${height}`,
-    `--screenshot=${NodePath.resolve(outPath)}`,
-    `file://${htmlPath}`,
-  ],
-  { stdio: "ignore" },
-);
-NodeFS.rmSync(dir, { recursive: true, force: true });
-console.log(`${NodePath.resolve(outPath)} (${cols}x${rows})`);
+try {
+  const htmlPath = NodePath.join(dir, "screen.html");
+  NodeFS.writeFileSync(htmlPath, page);
+  const width = Math.ceil(cols * CHAR_PX) + PAD_PX * 2;
+  const height = rows * LINE_PX + PAD_PX * 2;
+  NodeChildProcess.execFileSync(
+    CHROME,
+    [
+      "--headless=new",
+      "--disable-gpu",
+      "--hide-scrollbars",
+      "--force-device-scale-factor=2",
+      `--window-size=${width},${height}`,
+      `--screenshot=${out}`,
+      `file://${htmlPath}`,
+    ],
+    { stdio: "ignore" },
+  );
+} finally {
+  NodeFS.rmSync(dir, { recursive: true, force: true });
+}
+// Chrome can exit 0 without writing the file.
+if (!NodeFS.existsSync(out) || NodeFS.statSync(out).size === 0) {
+  console.error(`Chrome didn't write ${out}`);
+  process.exit(1);
+}
+console.log(`${out} (${cols}x${rows})`);
