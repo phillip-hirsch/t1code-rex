@@ -26,6 +26,10 @@ export interface ComposerKeyState {
   readonly slashMenuCompletes: boolean;
   /** Backspace on an empty composer was pressed once and now removes an image. */
   readonly removeArmed: boolean;
+  /** The `@` file menu shows: searching, empty, or listing entries. Esc closes it. */
+  readonly mentionActive?: boolean;
+  /** The `@` file menu lists entries to pick. */
+  readonly mentionMenuOpen?: boolean;
 }
 
 export type ComposerKeyAction =
@@ -38,7 +42,10 @@ export type ComposerKeyAction =
   | { readonly type: "arm-remove-attachment" }
   | { readonly type: "remove-attachment" }
   | { readonly type: "slash-move"; readonly delta: -1 | 1 }
-  | { readonly type: "slash-complete" };
+  | { readonly type: "slash-complete" }
+  | { readonly type: "mention-move"; readonly delta: -1 | 1 }
+  | { readonly type: "mention-pick" }
+  | { readonly type: "mention-dismiss" };
 
 export function isEnterKey(name: string): boolean {
   return name === "return" || name === "enter" || name === "kpenter";
@@ -55,6 +62,15 @@ export function resolveComposerKey(
     if (state.hasText || state.attachmentCount > 0) return { type: "clear" };
     if (state.running && !state.stopRequested) return { type: "stop" };
     return { type: "exit" };
+  }
+  // Esc closes the menu while it shows at all, so it never stops the run behind it.
+  if ((state.mentionActive || state.mentionMenuOpen) && name === "escape") {
+    return { type: "mention-dismiss" };
+  }
+  if (state.mentionMenuOpen) {
+    if (name === "up" || (key.ctrl && name === "k")) return { type: "mention-move", delta: -1 };
+    if (name === "down" || (key.ctrl && name === "j")) return { type: "mention-move", delta: 1 };
+    if (name === "tab" || (isEnterKey(name) && !key.shift)) return { type: "mention-pick" };
   }
   if (state.slashMenuOpen) {
     if (name === "up" || (key.ctrl && name === "k")) return { type: "slash-move", delta: -1 };

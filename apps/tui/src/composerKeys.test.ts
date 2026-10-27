@@ -107,3 +107,33 @@ describe("resolveComposerKey", () => {
     expect(resolveComposerKey({ name: "y", ctrl: true }, idle)).toEqual({ type: "paste-image" });
   });
 });
+
+describe("resolveComposerKey with the @ file menu", () => {
+  const open = { ...idle, hasText: true, mentionMenuOpen: true };
+
+  it("moves, picks with Tab or Enter, and closes with Esc instead of sending or stopping", () => {
+    expect(resolveComposerKey({ name: "down" }, open)).toEqual({ type: "mention-move", delta: 1 });
+    expect(resolveComposerKey({ name: "tab" }, open)).toEqual({ type: "mention-pick" });
+    expect(resolveComposerKey({ name: "return" }, open)).toEqual({ type: "mention-pick" });
+    expect(resolveComposerKey({ name: "escape" }, { ...open, running: true })).toEqual({
+      type: "mention-dismiss",
+    });
+    // Shift+Enter still adds a newline.
+    expect(resolveComposerKey({ name: "return", shift: true }, open)).toBeNull();
+  });
+
+  it("S2: Esc closes a menu that's still searching or found nothing, without stopping the run", () => {
+    const searching = { ...idle, hasText: true, running: true, mentionActive: true };
+    expect(resolveComposerKey({ name: "escape" }, searching)).toEqual({ type: "mention-dismiss" });
+    // With nothing to pick, Enter sends and arrows edit as usual.
+    expect(resolveComposerKey({ name: "return" }, searching)).toEqual({
+      type: "submit",
+      alternate: false,
+    });
+    expect(resolveComposerKey({ name: "down" }, searching)).toBeNull();
+    // A held Esc's repeats still do nothing.
+    expect(resolveComposerKey({ name: "escape", repeated: true }, searching)).toEqual({
+      type: "ignore",
+    });
+  });
+});

@@ -12,6 +12,7 @@ import { renderHook } from "./hookTestRenderer.ts";
 import type { TuiPrefs } from "./prefs.ts";
 import { at, presentedThread, projectShell } from "./shellTestFixtures.ts";
 import { useSidebarController } from "./sidebarController.ts";
+import { resolveSidebarKey } from "./sidebarKeys.ts";
 import { projectRowKey, threadRowKey } from "./sidebarModel.ts";
 import { MAX_TRACKED_VISITS } from "./threadVisits.ts";
 
@@ -59,15 +60,20 @@ function setup(input: {
     setThreads(threads: ReadonlyArray<EnvironmentThreadShell>) {
       hook.act(() => registry.set(source.threadShellsAtom, threads));
     },
-    press(key: string) {
+    press(key: string, modifiers: { readonly ctrl?: boolean; readonly shift?: boolean } = {}) {
       const row = hook.current.rows.find((candidate) => candidate.key === key);
       if (!row) throw new Error(`no row ${key}`);
-      hook.act(() => hook.current.pressRow(row));
+      hook.act(() => hook.current.pressRow(row, modifiers));
     },
-    key(name: string) {
-      let outcome: ReturnType<typeof hook.current.handleKey> = null;
+    /** A key through the real sidebar key map, as the shell sends it. */
+    key(name: string, modifiers: { readonly shift?: boolean } = {}) {
+      let outcome: ReturnType<typeof hook.current.applyKey> = null;
       hook.act(() => {
-        outcome = hook.current.handleKey({ name });
+        const action = resolveSidebarKey(
+          { name, ...modifiers },
+          { hasMultiSelection: hook.current.multiSelection.threadIds.size > 0 },
+        );
+        outcome = action === null ? null : hook.current.applyKey(action);
       });
       return outcome;
     },
@@ -177,13 +183,13 @@ describe("useSidebarController unread", () => {
     });
     expect(sidebar.hook.current.statusByThread.get("done")).toBeNull();
 
-    sidebar.hook.act(() => sidebar.hook.current.markUnread("done"));
+    sidebar.hook.act(() => sidebar.hook.current.markUnread(["done"]));
     expect(sidebar.hook.current.statusByThread.get("done")?.label).toBe("Completed");
 
     sidebar.press(threadRowKey("done"));
     expect(sidebar.hook.current.statusByThread.get("done")).toBeNull();
 
-    sidebar.hook.act(() => sidebar.hook.current.markUnread("done"));
+    sidebar.hook.act(() => sidebar.hook.current.markUnread(["done"]));
     expect(sidebar.key("return")).toBe("open");
     expect(sidebar.hook.current.statusByThread.get("done")).toBeNull();
   });
@@ -222,5 +228,72 @@ describe("useSidebarController rows", () => {
     for (const row of before) {
       expect(after.find((candidate) => candidate.key === row.key)).toBe(row);
     }
+  });
+});
+
+describe("useSidebarController multi-selection", () => {
+  const threads = [
+    presentedThread("t1", "p", { updatedAt: at("2026-06-20T03:00:00.000Z") }),
+    presentedThread("t2", "p", { updatedAt: at("2026-06-20T02:00:00.000Z") }),
+    presentedThread("t3", "p", { updatedAt: at("2026-06-20T01:00:00.000Z") }),
+  ];
+  const selected = (sidebar: ReturnType<typeof setup>) => [
+    ...sidebar.hook.current.multiSelection.threadIds,
+  ];
+
+  it("extends with Shift+arrows from the cursor and clears with Esc", () => {
+    const sidebar = setup({
+      projects: [projectShell("p")],
+      threads,
+      prefs: { selectedThreadId: "t1" },
+    });
+    sidebar.key("down", { shift: true });
+    sidebar.key("down", { shift: true });
+    expect(selected(sidebar).toSorted()).toEqual(["t1", "t2", "t3"]);
+    // Extending moves the cursor without opening the threads it passes.
+    expect(sidebar.hook.current.selection.threadId).toBe("t1");
+    expect(sidebar.hook.current.cursorKey).toBe(threadRowKey("t3"));
+
+    sidebar.key("up", { shift: true });
+    expect(selected(sidebar).toSorted()).toEqual(["t1", "t2", "t3"]);
+    expect(sidebar.key("escape")).toBe("handled");
+    expect(selected(sidebar)).toEqual([]);
+    // With nothing selected, Esc isn't the sidebar's.
+    expect(sidebar.key("escape")).toBeNull();
+  });
+
+  it("toggles with Ctrl+click, ranges with Shift+click, and a plain click clears", () => {
+    const sidebar = setup({
+      projects: [projectShell("p")],
+      threads,
+      prefs: { selectedThreadId: "t1" },
+    });
+    sidebar.press(threadRowKey("t1"), { ctrl: true });
+    sidebar.press(threadRowKey("t3"), { shift: true });
+    expect(selected(sidebar).toSorted()).toEqual(["t1", "t2", "t3"]);
+    sidebar.press(threadRowKey("t2"), { ctrl: true });
+    expect(selected(sidebar).toSorted()).toEqual(["t1", "t3"]);
+    sidebar.press(threadRowKey("t2"));
+    expect(selected(sidebar)).toEqual([]);
+    expect(sidebar.hook.current.selection.threadId).toBe("t2");
+  });
+
+  it("drops threads that leave the list, such as archived ones", () => {
+    const sidebar = setup({
+      projects: [projectShell("p")],
+      threads,
+      prefs: { selectedThreadId: "t1" },
+    });
+    sidebar.key("down", { shift: true });
+    expect(selected(sidebar).toSorted()).toEqual(["t1", "t2"]);
+    sidebar.setThreads([
+      threads[0]!,
+      presentedThread("t2", "p", {
+        updatedAt: at("2026-06-20T02:00:00.000Z"),
+        archivedAt: at("2026-06-21T00:00:00.000Z"),
+      }),
+      threads[2]!,
+    ]);
+    expect(selected(sidebar)).toEqual(["t1"]);
   });
 });

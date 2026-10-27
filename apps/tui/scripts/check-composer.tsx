@@ -12,7 +12,7 @@ import type { StartThreadTurnInput } from "@t3tools/client-runtime/state/threads
 import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { act, createRef, type RefObject } from "react";
 
-import { Composer, type ComposerHandle } from "../src/composer.tsx";
+import { Composer, NO_MENTION_SEARCH_SOURCE, type ComposerHandle } from "../src/composer.tsx";
 import { UNCONFIRMED_NOTICE } from "../src/composerRecovery.ts";
 import { createComposerSend, DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
 import {
@@ -95,6 +95,8 @@ async function mountComposer(input: {
         onSetInteractionMode={() => undefined}
         onSetRuntimeMode={() => undefined}
         onStatus={() => undefined}
+        onClone={async () => null}
+        mentionSearch={NO_MENTION_SEARCH_SOURCE}
       />
     </Harness>,
     { width: 70, height: 12, kittyKeyboard: true },

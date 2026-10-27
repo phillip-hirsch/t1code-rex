@@ -1,18 +1,29 @@
-// @effect-diagnostics nodeBuiltinImport:off -- The composer reads clipboard images from disk.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- The composer reads clipboard images from disk and debounces file search on Bun.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
-import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core";
+import {
+  decodePasteBytes,
+  stripAnsiSequences,
+  type KeyEvent,
+  type PasteEvent,
+  type TextareaRenderable,
+} from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import type { ThreadQueueWorkflowState } from "@t3tools/client-runtime/state/thread-workflows";
-import type { Atom } from "effect/reactivity";
+import * as Option from "effect/Option";
+import { AsyncResult, Atom } from "effect/reactivity";
 import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  type ProjectEntry,
+  type ProjectSearchEntriesInput,
+  type ProjectSearchEntriesResult,
   type ProviderInteractionMode,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import {
   useCallback,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
@@ -22,6 +33,13 @@ import {
 
 import { saveClipboardImageToFile } from "./clipboardImage.ts";
 import { resolveComposerKey, type ComposerKeyState } from "./composerKeys.ts";
+import {
+  MENTION_SEARCH_DEBOUNCE_MS,
+  MENTION_SEARCH_LIMIT,
+  mentionQueryAt,
+  mentionReplacement,
+  type MentionQuery,
+} from "./composerMentions.ts";
 import { recoverOrphanedSends } from "./composerRecovery.ts";
 import {
   chooseDispatch,
@@ -48,6 +66,7 @@ import {
 import type { ComposerSendEntry, ComposerStore } from "./composerStore.ts";
 import { pastedImagePath, resolveImageAttachmentFromPath } from "./composerSubmit.ts";
 import { truncateToolbarLabel } from "./composerControlLabels.ts";
+import { cursorStringOffset, replaceBeforeCursor } from "./textareaOffsets.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 
 export interface ProviderBadge {
@@ -63,7 +82,29 @@ const PENDING_TEXT_MAX = 72;
 export interface ComposerHandle {
   /** Keys while the composer has focus; true when it used the key. */
   readonly handleKey: (key: KeyEvent) => boolean;
+  /** Types text at the cursor. */
+  readonly insertText: (text: string) => void;
+  /** A paste that arrived while another pane had focus; handled as if pasted here. */
+  readonly paste: (event: PasteEvent) => void;
 }
+
+type MentionSearchAtom = Atom.Atom<AsyncResult.AsyncResult<ProjectSearchEntriesResult, unknown>>;
+
+/** Where `@` mentions search: the thread's workspace, through `projects.searchEntries`. */
+export interface ComposerMentionSearch {
+  readonly cwd: string | null;
+  readonly searchAtom: (input: ProjectSearchEntriesInput) => MentionSearchAtom;
+}
+
+const NO_MENTION_SEARCH: MentionSearchAtom = Atom.make(
+  AsyncResult.initial<ProjectSearchEntriesResult, unknown>(),
+);
+const NO_ENTRIES: ReadonlyArray<ProjectEntry> = [];
+/** For a composer with no workspace to search, e.g. in the Bun checks. */
+export const NO_MENTION_SEARCH_SOURCE: ComposerMentionSearch = {
+  cwd: null,
+  searchAtom: () => NO_MENTION_SEARCH,
+};
 
 export interface ComposerProps {
   readonly target: ComposerTarget;
@@ -88,6 +129,9 @@ export interface ComposerProps {
   readonly onSetInteractionMode: (mode: ProviderInteractionMode) => void;
   readonly onSetRuntimeMode: (mode: RuntimeMode | "next") => void;
   readonly onStatus: (message: string) => void;
+  /** `/clone`: returns the error to show, or null once the clone started. */
+  readonly onClone: (args: string) => Promise<string | null>;
+  readonly mentionSearch: ComposerMentionSearch;
   readonly ref?: Ref<ComposerHandle>;
 }
 
@@ -96,7 +140,7 @@ function newId(): string {
 }
 
 function decodePaste(event: PasteEvent): string {
-  return new TextDecoder().decode(event.bytes);
+  return decodePasteBytes(event.bytes);
 }
 
 /**
@@ -123,6 +167,30 @@ export function Composer(props: ComposerProps) {
   const [removeArmed, setRemoveArmed] = useState(false);
   const [pasting, setPasting] = useState(false);
   const [width, setWidth] = useState(0);
+  // The `@query` the cursor ends, the query searched after a pause, and the picked row.
+  const [mention, setMention] = useState<MentionQuery | null>(null);
+  const [mentionIndex, setMentionIndex] = useState(0);
+  const [dismissedMention, setDismissedMention] = useState<string | null>(null);
+  const [searchedQuery, setSearchedQuery] = useState<string | null>(null);
+  const mentionQuery = mention?.query ?? null;
+  useEffect(() => {
+    const timer = setTimeout(() => setSearchedQuery(mentionQuery), MENTION_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [mentionQuery]);
+  const mentionCwd = props.mentionSearch.cwd;
+  const searchAtom: MentionSearchAtom =
+    mentionCwd !== null && searchedQuery !== null && searchedQuery.length > 0
+      ? props.mentionSearch.searchAtom({
+          cwd: mentionCwd,
+          query: searchedQuery,
+          limit: MENTION_SEARCH_LIMIT,
+        })
+      : NO_MENTION_SEARCH;
+  const searchResult = useAtomValue(searchAtom);
+  const mentionEntries =
+    mentionQuery !== null && mentionQuery === searchedQuery
+      ? (Option.getOrNull(AsyncResult.value(searchResult))?.entries ?? NO_ENTRIES)
+      : NO_ENTRIES;
 
   // A loaded draft (on mount, or after a send came back) continues where it ends.
   const attachTextarea = useCallback((node: TextareaRenderable | null) => {
@@ -134,6 +202,9 @@ export function Composer(props: ComposerProps) {
   const slashItems: ReadonlyArray<ComposerSlashCommand> =
     slashQuery === null ? [] : matchSlashCommands(slashQuery);
   const slashMenuOpen = props.focused && slashItems.length > 0;
+  const mentionActive =
+    props.focused && mention !== null && dismissedMention !== mention.query && mentionCwd !== null;
+  const mentionMenuOpen = mentionActive && mentionEntries.length > 0;
   const attachments = snapshot.attachments;
 
   const heldCount = snapshot.sends.filter((entry) => entry.status === "held").length;
@@ -154,11 +225,22 @@ export function Composer(props: ComposerProps) {
   };
 
   const readText = () => textareaRef.current?.plainText ?? "";
+  /** The `@query` before the cursor; picking an entry replaces it. */
+  const syncMention = (text: string) => {
+    const textarea = textareaRef.current;
+    const next = mentionQueryAt(text, textarea ? cursorStringOffset(textarea) : text.length);
+    setMention((current) =>
+      current?.query === next?.query && current?.length === next?.length ? current : next,
+    );
+    if (next === null) setDismissedMention(null);
+    setMentionIndex(0);
+  };
   const syncFromText = (text: string) => {
     setHasText(text.length > 0);
     const query = slashMenuQuery(text);
     setSlashQuery(query);
     if (query === null) setSlashIndex(0);
+    syncMention(text);
     const virtualRows = textareaRef.current?.virtualLineCount ?? 1;
     setRows(Math.min(MAX_ROWS, Math.max(MIN_ROWS, virtualRows)));
   };
@@ -213,6 +295,23 @@ export function Composer(props: ComposerProps) {
       .finally(() => setPasting(false));
   };
 
+  /**
+   * Pastes that attach an image: an empty paste (terminals paste nothing when the clipboard
+   * holds only an image) or an image's path. Returns false for text, which the textarea takes.
+   */
+  const takeImagePaste = (pasted: string): boolean => {
+    if (pasted.trim().length === 0) {
+      pasteClipboardImage();
+      return true;
+    }
+    const imagePath = pastedImagePath(pasted);
+    if (imagePath === null) return false;
+    void attachFromPath(imagePath, false).then((attached) => {
+      if (!attached) textareaRef.current?.insertText(pasted);
+    });
+    return true;
+  };
+
   const submit = (
     alternate: boolean,
     requested?: { dispatch: "queue" | "steer"; text: string },
@@ -262,6 +361,15 @@ export function Composer(props: ComposerProps) {
             );
             return;
           }
+          case "clone":
+            props.onStatus("Starting clone…");
+            void props.onClone(action.args).then((error) => {
+              if (error !== null) {
+                store.setNotice(threadId, error);
+                if (readText().length === 0) replaceText(text);
+              }
+            });
+            return;
           case "discard": {
             const { messages, resumes } = sender.discard(threadId);
             props.onStatus(
@@ -318,6 +426,14 @@ export function Composer(props: ComposerProps) {
     if (item) replaceText(item.template);
   };
 
+  /** Replaces the `@query` before the cursor with the entry's file link, as web does. */
+  const pickMention = () => {
+    const entry = mentionEntries[mentionIndex] ?? mentionEntries[0];
+    const textarea = textareaRef.current;
+    if (!entry || !textarea || mention === null) return;
+    replaceBeforeCursor(textarea, mention.length, mentionReplacement(entry.path));
+  };
+
   useImperativeHandle(ref, () => ({
     handleKey: (key: KeyEvent) => {
       const text = readText();
@@ -327,6 +443,8 @@ export function Composer(props: ComposerProps) {
         running,
         stopRequested,
         slashMenuOpen,
+        mentionActive,
+        mentionMenuOpen,
         slashMenuCompletes:
           slashMenuOpen &&
           resolveComposerSlashAction(text) === null &&
@@ -371,7 +489,24 @@ export function Composer(props: ComposerProps) {
         case "slash-complete":
           completeSlash();
           return true;
+        case "mention-move":
+          setMentionIndex((index) =>
+            Math.min(Math.max(0, index + action.delta), Math.max(0, mentionEntries.length - 1)),
+          );
+          return true;
+        case "mention-pick":
+          pickMention();
+          return true;
+        case "mention-dismiss":
+          setDismissedMention(mention?.query ?? null);
+          return true;
       }
+    },
+    insertText: (text: string) => textareaRef.current?.insertText(text),
+    paste: (event: PasteEvent) => {
+      const pasted = decodePaste(event);
+      // As the textarea pastes text itself.
+      if (!takeImagePaste(pasted)) textareaRef.current?.insertText(stripAnsiSequences(pasted));
     },
   }));
 
@@ -404,6 +539,18 @@ export function Composer(props: ComposerProps) {
         />
       ) : null}
       {slashMenuOpen ? <SlashMenu items={slashItems} index={slashIndex} theme={theme} /> : null}
+      {mentionActive ? (
+        <MentionMenu
+          entries={mentionEntries}
+          index={mentionIndex}
+          searching={
+            mention.query.length === 0
+              ? null
+              : searchResult.waiting || mention.query !== searchedQuery
+          }
+          theme={theme}
+        />
+      ) : null}
       <box
         onMouseDown={props.onFocus}
         onSizeChange={function (this: { width: number }) {
@@ -446,6 +593,7 @@ export function Composer(props: ComposerProps) {
                 { name: "return", shift: true, action: "newline" },
                 { name: "linefeed", action: "newline" },
               ]}
+              onCursorChange={() => syncMention(readText())}
               onContentChange={() => {
                 const text = readText();
                 // Our own setText can report late, after the store moved on (a /discard
@@ -458,20 +606,7 @@ export function Composer(props: ComposerProps) {
                 store.setNotice(threadId, null);
               }}
               onPaste={(event: PasteEvent) => {
-                const pasted = decodePaste(event);
-                if (pasted.trim().length === 0) {
-                  // Terminals paste nothing when the clipboard holds only an image.
-                  event.preventDefault();
-                  pasteClipboardImage();
-                  return;
-                }
-                const imagePath = pastedImagePath(pasted);
-                if (imagePath !== null) {
-                  event.preventDefault();
-                  void attachFromPath(imagePath, false).then((attached) => {
-                    if (!attached) textareaRef.current?.insertText(pasted);
-                  });
-                }
+                if (takeImagePaste(decodePaste(event))) event.preventDefault();
               }}
               style={{
                 flexGrow: 1,
@@ -741,6 +876,58 @@ function SlashMenu(props: {
           />
         </box>
       ))}
+    </box>
+  );
+}
+
+function MentionMenu(props: {
+  entries: ReadonlyArray<ProjectEntry>;
+  index: number;
+  /** Null before anything is typed after the `@`. */
+  searching: boolean | null;
+  theme: TuiTheme;
+}) {
+  const palette = props.theme.palette;
+  const note =
+    props.searching === null
+      ? "Type to search files and folders"
+      : props.entries.length === 0
+        ? props.searching
+          ? "Searching…"
+          : "No matching files"
+        : null;
+  return (
+    <box
+      style={{
+        flexDirection: "column",
+        flexShrink: 0,
+        marginTop: 1,
+        backgroundColor: palette.popup,
+        border: true,
+        borderColor: palette.border,
+      }}
+    >
+      {note !== null ? (
+        <text wrapMode="none" content={` ${note}`} style={{ fg: palette.subtle }} />
+      ) : (
+        props.entries.map((entry, index) => (
+          <box
+            key={entry.path}
+            style={{
+              flexDirection: "row",
+              height: 1,
+              paddingLeft: 1,
+              backgroundColor: index === props.index ? palette.selection : palette.popup,
+            }}
+          >
+            <text
+              content={entry.kind === "directory" ? "󰉋 " : "󰈔 "}
+              style={{ fg: palette.muted, flexShrink: 0 }}
+            />
+            <text wrapMode="none" truncate content={entry.path} style={{ fg: palette.text }} />
+          </box>
+        ))
+      )}
     </box>
   );
 }

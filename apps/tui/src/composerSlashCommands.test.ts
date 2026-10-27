@@ -58,3 +58,13 @@ describe("composer slash commands", () => {
     expect(resolveComposerSlashAction("plan this")).toBeNull();
   });
 });
+
+describe("/clone", () => {
+  it("passes its arguments on, and needs a source", () => {
+    expect(resolveComposerSlashAction("/clone octo/hello ~/src/hello")).toEqual({
+      type: "clone",
+      args: "octo/hello ~/src/hello",
+    });
+    expect(resolveComposerSlashAction("/clone")).toMatchObject({ type: "error" });
+  });
+});

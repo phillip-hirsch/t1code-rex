@@ -65,6 +65,17 @@ function projectSortTimestamp(
   return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
 }
 
+/** Pinned threads lead their project, as web's pinned section does; each part keeps its order. */
+export function pinnedFirst<T extends Pick<SidebarThread, "pinnedAt">>(
+  threads: ReadonlyArray<T>,
+): ReadonlyArray<T> {
+  if (!threads.some((thread) => thread.pinnedAt !== null)) return threads;
+  return [
+    ...threads.filter((thread) => thread.pinnedAt !== null),
+    ...threads.filter((thread) => thread.pinnedAt === null),
+  ];
+}
+
 export function buildSidebarGroups(input: {
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly threads: ReadonlyArray<SidebarThread>;
@@ -80,7 +91,9 @@ export function buildSidebarGroups(input: {
   }
   const groups = input.projects.map((project) => ({
     project,
-    threads: sortThreads(threadsByProject.get(project.id) ?? [], input.threadSortOrder),
+    threads: pinnedFirst(
+      sortThreads(threadsByProject.get(project.id) ?? [], input.threadSortOrder),
+    ),
   }));
   const sortOrder = input.projectSortOrder;
   if (sortOrder === "manual") return groups;

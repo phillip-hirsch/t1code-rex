@@ -11,6 +11,7 @@ import type { StartThreadTurnInput } from "@t3tools/client-runtime/state/threads
 import { ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
 import { act, createRef, useImperativeHandle, useRef, useState } from "react";
 
+import { NO_MENTION_SEARCH_SOURCE } from "../src/composer.tsx";
 import { ComposerDock, type ComposerDockHandle, type DockFocus } from "../src/composerDock.tsx";
 import { DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
 import { QUIT_NOTICE } from "../src/composerSender.ts";
@@ -206,6 +207,8 @@ async function mount(
             onStatus: (status) => {
               statuses.push(status);
             },
+            onClone: async () => null,
+            mentionSearch: NO_MENTION_SEARCH_SOURCE,
           }}
           sender={sender}
           requests={{

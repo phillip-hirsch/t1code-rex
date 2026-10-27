@@ -1,4 +1,3 @@
-import type { KeyEvent } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from "@t3tools/client-core";
 import type { OrchestrationProjectShell, OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
@@ -28,6 +27,16 @@ import {
   pruneExpandedProjects,
   toggleProjectExpanded,
 } from "./sidebarProjects.ts";
+import type { SidebarKeyAction } from "./sidebarKeys.ts";
+import {
+  EMPTY_MULTI_SELECTION,
+  extendThreadSelection,
+  orderedThreadIds,
+  pruneThreadSelection,
+  selectThreadRange,
+  toggleThreadInSelection,
+  type ThreadMultiSelection,
+} from "./sidebarSelection.ts";
 import {
   resolveProjectStatus,
   resolveThreadStatus,
@@ -62,10 +71,6 @@ export interface SidebarControllerOptions {
 
 const NO_SELECTION: SidebarSelection = { projectId: null, threadId: null };
 
-function isEnter(name: string): boolean {
-  return name === "return" || name === "enter" || name === "kpenter" || name === "linefeed";
-}
-
 /**
  * Sidebar state on top of client-runtime's shell: expansion, the keyboard cursor, the
  * selected thread, and local unread marks. Rows come from the quiet thread list, so a
@@ -95,6 +100,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
   const [unread, setUnread] = useState<ReadonlySet<string>>(
     () => new Set(initialPrefs.locallyUnreadThreadIds ?? []),
   );
+  const [multiSelection, setMultiSelection] = useState<ThreadMultiSelection>(EMPTY_MULTI_SELECTION);
 
   const groups = useMemo(
     () =>
@@ -132,6 +138,11 @@ export function useSidebarController(options: SidebarControllerOptions) {
   const threadsById = useMemo(
     () => new Map<string, SidebarThread>(threads.map((thread) => [thread.id, thread])),
     [threads],
+  );
+  /** Threads the sidebar lists, for keeping the multi-selection on live rows. */
+  const listedThreadIds = useMemo(
+    () => new Set(groups.flatMap((group) => group.threads.map((thread) => thread.id))),
+    [groups],
   );
   const threadCountByProject = useMemo(
     () => new Map(groups.map((group) => [group.project.id, group.threads.length])),
@@ -190,6 +201,8 @@ export function useSidebarController(options: SidebarControllerOptions) {
       );
       if (pruned !== expandedProjectIds) setExpandedProjectIds(pruned);
     }
+    const prunedSelection = pruneThreadSelection(multiSelection, listedThreadIds);
+    if (prunedSelection !== multiSelection) setMultiSelection(prunedSelection);
   }
   if (!initialized && hasSnapshot) {
     const start = resolveInitialSelection({
@@ -255,12 +268,27 @@ export function useSidebarController(options: SidebarControllerOptions) {
 
   /**
    * Mouse presses: the row under the pointer becomes the cursor. A project row only folds
-   * or unfolds; the selection is always a thread and its own project.
+   * or unfolds; the selection is always a thread and its own project. Ctrl+click toggles a
+   * thread in the multi-selection and Shift+click extends it, as in the old TUI.
    */
   const pressRow = useCallback(
-    (row: SidebarRow) => {
+    (
+      row: SidebarRow,
+      modifiers: { readonly ctrl?: boolean | undefined; readonly shift?: boolean | undefined } = {},
+    ) => {
       setCursorKey(row.key);
       if (row.kind === "thread") {
+        if (modifiers.ctrl) {
+          setMultiSelection((current) => toggleThreadInSelection(current, row.threadId));
+          return;
+        }
+        if (modifiers.shift) {
+          setMultiSelection((current) =>
+            selectThreadRange(current, row.threadId, orderedThreadIds(rows)),
+          );
+          return;
+        }
+        setMultiSelection(EMPTY_MULTI_SELECTION);
         selectThread(row.projectId, row.threadId);
       } else if (row.kind === "project") {
         setExpandedProjectIds((current) => toggleProjectExpanded(current, row.projectId));
@@ -268,74 +296,106 @@ export function useSidebarController(options: SidebarControllerOptions) {
         toggleShowAll(row.projectId);
       }
     },
-    [selectThread, toggleShowAll],
+    [rows, selectThread, toggleShowAll],
   );
 
   /**
-   * Arrow keys (or j/k/h/l) walk the tree. Landing on a thread opens it, as before; landing
-   * on a project only moves the cursor. Enter opens a thread or toggles a project. Returns "open" when the caller should move
-   * focus to the thread view.
+   * The sidebar's navigation keys (see `sidebarKeys.ts`). ↑↓ walk the tree, and landing on
+   * a thread opens it, as before; landing on a project only moves the cursor. Shift+↑↓
+   * extends the multi-selection. Enter opens a thread or toggles a project. Returns "open"
+   * when the caller should move focus to the thread.
    */
-  const handleKey = useCallback(
-    (key: Pick<KeyEvent, "name">): "handled" | "open" | null => {
-      const name = key.name;
-      if (name === "up" || name === "down" || name === "k" || name === "j") {
-        const next = moveCursor(rows, cursorKey, name === "up" || name === "k" ? -1 : 1);
-        if (next === null) return "handled";
-        setCursorKey(next.key);
-        if (next.kind === "thread") selectThread(next.projectId, next.threadId);
-        return "handled";
-      }
-      if (name === "home" || name === "end") {
-        const next = name === "home" ? rows[0] : rows.at(-1);
-        if (next) setCursorKey(next.key);
-        return "handled";
-      }
-      if (cursorRow === null) return null;
-      if (name === "right" || name === "l") {
-        if (cursorRow.kind !== "project") return "handled";
-        if (!expandedProjectIds.has(cursorRow.projectId)) {
-          setExpandedProjectIds((current) => ensureProjectExpanded(current, cursorRow.projectId));
-        } else {
-          const child = moveCursor(rows, cursorRow.key, 1);
-          if (child && child.kind !== "project") {
-            setCursorKey(child.key);
-            if (child.kind === "thread") selectThread(child.projectId, child.threadId);
-          }
-        }
-        return "handled";
-      }
-      if (name === "left" || name === "h") {
-        if (cursorRow.kind === "project") {
-          setExpandedProjectIds((current) => collapseProject(current, cursorRow.projectId));
-        } else {
-          setCursorKey(projectRowKey(cursorRow.projectId));
-        }
-        return "handled";
-      }
-      if (isEnter(name) || name === "space") {
-        if (cursorRow.kind === "thread") {
-          selectThread(cursorRow.projectId, cursorRow.threadId);
-          return "open";
-        }
-        if (cursorRow.kind === "more") {
-          toggleShowAll(cursorRow.projectId);
+  const applyKey = useCallback(
+    (action: SidebarKeyAction): "handled" | "open" | null => {
+      switch (action.type) {
+        case "move": {
+          const next = moveCursor(rows, cursorKey, action.delta);
+          if (next === null) return "handled";
+          setCursorKey(next.key);
+          if (next.kind === "thread") selectThread(next.projectId, next.threadId);
           return "handled";
         }
-        setExpandedProjectIds((current) => toggleProjectExpanded(current, cursorRow.projectId));
-        return "handled";
+        case "extend-selection": {
+          if (cursorRow?.kind !== "thread") return "handled";
+          const extended = extendThreadSelection(
+            multiSelection,
+            cursorRow.threadId,
+            orderedThreadIds(rows),
+            action.delta,
+          );
+          if (extended === null) return "handled";
+          setMultiSelection(extended.selection);
+          setCursorKey(threadRowKey(extended.threadId));
+          return "handled";
+        }
+        case "clear-selection":
+          setMultiSelection(EMPTY_MULTI_SELECTION);
+          return "handled";
+        case "edge": {
+          const next = action.edge === "start" ? rows[0] : rows.at(-1);
+          if (next) setCursorKey(next.key);
+          return "handled";
+        }
+        case "fold": {
+          if (cursorRow === null) return "handled";
+          if (action.direction === "left") {
+            if (cursorRow.kind === "project") {
+              setExpandedProjectIds((current) => collapseProject(current, cursorRow.projectId));
+            } else {
+              setCursorKey(projectRowKey(cursorRow.projectId));
+            }
+            return "handled";
+          }
+          if (cursorRow.kind !== "project") return "handled";
+          if (!expandedProjectIds.has(cursorRow.projectId)) {
+            setExpandedProjectIds((current) => ensureProjectExpanded(current, cursorRow.projectId));
+          } else {
+            const child = moveCursor(rows, cursorRow.key, 1);
+            if (child && child.kind !== "project") {
+              setCursorKey(child.key);
+              if (child.kind === "thread") selectThread(child.projectId, child.threadId);
+            }
+          }
+          return "handled";
+        }
+        case "open": {
+          if (cursorRow === null) return "handled";
+          if (cursorRow.kind === "thread") {
+            setMultiSelection(EMPTY_MULTI_SELECTION);
+            selectThread(cursorRow.projectId, cursorRow.threadId);
+            return "open";
+          }
+          if (cursorRow.kind === "more") {
+            toggleShowAll(cursorRow.projectId);
+            return "handled";
+          }
+          setExpandedProjectIds((current) => toggleProjectExpanded(current, cursorRow.projectId));
+          return "handled";
+        }
+        default:
+          return null;
       }
-      return null;
     },
-    [cursorKey, cursorRow, expandedProjectIds, rows, selectThread, toggleShowAll],
+    [cursorKey, cursorRow, expandedProjectIds, multiSelection, rows, selectThread, toggleShowAll],
   );
 
+  const clearMultiSelection = useCallback(() => setMultiSelection(EMPTY_MULTI_SELECTION), []);
+
+  /** Marks the threads that have a finished run; returns how many it marked. */
   const markUnread = useCallback(
-    (threadId: string) => {
-      const thread = threadsById.get(threadId);
-      setUnread((current) => markThreadUnread(current, threadId, thread?.latestRun ?? null));
+    (threadIds: ReadonlyArray<string>) => {
+      let marked = 0;
+      let next = unread;
+      for (const threadId of threadIds) {
+        const thread = threadsById.get(threadId);
+        const updated = markThreadUnread(next, threadId, thread?.latestRun ?? null);
+        if (updated !== next || next.has(threadId)) marked += 1;
+        next = updated;
+      }
+      setUnread(next);
+      return marked;
     },
-    [threadsById],
+    [threadsById, unread],
   );
 
   return {
@@ -357,10 +417,12 @@ export function useSidebarController(options: SidebarControllerOptions) {
     activeProject: activeProjectId === null ? null : (projectsById.get(activeProjectId) ?? null),
     cursorKey,
     cursorRow,
-    handleKey,
+    multiSelection,
+    applyKey,
     pressRow,
     focusRow,
     selectThread,
+    clearMultiSelection,
     markUnread,
   };
 }

@@ -65,6 +65,12 @@ export const COMPOSER_SLASH_COMMANDS: ReadonlyArray<ComposerSlashCommand> = [
     template: "/discard",
   },
   {
+    command: "clone",
+    usage: "/clone owner/repo [destination]",
+    description: "Clone a repository and add it as a project",
+    template: "/clone ",
+  },
+  {
     command: "recover",
     usage: "/recover",
     description: "Put messages whose thread and project are gone here",
@@ -108,6 +114,7 @@ export type ComposerSlashAction =
   | { readonly type: "resume" }
   | { readonly type: "discard" }
   | { readonly type: "recover" }
+  | { readonly type: "clone"; readonly args: string }
   | { readonly type: "error"; readonly message: string };
 
 /** What a slash command does; null when the text isn't one of ours and should be sent. */
@@ -136,6 +143,10 @@ export function resolveComposerSlashAction(text: string): ComposerSlashAction | 
       return { type: "discard" };
     case "recover":
       return { type: "recover" };
+    case "clone":
+      return parsed.args.length === 0
+        ? { type: "error", message: "Type owner/repo or a URL after /clone" }
+        : { type: "clone", args: parsed.args };
     case "steer":
     case "queue":
       return parsed.args.length === 0

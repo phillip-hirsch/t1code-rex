@@ -3,18 +3,20 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import type { CliRenderer, KeyEvent } from "@opentui/core";
-import { useKeyboard, useTerminalDimensions } from "@opentui/react";
+import { useKeyboard, usePaste, useTerminalDimensions } from "@opentui/react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   connectionProjectionPhase,
   type SupervisorConnectionState,
 } from "@t3tools/client-runtime/connection";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
+import { presentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { onThreadRequestsResolved } from "@t3tools/client-runtime/state/thread-requests";
 import {
   CommandId,
   ProjectId,
   ThreadId,
+  type OrchestrationV2ArchivedShellSnapshot,
   type ProviderInteractionMode,
   type RuntimeMode,
   type ServerConfig,
@@ -78,14 +80,25 @@ import {
   resolveRexContext,
   rexTabLabel,
 } from "./rexWorkspace.ts";
+import {
+  buildArchivedThreadRows,
+  reconcileArchivedSelection,
+  selectArchivedRow,
+  type ArchivedSelection,
+} from "./archivedThreads.ts";
+import { useManagement } from "./management.ts";
+import { ArchivedThreadsView, ConfirmDialogView, PromptDialogView } from "./managementViews.tsx";
 import { Sidebar, sidebarRowId, type SidebarPress } from "./sidebar.tsx";
 import {
-  buildThreadContextMenuItems,
+  buildMultiThreadMenuItems,
+  buildProjectMenuItems,
+  buildThreadMenuItems,
   threadWorkspacePath,
-  type ThreadContextMenuItem,
+  type MenuItem,
 } from "./sidebarContextMenu.ts";
 import { useSidebarController } from "./sidebarController.ts";
-import type { SidebarThread } from "./sidebarModel.ts";
+import { printableText, resolveSidebarKey } from "./sidebarKeys.ts";
+import type { SidebarRow, SidebarThread } from "./sidebarModel.ts";
 import type { TuiTheme } from "./theme.ts";
 import {
   buildThreadWindowCommand,
@@ -112,8 +125,23 @@ import { createRequestResponder } from "./requestResponder.ts";
 
 const APP_VERSION = packageJson.version ?? "0.0.0";
 const NO_REQUESTS_ATOM = Atom.make<ReadonlyArray<PendingRequest>>(NO_PENDING_REQUESTS);
+const NO_ARCHIVED_ATOM: Atom.Atom<
+  AsyncResult.AsyncResult<OrchestrationV2ArchivedShellSnapshot, unknown>
+> = Atom.make(AsyncResult.initial<OrchestrationV2ArchivedShellSnapshot, unknown>());
 const HEADER_THREAD_TITLE_MAX_LENGTH = 44;
-const CONTEXT_MENU_WIDTH = 24;
+const CONTEXT_MENU_WIDTH = 26;
+const PALETTE_ROWS_MAX = 14;
+/** The thread menu's items as palette rows, which have no thread row to point at. */
+const THREAD_PALETTE_LABELS: Partial<Record<string, string>> = {
+  "open-rex-tab": "Open thread in Rex tab",
+  "mark-unread": "Mark thread unread",
+  "open-editor": "Open thread in Editor",
+  "open-folder": "Open thread folder",
+  "copy-path": "Copy thread path",
+  "copy-thread-id": "Copy thread ID",
+  archive: "Archive thread",
+  delete: "Delete thread",
+};
 
 export interface AppProps {
   readonly renderer: CliRenderer;
@@ -144,11 +172,30 @@ interface PaletteAction {
   readonly run: () => void | Promise<void>;
 }
 
+/** What a context menu acts on: one thread, the multi-selection, or a project. */
+type MenuTarget =
+  | { readonly kind: "thread"; readonly threadId: string }
+  | { readonly kind: "threads"; readonly threadIds: ReadonlyArray<string> }
+  | { readonly kind: "project"; readonly projectId: string };
+
 interface ContextMenuState {
-  readonly threadId: string;
+  readonly target: MenuTarget;
   readonly top: number;
   readonly left: number;
   readonly index: number;
+}
+
+/** Palette rows whose label or description holds every typed word. */
+function filterPaletteActions(
+  actions: ReadonlyArray<PaletteAction>,
+  query: string,
+): ReadonlyArray<PaletteAction> {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return actions;
+  return actions.filter((action) => {
+    const haystack = `${action.label} ${action.description}`.toLowerCase();
+    return words.every((word) => haystack.includes(word));
+  });
 }
 
 /** "requests" is the request panel above the composer, reached with Tab or a click. */
@@ -334,6 +381,9 @@ function Shell(props: AppProps) {
   const { width: viewportColumns } = useTerminalDimensions();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
+  const [paletteQuery, setPaletteQuery] = useState("");
+  /** The archived-threads view's highlighted row; null while the view is closed. */
+  const [archivedSelection, setArchivedSelection] = useState<ArchivedSelection | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [focusArea, setFocusArea] = useState<FocusArea>("sidebar");
   const [sidebarCollapsedPreference, setSidebarCollapsedPreference] = useState(false);
@@ -606,53 +656,25 @@ function Shell(props: AppProps) {
     [logger],
   );
 
-  const contextMenuItems = useMemo(() => buildThreadContextMenuItems({ rexTabs }), [rexTabs]);
-  const runContextAction = useCallback(
-    (item: ThreadContextMenuItem, threadId: string) => {
-      setContextMenu(null);
-      runTask(`context:${item.id}`, async () => {
-        const thread = threadsById.get(threadId);
-        switch (item.id) {
-          case "open-rex-tab":
-            await openThreadInRexTab(threadId);
-            return;
-          case "mark-unread":
-            sidebar.markUnread(threadId);
-            setStatus(thread?.latestRun?.completedAt ? "Marked unread" : "Nothing to mark unread");
-            return;
-          case "copy-path": {
-            const path = thread
-              ? threadWorkspacePath(thread, projectsById.get(thread.projectId))
-              : null;
-            if (path === null) throw new Error("This thread has no workspace path.");
-            await copyTextToClipboard(path);
-            setStatus("Copied path");
-            return;
-          }
-          case "copy-thread-id":
-            await copyTextToClipboard(threadId);
-            setStatus("Copied thread ID");
-            return;
-        }
-      });
-    },
-    [openThreadInRexTab, projectsById, runTask, sidebar, threadsById],
-  );
-
   const openContextMenu = useCallback(
-    (threadId: string, anchor: { x: number; y: number } | null) => {
-      const rowY = renderer.root.findDescendantById(sidebarRowId(`thread:${threadId}`))?.y;
+    (target: MenuTarget, anchor: { x: number; y: number } | null) => {
+      const rowKey =
+        target.kind === "project"
+          ? `project:${target.projectId}`
+          : `thread:${target.kind === "thread" ? target.threadId : (target.threadIds[0] ?? "")}`;
+      const rowY = renderer.root.findDescendantById(sidebarRowId(rowKey))?.y;
       const top = anchor?.y ?? (rowY === undefined ? 2 : rowY + 1);
       const left = anchor?.x ?? 2;
       setPaletteOpen(false);
       setContextMenu({
-        threadId,
-        top: Math.max(0, Math.min(top, renderer.height - contextMenuItems.length - 3)),
+        target,
+        // The tallest menu (a thread's) fits; shorter ones only sit higher than they must.
+        top: Math.max(0, Math.min(top, renderer.height - 15)),
         left: Math.max(0, Math.min(left, renderer.width - CONTEXT_MENU_WIDTH - 1)),
         index: 0,
       });
     },
-    [contextMenuItems.length, renderer],
+    [renderer],
   );
 
   // The composer's target: the selected thread, or a new-thread draft that isn't one yet.
@@ -707,6 +729,162 @@ function Shell(props: AppProps) {
     setModelPicker(null);
     setFocusArea("composer");
     setStatus("New thread");
+  };
+
+  const management = useManagement({
+    connection,
+    sidebar,
+    serverConfig,
+    composerStore,
+    sender,
+    logger,
+    setStatus,
+    openNewThread,
+  });
+
+  const threadPath = (threadId: string) => {
+    const thread = threadsById.get(threadId);
+    return thread ? threadWorkspacePath(thread, projectsById.get(thread.projectId)) : null;
+  };
+  const projectPath = (projectId: string) => projectsById.get(projectId)?.workspaceRoot ?? null;
+
+  const menuItemsFor = (target: MenuTarget): ReadonlyArray<MenuItem<string>> => {
+    if (target.kind === "threads") return buildMultiThreadMenuItems(target.threadIds.length);
+    if (target.kind === "project") return buildProjectMenuItems();
+    const thread = threadsById.get(target.threadId);
+    return buildThreadMenuItems({
+      rexTabs,
+      capabilities: management.capabilities,
+      pinned: thread?.pinnedAt != null,
+      settled: thread?.settledOverride === "settled",
+      running: threadRuntimeIsActive(thread?.runtime),
+    });
+  };
+  const contextMenuItems = contextMenu === null ? [] : menuItemsFor(contextMenu.target);
+
+  /** Runs a context-menu or palette action; both list the same items. */
+  const runMenuAction = (target: MenuTarget, item: MenuItem<string>) => {
+    setContextMenu(null);
+    setPaletteOpen(false);
+    if (item.disabledReason !== undefined) {
+      setStatus(item.disabledReason);
+      return;
+    }
+    runTask(`menu:${item.id}`, async () => {
+      if (target.kind === "threads") {
+        const ids = target.threadIds;
+        if (item.id === "mark-unread") management.markUnread(ids);
+        else if (item.id === "archive") management.requestArchive(ids);
+        else if (item.id === "delete") management.requestDelete(ids);
+        return;
+      }
+      if (target.kind === "project") {
+        const { projectId } = target;
+        switch (item.id) {
+          case "new-thread":
+            openNewThread(projectId);
+            return;
+          case "rename-project":
+            management.renameProject(projectId);
+            return;
+          case "open-editor":
+            await management.openPath(projectPath(projectId), "editor");
+            return;
+          case "open-folder":
+            await management.openPath(projectPath(projectId), "folder");
+            return;
+          case "copy-path":
+            await management.copyPath(projectPath(projectId));
+            return;
+          case "remove-project":
+            await management.requestRemoveProject(projectId);
+            return;
+        }
+        return;
+      }
+      const { threadId } = target;
+      switch (item.id) {
+        case "open-rex-tab":
+          await openThreadInRexTab(threadId);
+          return;
+        case "rename":
+          management.renameThread(threadId);
+          return;
+        case "pin":
+        case "unpin":
+          await management.setPinned(threadId, item.id === "pin");
+          return;
+        case "settle":
+        case "unsettle":
+          await management.setSettled(threadId, item.id === "settle");
+          return;
+        case "mark-unread":
+          management.markUnread([threadId]);
+          return;
+        case "open-editor":
+          await management.openPath(threadPath(threadId), "editor");
+          return;
+        case "open-folder":
+          await management.openPath(threadPath(threadId), "folder");
+          return;
+        case "copy-path":
+          await management.copyPath(threadPath(threadId));
+          return;
+        case "copy-thread-id":
+          await copyTextToClipboard(threadId);
+          setStatus("Copied thread ID");
+          return;
+        case "archive":
+          management.requestArchive([threadId]);
+          return;
+        case "delete":
+          management.requestDelete([threadId]);
+          return;
+      }
+    });
+  };
+
+  /** The menu for a sidebar row: a project's, the selection's when the row is in it, else the thread's. */
+  const menuTargetForRow = (row: SidebarRow): MenuTarget | null => {
+    if (row.kind === "project") return { kind: "project", projectId: row.projectId };
+    if (row.kind !== "thread") return null;
+    const selected = sidebar.multiSelection.threadIds;
+    if (selected.size > 0 && selected.has(row.threadId)) {
+      return { kind: "threads", threadIds: [...selected] };
+    }
+    if (selected.size > 0) sidebar.clearMultiSelection();
+    return { kind: "thread", threadId: row.threadId };
+  };
+
+  // Archived threads, fetched while the view is open.
+  const archivedResult = useAtomValue(
+    archivedSelection === null ? NO_ARCHIVED_ATOM : connection.archivedShellSnapshotAtom,
+  );
+  const archivedSnapshot = Option.getOrNull(AsyncResult.value(archivedResult));
+  const archivedRows = useMemo(
+    () =>
+      archivedSnapshot === null
+        ? []
+        : buildArchivedThreadRows({
+            projects: archivedSnapshot.projects,
+            threads: archivedSnapshot.threads.map((thread) =>
+              presentThreadShell(connection.environmentId, thread),
+            ),
+          }),
+    [archivedSnapshot, connection.environmentId],
+  );
+  const archivedError = archivedResult._tag === "Failure" ? "Couldn't load archived threads" : null;
+  // One selection for the view and its keys, kept on a live row as rows come and go.
+  const archivedSelected =
+    archivedSelection === null ? null : reconcileArchivedSelection(archivedRows, archivedSelection);
+  if (archivedSelected !== archivedSelection) setArchivedSelection(archivedSelected);
+  const archivedRow =
+    archivedSelected === null ? null : (archivedRows[archivedSelected.index] ?? null);
+  const openArchivedView = () => {
+    setPaletteOpen(false);
+    setContextMenu(null);
+    connection.refreshArchivedThreads();
+    setArchivedSelection({ threadId: null, index: 0 });
   };
 
   const pickSettings = (patch: ComposerSettingsPatch): ComposerSettings | null => {
@@ -828,14 +1006,13 @@ function Shell(props: AppProps) {
     }
     setFocusArea("sidebar");
     if (!press.secondary) {
-      sidebar.pressRow(press.row);
+      sidebar.pressRow(press.row, { ctrl: press.ctrl, shift: press.shift });
       return;
     }
     // Like before, a right-click opens the menu without switching threads.
     sidebar.focusRow(press.row);
-    if (press.row.kind === "thread") {
-      openContextMenu(press.row.threadId, { x: press.x, y: press.y });
-    }
+    const target = menuTargetForRow(press.row);
+    if (target !== null) openContextMenu(target, { x: press.x, y: press.y });
   });
 
   const newThreadProjectId =
@@ -850,6 +1027,73 @@ function Shell(props: AppProps) {
     description: "⌘N",
     run: () => openNewThread(newThreadProjectId),
   });
+  // The open thread's actions, as its context menu lists them.
+  if (activeThread !== null) {
+    const target: MenuTarget = { kind: "thread", threadId: activeThread.id };
+    for (const item of menuItemsFor(target)) {
+      actions.push({
+        id: `thread:${item.id}`,
+        label: THREAD_PALETTE_LABELS[item.id] ?? item.label,
+        description: item.disabledReason ?? activeThread.title ?? DEFAULT_THREAD_TITLE,
+        disabled: item.disabledReason !== undefined,
+        run: () => runMenuAction(target, item),
+      });
+    }
+  }
+  if (sidebar.multiSelection.threadIds.size > 0) {
+    const target: MenuTarget = {
+      kind: "threads",
+      threadIds: [...sidebar.multiSelection.threadIds],
+    };
+    for (const item of menuItemsFor(target)) {
+      actions.push({
+        id: `threads:${item.id}`,
+        label: `${item.label.replace(/ \(\d+\)$/, "")} selected threads`,
+        description: `${target.threadIds.length} selected`,
+        run: () => runMenuAction(target, item),
+      });
+    }
+  }
+  actions.push({
+    id: "archive:open",
+    label: "Archived threads",
+    description: "Restore or delete archived threads",
+    run: openArchivedView,
+  });
+  actions.push({
+    id: "project:add",
+    label: "Add project",
+    description: "Ctrl+P",
+    run: management.openAddProject,
+  });
+  actions.push({
+    id: "project:clone",
+    label: "Clone repository",
+    description: "/clone owner/repo",
+    run: management.openClone,
+  });
+  const paletteProject =
+    newThreadProjectId === null ? undefined : projectsById.get(newThreadProjectId);
+  if (paletteProject !== undefined) {
+    const target: MenuTarget = { kind: "project", projectId: paletteProject.id };
+    const projectLabels: Partial<Record<string, string>> = {
+      "rename-project": "Rename project",
+      "open-editor": "Open project in Editor",
+      "open-folder": "Open project folder",
+      "copy-path": "Copy project path",
+      "remove-project": "Remove project",
+    };
+    for (const item of menuItemsFor(target)) {
+      const label = projectLabels[item.id];
+      if (label === undefined) continue;
+      actions.push({
+        id: `project:${item.id}`,
+        label,
+        description: paletteProject.title,
+        run: () => runMenuAction(target, item),
+      });
+    }
+  }
   actions.push({
     id: "model:pick",
     label: "Pick model",
@@ -857,12 +1101,12 @@ function Shell(props: AppProps) {
     disabled: composerTarget === null,
     run: toggleModelPicker,
   });
-  if (rexTabs) {
+  if (rexTabs && activeThread === null) {
     actions.push({
       id: "rex:thread",
       label: "Open thread in Rex tab",
-      description: activeThread?.title ?? "Select a thread first",
-      disabled: activeThread === null,
+      description: "Select a thread first",
+      disabled: true,
       run: () => openThreadInRexTab(selection.threadId),
     });
   }
@@ -878,6 +1122,9 @@ function Shell(props: AppProps) {
     description: "Ctrl+C",
     run: requestExit,
   });
+  const paletteActions = filterPaletteActions(actions, paletteQuery);
+  const paletteSelected = Math.min(paletteIndex, Math.max(0, paletteActions.length - 1));
+  const paletteWindowStart = Math.max(0, paletteSelected - PALETTE_ROWS_MAX + 1);
 
   const runAction = useCallback(
     (action: PaletteAction) => {
@@ -919,6 +1166,41 @@ function Shell(props: AppProps) {
     setFocusArea((area) => order[(order.indexOf(area) + 1) % order.length] ?? "thread");
   };
 
+  /**
+   * Text typed or pasted into the sidebar goes to the composer: the first key lands there,
+   * and the rest follow focus.
+   */
+  const writeToComposer = (write: (dock: ComposerDockHandle) => void): boolean => {
+    if (composerTarget === null || dockRef.current === null) {
+      setStatus("Select a thread to type a message");
+      return true;
+    }
+    write(dockRef.current);
+    setFocusArea("composer");
+    if (sidebarOverlayOpen) setSidebarOverlayOpen(false);
+    return true;
+  };
+  const typeIntoComposer = (text: string) => writeToComposer((dock) => dock.insertText(text));
+
+  const runSidebarCommand = (type: "menu" | "rename" | "delete"): void => {
+    const row = sidebar.cursorRow;
+    const selected = sidebar.multiSelection.threadIds;
+    if (type === "delete") {
+      if (selected.size > 0) management.requestDelete([...selected]);
+      else if (row?.kind === "thread") management.requestDelete([row.threadId]);
+      else if (row?.kind === "project") setStatus("Remove a project from its menu (⇧F10)");
+      return;
+    }
+    if (row === null) return;
+    if (type === "rename") {
+      if (row.kind === "thread") management.renameThread(row.threadId);
+      else if (row.kind === "project") management.renameProject(row.projectId);
+      return;
+    }
+    const target = menuTargetForRow(row);
+    if (target !== null) openContextMenu(target, null);
+  };
+
   /** Every key comes here before the focused textarea; true means it was used up. */
   const handleKey = (key: KeyEvent): boolean => {
     const picker = modelPickerRef.current;
@@ -931,6 +1213,20 @@ function Shell(props: AppProps) {
       if (outcome?.type === "close") setModelPicker(null);
       else if (outcome?.type === "state") setModelPicker(outcome.state);
       else if (outcome?.type === "select") pickModel(outcome.instanceId, outcome.model);
+      return true;
+    }
+    // A dialog owns the keyboard: its text box gets the keys it doesn't use.
+    if (management.dialogOpen) return management.handleDialogKey(key);
+    if (archivedSelected !== null) {
+      const row = archivedRow;
+      if (key.name === "escape" || (key.ctrl && key.name === "c")) setArchivedSelection(null);
+      else if (key.name === "up" || key.name === "down") {
+        const delta = key.name === "up" ? -1 : 1;
+        setArchivedSelection(selectArchivedRow(archivedRows, archivedSelected.index + delta));
+      } else if (isEnter(key.name) && !key.repeated && row) void management.unarchive(row.threadId);
+      else if ((key.name === "delete" || key.name === "backspace") && row) {
+        management.requestDelete([row.threadId], [row.title]);
+      }
       return true;
     }
     const shortcut = resolveTuiShortcutCommand(
@@ -947,6 +1243,7 @@ function Shell(props: AppProps) {
     if (isPaletteShortcut(key) || shortcut === "commandPalette.toggle") {
       setContextMenu(null);
       setPaletteIndex(0);
+      setPaletteQuery("");
       setPaletteOpen((open) => !open);
       return true;
     }
@@ -960,12 +1257,22 @@ function Shell(props: AppProps) {
     }
     if (paletteOpen) {
       if (key.name === "escape" || (key.ctrl && key.name === "c")) setPaletteOpen(false);
-      else if (key.name === "up") setPaletteIndex((index) => Math.max(0, index - 1));
+      else if (key.name === "up") setPaletteIndex(Math.max(0, paletteSelected - 1));
       else if (key.name === "down")
-        setPaletteIndex((index) => Math.min(actions.length - 1, index + 1));
+        setPaletteIndex(Math.min(paletteActions.length - 1, paletteSelected + 1));
       else if (isEnter(key.name)) {
-        const action = actions[paletteIndex];
-        if (action) runAction(action);
+        const action = paletteActions[paletteSelected];
+        if (action && !key.repeated) runAction(action);
+      } else if (key.name === "backspace") {
+        setPaletteQuery((query) => query.slice(0, -1));
+        setPaletteIndex(0);
+      } else {
+        // Typing filters the list.
+        const text = printableText(key);
+        if (text !== null) {
+          setPaletteQuery((query) => query + text);
+          setPaletteIndex(0);
+        }
       }
       return true;
     }
@@ -978,9 +1285,9 @@ function Shell(props: AppProps) {
           ...contextMenu,
           index: Math.min(contextMenuItems.length - 1, contextMenu.index + 1),
         });
-      else if (isEnter(key.name)) {
+      else if (isEnter(key.name) && !key.repeated) {
         const item = contextMenuItems[contextMenu.index];
-        if (item) runContextAction(item, contextMenu.threadId);
+        if (item) runMenuAction(contextMenu.target, item);
       }
       return true;
     }
@@ -988,7 +1295,15 @@ function Shell(props: AppProps) {
       toggleSidebar();
       return true;
     }
-    if (key.name === "escape" && sidebarOverlayOpen) {
+    if (key.ctrl && key.name === "p") {
+      management.openAddProject();
+      return true;
+    }
+    if (
+      key.name === "escape" &&
+      sidebarOverlayOpen &&
+      sidebar.multiSelection.threadIds.size === 0
+    ) {
       setSidebarOverlayOpen(false);
       setFocusArea(composerTarget === null ? "thread" : "composer");
       return true;
@@ -1013,28 +1328,25 @@ function Shell(props: AppProps) {
     // Everything else is typing.
     if (dockFocused) return false;
     if (sidebarFocused) {
-      if (key.name === "m" && sidebar.cursorRow?.kind === "thread") {
-        openContextMenu(sidebar.cursorRow.threadId, null);
+      const action = resolveSidebarKey(key, {
+        hasMultiSelection: sidebar.multiSelection.threadIds.size > 0,
+      });
+      if (action === null) return false;
+      if (action.type === "type") return typeIntoComposer(action.text);
+      if (action.type === "menu" || action.type === "rename" || action.type === "delete") {
+        if (!key.repeated) runSidebarCommand(action.type);
         return true;
       }
-      const outcome = sidebar.handleKey(key);
+      const outcome = sidebar.applyKey(action);
       if (outcome === "open") {
         setFocusArea(composerTarget === null ? "thread" : "composer");
         if (sidebarOverlayOpen) setSidebarOverlayOpen(false);
       }
-      if (outcome !== null) return true;
+      return outcome !== null;
     }
-    if (!sidebarFocused && threadViewRef.current?.handleKey(key)) return true;
-    if (!sidebarFocused && composerTarget !== null && (key.name === "i" || isEnter(key.name))) {
+    if (threadViewRef.current?.handleKey(key)) return true;
+    if (composerTarget !== null && (key.name === "i" || isEnter(key.name))) {
       setFocusArea("composer");
-      return true;
-    }
-    if (key.name === "q") {
-      requestExit();
-      return true;
-    }
-    if (key.name === "r") {
-      retryNow();
       return true;
     }
     return false;
@@ -1042,6 +1354,20 @@ function Shell(props: AppProps) {
 
   useKeyboard((key) => {
     if (handleKey(key)) key.preventDefault();
+  });
+  // A bracketed paste is one event, not keys: with the sidebar focused it goes to the
+  // composer too. Dialogs, menus and the palette keep theirs (their inputs take pastes).
+  usePaste((event) => {
+    const overlayOpen =
+      modelPickerRef.current !== null ||
+      management.dialogOpen ||
+      archivedSelected !== null ||
+      paletteOpen ||
+      contextMenu !== null;
+    if (!sidebarFocused || overlayOpen) return;
+    event.preventDefault();
+    event.stopPropagation();
+    writeToComposer((dock) => dock.paste(event));
   });
 
   const toneColor = {
@@ -1062,12 +1388,14 @@ function Shell(props: AppProps) {
   const footerHints = modelPicker
     ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
     : sidebarFocused
-      ? "↑↓ move  ←→ fold  ⏎ open  m menu  ⌘N new  tab focus  ⌘K palette  q quit"
+      ? sidebar.multiSelection.threadIds.size > 0
+        ? `${sidebar.multiSelection.threadIds.size} selected  ⇧↑↓ extend  ⇧F10 menu  del delete  esc clear`
+        : "↑↓ move  ⏎ open  ⇧↑↓ select  ⇧F10 menu  F2 rename  del delete  type to compose  ⌘K palette"
       : requestsFocused
         ? panelHints
         : composerFocused
           ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
-          : `↑↓ scroll  PgUp/PgDn page  End bottom  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette  q quit`;
+          : `↑↓ scroll  PgUp/PgDn page  End bottom  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -1085,6 +1413,7 @@ function Shell(props: AppProps) {
       activeProjectId={selection.projectId}
       activeThreadId={selection.threadId}
       cursorKey={sidebar.cursorKey}
+      multiSelectedThreadIds={sidebar.multiSelection.threadIds}
       emptyLabel={emptyLabel}
       onPress={pressSidebarRow}
     />
@@ -1189,6 +1518,13 @@ function Shell(props: AppProps) {
                   onSetInteractionMode: setInteractionMode,
                   onSetRuntimeMode: setRuntimeMode,
                   onStatus: setStatus,
+                  onClone: management.clone,
+                  mentionSearch: {
+                    cwd: activeThread
+                      ? threadWorkspacePath(activeThread, activeProject ?? undefined)
+                      : (activeProject?.workspaceRoot ?? null),
+                    searchAtom: connection.searchEntriesAtom,
+                  },
                 }}
                 sender={sender}
                 requests={
@@ -1206,7 +1542,12 @@ function Shell(props: AppProps) {
                     : null
                 }
                 focus={
-                  modelPicker !== null || paletteOpen
+                  // Overlays with their own text box take OpenTUI's focus; releasing the
+                  // dock's here makes it take focus back when they close.
+                  modelPicker !== null ||
+                  paletteOpen ||
+                  management.dialogOpen ||
+                  archivedSelected !== null
                     ? null
                     : composerFocused
                       ? "composer"
@@ -1310,7 +1651,7 @@ function Shell(props: AppProps) {
                 onMouseDown={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  runContextAction(item, contextMenu.threadId);
+                  runMenuAction(contextMenu.target, item);
                 }}
                 style={{
                   height: 1,
@@ -1322,7 +1663,16 @@ function Shell(props: AppProps) {
                 <text
                   wrapMode="none"
                   content={item.label}
-                  style={{ fg: index === contextMenu.index ? palette.text : palette.muted }}
+                  style={{
+                    fg:
+                      item.disabledReason !== undefined
+                        ? palette.subtle
+                        : item.destructive
+                          ? palette.composerStop
+                          : index === contextMenu.index
+                            ? palette.text
+                            : palette.muted,
+                  }}
                 />
               </box>
             ))}
@@ -1356,34 +1706,73 @@ function Shell(props: AppProps) {
           <text
             wrapMode="none"
             truncate
-            content="Command palette"
-            style={{ fg: palette.subtle, marginBottom: 1 }}
+            content={
+              paletteQuery.length > 0 ? `› ${paletteQuery}▏` : "Command palette  (type to filter)"
+            }
+            style={{ fg: paletteQuery.length > 0 ? palette.text : palette.subtle, marginBottom: 1 }}
           />
-          {actions.map((action, index) => (
-            <box
-              key={action.id}
-              style={{
-                flexDirection: "row",
-                height: 1,
-                paddingLeft: 1,
-                backgroundColor: index === paletteIndex ? palette.selection : palette.popup,
-              }}
-            >
-              <text
-                wrapMode="none"
-                truncate
-                content={action.label}
-                style={{ fg: action.disabled ? palette.subtle : palette.text }}
-              />
-              <text
-                wrapMode="none"
-                truncate
-                content={`  ${action.description}`}
-                style={{ fg: palette.subtle }}
-              />
-            </box>
-          ))}
+          {paletteActions.length === 0 ? (
+            <text content="No matching actions" style={{ fg: palette.muted }} />
+          ) : null}
+          {paletteActions
+            .slice(paletteWindowStart, paletteWindowStart + PALETTE_ROWS_MAX)
+            .map((action) => (
+              <box
+                key={action.id}
+                style={{
+                  flexDirection: "row",
+                  height: 1,
+                  paddingLeft: 1,
+                  backgroundColor:
+                    action === paletteActions[paletteSelected] ? palette.selection : palette.popup,
+                }}
+              >
+                <text
+                  wrapMode="none"
+                  truncate
+                  content={action.label}
+                  style={{ fg: action.disabled ? palette.subtle : palette.text }}
+                />
+                <text
+                  wrapMode="none"
+                  truncate
+                  content={`  ${action.description}`}
+                  style={{ fg: palette.subtle }}
+                />
+              </box>
+            ))}
         </box>
+      ) : null}
+      {archivedSelected !== null ? (
+        <ArchivedThreadsView
+          rows={archivedRows}
+          index={archivedSelected.index}
+          loading={archivedSnapshot === null}
+          error={archivedError}
+          theme={theme}
+          onSelect={(index) => setArchivedSelection(selectArchivedRow(archivedRows, index))}
+          onClose={() => setArchivedSelection(null)}
+        />
+      ) : null}
+      {management.prompt !== null ? (
+        <PromptDialogView
+          prompt={management.prompt}
+          revision={management.promptRevision}
+          busy={management.promptBusy}
+          suggestions={management.suggestions}
+          suggestionIndex={management.suggestionIndex}
+          theme={theme}
+          onInput={management.setPromptValue}
+          onPickSuggestion={management.pickSuggestion}
+          onCancel={management.closePrompt}
+        />
+      ) : null}
+      {management.confirm !== null ? (
+        <ConfirmDialogView
+          state={management.confirm}
+          theme={theme}
+          onPress={management.pressConfirm}
+        />
       ) : null}
     </box>
   );

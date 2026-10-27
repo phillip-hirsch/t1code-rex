@@ -1054,3 +1054,58 @@ describe("composer sender, Sol audit round 5", () => {
     expect(store.getDraft("t9").text).toBe("old");
   });
 });
+
+describe("composer sender, PR 15 Sol audit round 1", () => {
+  const second = { commandId: CommandId.make("cmd-2"), messageId: MessageId.make("msg-2") };
+
+  it("S1: deleting a thread drops its held message, so quit leaves no draft or record for it", async () => {
+    const prefs: { current: TuiPrefs } = { current: {} };
+    const inFlight = deferred();
+    const { store, sender, calls } = setup([inFlight.promise], { store: savingStore(prefs) });
+    const first = sender.send(send());
+    void sender.send(send({ ...second, text: "held" }));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    expect(sender.pendingCount({ threadIds: ["t1"] })).toBe(1);
+    expect(sender.pendingCount({ threadIds: ["t2"] })).toBe(0);
+
+    expect(sender.forget({ threadIds: ["t1"] })).toBe(1);
+    expect(sender.pendingCount()).toBe(0);
+    expect(store.snapshot("t1").sends).toEqual([]);
+    await sender.retryWaiting();
+    sender.handOff();
+    store.flush();
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    expect(prefs.current.composerDraftsByThreadId).toBeUndefined();
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+  });
+
+  it("S1: a message in flight to a deleted thread is abandoned, not restored or saved at quit", async () => {
+    const prefs: { current: TuiPrefs } = { current: {} };
+    const { store, sender } = setup([new Promise<ComposerCommandResult>(() => undefined)], {
+      store: savingStore(prefs),
+    });
+    const sending = sender.send(send());
+    await settle();
+    expect(sender.forget({ threadIds: ["t1"] })).toBe(1);
+    await sending;
+    sender.handOff();
+    store.flush();
+    expect(store.getDraft("t1").text).toBe("");
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+  });
+
+  it("S1: removing a project drops messages to its threads the shell doesn't list yet", async () => {
+    const { sender } = setup([new Promise<ComposerCommandResult>(() => undefined)]);
+    const launch = send({
+      target: { kind: "draft", threadId: ThreadId.make("draft-1"), projectId: ProjectId.make("p") },
+    });
+    void sender.send(launch);
+    await settle();
+    expect(sender.pendingCount({ threadIds: [], projectId: "p" })).toBe(1);
+    expect(sender.pendingCount({ threadIds: [], projectId: "q" })).toBe(0);
+    expect(sender.forget({ threadIds: [], projectId: "p" })).toBe(1);
+    expect(sender.pendingCount()).toBe(0);
+  });
+});
