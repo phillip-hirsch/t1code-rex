@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import type { TuiPaths } from "./config.ts";
-import { readPrefs, writePrefs } from "./prefs.ts";
+import { createPrefsWriter, readPrefs, updatePrefs, writePrefs } from "./prefs.ts";
 
 async function makePaths(): Promise<{ root: string; paths: TuiPaths }> {
   const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "tr3x-prefs-"));
@@ -127,6 +127,54 @@ describe("prefs", () => {
 
     await expect(readPrefs(paths)).resolves.toEqual({
       mainView: "keybindings",
+    });
+  });
+});
+
+describe("updatePrefs", () => {
+  it("rewrites only the given keys and removes undefined ones", async () => {
+    const { root, paths } = await makePaths();
+    tempRoots.push(root);
+    await writePrefs(paths, {
+      tuiThemeId: "terminal-match",
+      selectedThreadId: "thread-1",
+      expandedProjectIds: ["project-1"],
+    });
+
+    await updatePrefs(paths, {
+      selectedThreadId: "thread-2",
+      expandedProjectIds: undefined,
+      locallyUnreadThreadIds: ["thread-3"],
+    });
+
+    await expect(readPrefs(paths)).resolves.toEqual({
+      tuiThemeId: "terminal-match",
+      selectedThreadId: "thread-2",
+      locallyUnreadThreadIds: ["thread-3"],
+    });
+    await expect(NodeFSP.readdir(NodePath.dirname(paths.prefsPath))).resolves.toEqual([
+      "prefs.json",
+    ]);
+  });
+});
+
+describe("createPrefsWriter", () => {
+  it("applies overlapping patches in order and keeps other keys", async () => {
+    const { root, paths } = await makePaths();
+    tempRoots.push(root);
+    await writePrefs(paths, { tuiThemeId: "terminal-match" });
+    const errors: unknown[] = [];
+    const writer = createPrefsWriter(paths, (error) => errors.push(error));
+
+    writer.write({ selectedThreadId: "thread-1" });
+    writer.write({ selectedThreadId: "thread-2", expandedProjectIds: ["project-1"] });
+    writer.write({ expandedProjectIds: undefined });
+    await writer.flush();
+
+    expect(errors).toEqual([]);
+    await expect(readPrefs(paths)).resolves.toEqual({
+      tuiThemeId: "terminal-match",
+      selectedThreadId: "thread-2",
     });
   });
 });

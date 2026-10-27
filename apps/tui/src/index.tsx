@@ -11,7 +11,7 @@ import packageJson from "../package.json" with { type: "json" };
 import { resolveTuiPaths, type TuiPaths } from "./config.ts";
 import { createTuiConnection } from "./connection/tuiConnection.ts";
 import { createT1Logger, type T1Logger } from "./log.ts";
-import { readPrefs } from "./prefs.ts";
+import { createPrefsWriter, readPrefs } from "./prefs.ts";
 import {
   normalizeRendererThemeMode,
   resolveTerminalPalette,
@@ -120,6 +120,13 @@ const connection = createTuiConnection({
   platformOs: HOST_PLATFORM,
 });
 const prefs = await readPrefs(paths);
+// Thread tabs share prefs.json with the main window; only the main window saves it.
+const prefsWriter = threadWindowLaunch
+  ? null
+  : createPrefsWriter(paths, (error) =>
+      logger.log("prefs.save.failed", { error: errorMessage(error) }),
+    );
+const launchCwd = process.cwd();
 const appTheme = prefs.appSettings?.theme ?? DEFAULT_APP_THEME;
 const tuiThemeId = normalizeTuiThemeId(prefs.tuiThemeId);
 
@@ -139,6 +146,9 @@ if (process.env.TR3X_HEADLESS === "1") {
       paths={paths}
       logger={logger}
       theme={resolveTuiTheme(appTheme, tuiThemeId)}
+      initialPrefs={prefs}
+      prefsWriter={null}
+      cwd={launchCwd}
       threadWindowLaunch={threadWindowLaunch}
     />,
   );
@@ -203,9 +213,10 @@ if (process.env.TR3X_HEADLESS === "1") {
     } else {
       process.exitCode = code;
     }
-    setTimeout(() => {
-      process.exit(process.exitCode ?? code);
-    }, 50).unref();
+    // Give the last prefs write a moment to land, but never hang on exit.
+    const exit = () => process.exit(process.exitCode ?? code);
+    setTimeout(exit, 500).unref();
+    void (prefsWriter?.flush() ?? Promise.resolve()).then(() => setTimeout(exit, 50).unref());
   };
 
   const renderApp = () => {
@@ -216,6 +227,9 @@ if (process.env.TR3X_HEADLESS === "1") {
         paths={paths}
         logger={logger}
         theme={rendererTheme}
+        initialPrefs={prefs}
+        prefsWriter={prefsWriter}
+        cwd={launchCwd}
         interruptRequestToken={interruptRequestToken}
         onRequestExit={() => shutdown(0)}
         threadWindowLaunch={threadWindowLaunch}
