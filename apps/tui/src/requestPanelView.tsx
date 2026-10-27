@@ -334,8 +334,13 @@ function ApprovalBody(props: {
   const { approval, subject } = request;
   const choices = approvalChoices(approval);
   const detail = approval.detail?.trim() ?? "";
-  const showDetail =
-    detail.length > 0 && (subject?.type !== "command" || subject.command.trim() !== detail);
+  // The provider's summary, unless it only repeats the command or a file name shown above.
+  const repeats =
+    subject?.type === "command"
+      ? subject.command.trim() === detail
+      : subject?.type === "files" &&
+        subject.files.some((file) => file.path === detail || file.path.endsWith(`/${detail}`));
+  const showDetail = detail.length > 0 && !repeats;
   return (
     <box style={{ flexDirection: "column" }}>
       {subject?.type === "command" ? (
