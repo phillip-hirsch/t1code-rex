@@ -34,15 +34,13 @@ describe("slashCommands", () => {
       command: "project",
       args: "add ~/repo",
     });
-    expect(
-      parseSlashCommandInput("/clone t3tools/t1code ~/src/t1code provider=azure-devops"),
-    ).toEqual({
+    expect(parseSlashCommandInput("/clone t3tools/tr3x ~/src/tr3x provider=azure-devops")).toEqual({
       command: "clone",
-      args: "t3tools/t1code ~/src/t1code provider=azure-devops",
+      args: "t3tools/tr3x ~/src/tr3x provider=azure-devops",
     });
-    expect(parseSlashCommandInput("/publish t3tools/t1code provider=gitlab public")).toEqual({
+    expect(parseSlashCommandInput("/publish t3tools/tr3x provider=gitlab public")).toEqual({
       command: "publish",
-      args: "t3tools/t1code provider=gitlab public",
+      args: "t3tools/tr3x provider=gitlab public",
     });
   });
 });

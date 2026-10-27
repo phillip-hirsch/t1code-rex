@@ -8,7 +8,7 @@ import type { TuiPaths } from "./config.ts";
 import { readPrefs, writePrefs } from "./prefs.ts";
 
 async function makePaths(): Promise<{ root: string; paths: TuiPaths }> {
-  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-prefs-"));
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "tr3x-prefs-"));
   return {
     root,
     paths: {

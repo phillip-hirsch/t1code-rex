@@ -6,9 +6,9 @@ import { resolveTuiPaths } from "./config.ts";
 describe("resolveTuiPaths", () => {
   it("prefers TUI-specific paths", () => {
     const paths = resolveTuiPaths({
-      T1CODE_HOME: "/tmp/t1-home",
-      T1CODE_CONFIG_HOME: "/tmp/t1-config",
-      T1CODE_STATE_HOME: "/tmp/t1-state",
+      TR3X_HOME: "/tmp/t1-home",
+      TR3X_CONFIG_HOME: "/tmp/t1-config",
+      TR3X_STATE_HOME: "/tmp/t1-state",
     });
 
     expect(paths).toEqual({
@@ -34,26 +34,26 @@ describe("resolveTuiPaths", () => {
 
     expect(paths).toEqual({
       userHomeDir: "/Users/tester",
-      homeDir: "/var/data/t1code",
-      configHomeDir: "/var/config/t1code",
-      stateHomeDir: "/var/state/t1code",
-      prefsPath: "/var/config/t1code/prefs.json",
-      logPath: "/var/state/t1code/tui.log",
-      imagesDir: "/var/state/t1code/images",
+      homeDir: "/var/data/tr3x",
+      configHomeDir: "/var/config/tr3x",
+      stateHomeDir: "/var/state/tr3x",
+      prefsPath: "/var/config/tr3x/prefs.json",
+      logPath: "/var/state/tr3x/tui.log",
+      imagesDir: "/var/state/tr3x/images",
     });
   });
 
-  it("keeps legacy defaults on non-Linux platforms", () => {
+  it("uses ~/.tr3x and ~/.config/tr3x on non-Linux platforms", () => {
     const paths = resolveTuiPaths({}, { homeDir: "/Users/tester", platform: "darwin" });
 
     expect(paths).toEqual({
       userHomeDir: "/Users/tester",
-      homeDir: "/Users/tester/.t1",
-      configHomeDir: "/Users/tester/.config/t1code",
-      stateHomeDir: "/Users/tester/.config/t1code",
-      prefsPath: "/Users/tester/.config/t1code/prefs.json",
-      logPath: "/Users/tester/.config/t1code/tui.log",
-      imagesDir: "/Users/tester/.config/t1code/images",
+      homeDir: "/Users/tester/.tr3x",
+      configHomeDir: "/Users/tester/.config/tr3x",
+      stateHomeDir: "/Users/tester/.config/tr3x",
+      prefsPath: "/Users/tester/.config/tr3x/prefs.json",
+      logPath: "/Users/tester/.config/tr3x/tui.log",
+      imagesDir: "/Users/tester/.config/tr3x/images",
     });
   });
 });

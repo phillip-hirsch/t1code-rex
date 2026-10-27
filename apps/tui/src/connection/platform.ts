@@ -49,7 +49,7 @@ const unsupportedSsh = () =>
 
 function clientMetadata(options: TuiPlatformOptions): AuthClientPresentationMetadata {
   return {
-    label: "T1Code",
+    label: "tr3x",
     deviceType: "desktop",
     os: options.platformOs,
     surface: "cli",

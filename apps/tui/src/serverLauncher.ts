@@ -148,7 +148,7 @@ const REPO_ROOT = NodePath.resolve(TUI_APP_DIR, "../..");
 const SERVER_APP_DIR = NodePath.resolve(REPO_ROOT, "apps/server");
 const BUNDLED_SERVER_ENTRY = NodePath.resolve(THIS_DIR, "server", "bin.mjs");
 
-export const TUI_CLIENT_LABEL = "T1Code";
+export const TUI_CLIENT_LABEL = "tr3x";
 
 function readBooleanEnv(value: string | undefined): boolean | undefined {
   if (!value) return undefined;
@@ -171,7 +171,7 @@ function parseConfiguredPort(value: string | undefined): number | null {
   if (!normalized) return null;
   const port = Number(normalized);
   if (!Number.isInteger(port) || port <= 0 || port > 65_535) {
-    throw new Error("T1CODE_PORT must be a valid port between 1 and 65535.");
+    throw new Error("TR3X_PORT must be a valid port between 1 and 65535.");
   }
   return port;
 }
@@ -182,29 +182,29 @@ export function buildServerEndpoint(host: string, port: number): ServerEndpoint 
 }
 
 /**
- * `T1CODE_TUI_ATTACH_ONLY=1` with `T1CODE_HOST`, `T1CODE_PORT` and a bearer in
- * `T1CODE_AUTH_TOKEN` (for example from `t3 auth session issue --token-only`)
+ * `TR3X_TUI_ATTACH_ONLY=1` with `TR3X_HOST`, `TR3X_PORT` and a bearer in
+ * `TR3X_AUTH_TOKEN` (for example from `t3 auth session issue --token-only`)
  * joins a running server instead of starting one.
  */
 export function resolveAttachedServerConnection(
   env: NodeJS.ProcessEnv = process.env,
 ): AttachedServerConnection | null {
-  if (!readBooleanEnv(env.T1CODE_TUI_ATTACH_ONLY)) return null;
-  const host = normalizeHost(env.T1CODE_HOST);
-  const port = parseConfiguredPort(env.T1CODE_PORT);
+  if (!readBooleanEnv(env.TR3X_TUI_ATTACH_ONLY)) return null;
+  const host = normalizeHost(env.TR3X_HOST);
+  const port = parseConfiguredPort(env.TR3X_PORT);
   if (port === null) {
-    throw new Error("T1CODE_TUI_ATTACH_ONLY requires a valid T1CODE_PORT.");
+    throw new Error("TR3X_TUI_ATTACH_ONLY requires a valid TR3X_PORT.");
   }
-  const bearerToken = env.T1CODE_AUTH_TOKEN?.trim();
+  const bearerToken = env.TR3X_AUTH_TOKEN?.trim();
   if (!bearerToken) {
-    throw new Error("T1CODE_TUI_ATTACH_ONLY requires T1CODE_AUTH_TOKEN (a bearer token).");
+    throw new Error("TR3X_TUI_ATTACH_ONLY requires TR3X_AUTH_TOKEN (a bearer token).");
   }
   return { ...buildServerEndpoint(host, port), bearerToken };
 }
 
 function stripReservedLaunchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(
-    Object.entries(env).filter(([key]) => !key.startsWith("T1CODE_") && !key.startsWith("T3CODE_")),
+    Object.entries(env).filter(([key]) => !key.startsWith("TR3X_") && !key.startsWith("T3CODE_")),
   );
 }
 
@@ -262,7 +262,7 @@ async function waitForServerReady(input: {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw new Error(`Timed out waiting for the T1Code server at ${input.httpBaseUrl}.`);
+  throw new Error(`Timed out waiting for the tr3x server at ${input.httpBaseUrl}.`);
 }
 
 async function exchangeBootstrapForBearer(input: {
@@ -284,7 +284,7 @@ function extractFatalStartupError(output: string): string | null {
   if (!normalized) return null;
   if (/\b(EACCES|EPERM)\b|permission denied/iu.test(normalized)) {
     const firstLine = normalized.split(/\r?\n/u, 1)[0] ?? normalized;
-    return `T1Code could not start because a required path is not writable. ${firstLine}`;
+    return `tr3x could not start because a required path is not writable. ${firstLine}`;
   }
   return null;
 }
@@ -307,14 +307,14 @@ async function isBearerAcceptedByServer(input: {
 }
 
 function stateDirOwnedMessage(baseDir: string): string {
-  return `Another T1Code or T3 Code server already owns ${baseDir}. Stop it, or attach to it with T1CODE_TUI_ATTACH_ONLY=1.`;
+  return `Another tr3x or T3 Code server already owns ${baseDir}. Stop it, or attach to it with TR3X_TUI_ATTACH_ONLY=1.`;
 }
 
 export function resolveServerCommand(env: NodeJS.ProcessEnv = process.env): {
   command: string;
   args: string[];
 } {
-  const node = env.T1CODE_NODE_BIN?.trim() || "node";
+  const node = env.TR3X_NODE_BIN?.trim() || "node";
   if (NodeFS.existsSync(BUNDLED_SERVER_ENTRY)) {
     return { command: node, args: [BUNDLED_SERVER_ENTRY] };
   }

@@ -18,7 +18,7 @@ describe("resolveTuiResponsiveLayout", () => {
         showSidebar: true,
         showWindowDots: true,
         showSidebarAlphaBadge: true,
-        sidebarTitle: "T1 Code",
+        sidebarTitle: "tr3x",
         showHeaderProjectBadge: true,
         showComposerModeLabels: true,
         showComposerModelLabel: true,
@@ -87,7 +87,7 @@ describe("resolveTuiResponsiveLayout", () => {
         sidebarCollapsed: false,
         showSidebar: true,
         showWindowDots: true,
-        sidebarTitle: "T1 Code",
+        sidebarTitle: "tr3x",
       }),
     );
   });
@@ -102,7 +102,7 @@ describe("resolveTuiResponsiveLayout", () => {
       expect.objectContaining({
         showSidebar: true,
         showWindowDots: true,
-        sidebarTitle: "T1 Code",
+        sidebarTitle: "tr3x",
         showComposerModeLabels: true,
         showComposerModelLabel: true,
         showComposerTraitsLabel: true,
@@ -141,7 +141,7 @@ describe("resolveTuiResponsiveLayout", () => {
         sidebarCollapsed: false,
         showSidebar: true,
         showWindowDots: true,
-        sidebarTitle: "T1 Code",
+        sidebarTitle: "tr3x",
       }),
     );
   });

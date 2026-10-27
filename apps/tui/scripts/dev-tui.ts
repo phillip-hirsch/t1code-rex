@@ -9,7 +9,7 @@ import { currentTuiHost, resolveTuiPaths } from "../src/config.ts";
 import { type ManagedServer, startManagedServer } from "../src/serverLauncher.ts";
 
 /**
- * Starts one T3 Code server on T1Code's data directory and runs the TUI under
+ * Starts one T3 Code server on tr3x's data directory and runs the TUI under
  * `bun --watch`, attached to it, so TUI restarts keep the server and its state.
  */
 
@@ -24,7 +24,7 @@ function ensureDependenciesInstalled(repoRoot: string) {
 
 function stripReservedLaunchEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(
-    Object.entries(env).filter(([key]) => !key.startsWith("T1CODE_") && !key.startsWith("T3CODE_")),
+    Object.entries(env).filter(([key]) => !key.startsWith("TR3X_") && !key.startsWith("T3CODE_")),
   );
 }
 
@@ -65,11 +65,11 @@ function shutdown(signal?: NodeJS.Signals, exitCode = 0) {
   }, 1_500).unref();
 }
 
-const configuredPort = process.env.T1CODE_PORT?.trim();
+const configuredPort = process.env.TR3X_PORT?.trim();
 const managed = await startManagedServer({
   baseDir: paths.homeDir,
   cwd: process.cwd(),
-  ...(process.env.T1CODE_HOST?.trim() ? { host: process.env.T1CODE_HOST.trim() } : {}),
+  ...(process.env.TR3X_HOST?.trim() ? { host: process.env.TR3X_HOST.trim() } : {}),
   ...(configuredPort ? { port: Number(configuredPort) } : {}),
   onLog: log,
   onFatal: (message) => {
@@ -87,20 +87,20 @@ const managed = await startManagedServer({
 server = managed;
 const bearerToken = await managed.getBearerToken();
 process.stderr.write(
-  `T1Code dev server ${managed.environment.serverVersion} at ${managed.httpBaseUrl} (logs: ${paths.logPath})\n`,
+  `tr3x dev server ${managed.environment.serverVersion} at ${managed.httpBaseUrl} (logs: ${paths.logPath})\n`,
 );
 
 tui = NodeChildProcess.spawn("bun", ["--silent", "--watch", "run", TUI_ENTRY], {
   cwd: REPO_ROOT,
   env: {
     ...stripReservedLaunchEnv(process.env),
-    T1CODE_HOME: paths.homeDir,
-    T1CODE_CONFIG_HOME: paths.configHomeDir,
-    T1CODE_STATE_HOME: paths.stateHomeDir,
-    T1CODE_HOST: managed.host,
-    T1CODE_PORT: String(managed.port),
-    T1CODE_AUTH_TOKEN: bearerToken,
-    T1CODE_TUI_ATTACH_ONLY: "1",
+    TR3X_HOME: paths.homeDir,
+    TR3X_CONFIG_HOME: paths.configHomeDir,
+    TR3X_STATE_HOME: paths.stateHomeDir,
+    TR3X_HOST: managed.host,
+    TR3X_PORT: String(managed.port),
+    TR3X_AUTH_TOKEN: bearerToken,
+    TR3X_TUI_ATTACH_ONLY: "1",
   },
   stdio: "inherit",
 });

@@ -206,7 +206,7 @@ function Shell(props: AppProps) {
     });
     items.push({
       id: "app:quit",
-      label: "Quit T1Code",
+      label: "Quit tr3x",
       description: "Ctrl+C",
       run: () => onRequestExit?.(),
     });
@@ -265,7 +265,7 @@ function Shell(props: AppProps) {
     info: palette.info,
     muted: palette.muted,
   }[connectionView.tone];
-  const title = threadWindowLaunch ? "T1Code thread tab" : "T1Code";
+  const title = threadWindowLaunch ? "tr3x thread tab" : "tr3x";
 
   return (
     <box

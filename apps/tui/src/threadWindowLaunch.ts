@@ -5,13 +5,13 @@ import * as NodePath from "node:path";
 import type { TuiPaths } from "./config.ts";
 
 /**
- * A thread window is a second T1Code instance, opened in its own Rex tab,
+ * A thread window is a second tr3x instance, opened in its own Rex tab,
  * that attaches to the server of the window that opened it and starts on one
  * thread. Launch details travel in a one-shot file (mode 0600) so the bearer
  * token never appears in process arguments.
  */
 
-export const THREAD_WINDOW_LAUNCH_ENV = "T1CODE_THREAD_WINDOW_FILE";
+export const THREAD_WINDOW_LAUNCH_ENV = "TR3X_THREAD_WINDOW_FILE";
 
 export interface ThreadWindowServer {
   readonly httpBaseUrl: string;
@@ -107,7 +107,7 @@ export function consumeThreadWindowLaunch(
   const launch = raw === null ? null : parseThreadWindowLaunch(raw);
   if (!launch) {
     throw new Error(
-      "This thread tab's launch details are missing or expired. Open the thread again from the main T1Code window.",
+      "This thread tab's launch details are missing or expired. Open the thread again from the main tr3x window.",
     );
   }
   return launch;
@@ -119,15 +119,15 @@ export function consumeThreadWindowLaunch(
  * Connection and auth variables are excluded; they travel in the launch file.
  */
 const FORWARDED_ENV_KEYS = [
-  "T1CODE_REX_BIN",
-  "T1CODE_USE_KITTY_KEYBOARD",
-  "T1CODE_USE_ALTERNATE_SCREEN",
-  "T1CODE_USE_MOUSE",
-  "T1CODE_ENABLE_MOUSE_MOVEMENT",
+  "TR3X_REX_BIN",
+  "TR3X_USE_KITTY_KEYBOARD",
+  "TR3X_USE_ALTERNATE_SCREEN",
+  "TR3X_USE_MOUSE",
+  "TR3X_ENABLE_MOUSE_MOVEMENT",
 ] as const;
 
 /**
- * The command that starts this same T1Code build with a launch file. The
+ * The command that starts this same tr3x build with a launch file. The
  * opener's resolved paths are passed so the thread window uses the same data
  * even when they came from variables the login environment lacks.
  */
@@ -150,9 +150,9 @@ export function buildThreadWindowCommand(
   });
   return [
     "env",
-    `T1CODE_HOME=${paths.homeDir}`,
-    `T1CODE_CONFIG_HOME=${paths.configHomeDir}`,
-    `T1CODE_STATE_HOME=${paths.stateHomeDir}`,
+    `TR3X_HOME=${paths.homeDir}`,
+    `TR3X_CONFIG_HOME=${paths.configHomeDir}`,
+    `TR3X_STATE_HOME=${paths.stateHomeDir}`,
     ...forwarded,
     `${THREAD_WINDOW_LAUNCH_ENV}=${launchFilePath}`,
     runtime.execPath,

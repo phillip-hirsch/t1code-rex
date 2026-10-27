@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
 import * as NodeChildProcess from "node:child_process";
 /**
- * Thin client for the Rex terminal multiplexer CLI. T1Code uses it to open
+ * Thin client for the Rex terminal multiplexer CLI. tr3x uses it to open
  * threads, terminals, and diffs as Rex tabs and panes when it runs inside Rex.
  */
 
@@ -38,7 +38,7 @@ export function resolveRexContext(env: NodeJS.ProcessEnv = process.env): RexCont
   const sessionId = env.REX_SESSION?.trim();
   if (!sessionId) return null;
   return {
-    bin: env.T1CODE_REX_BIN?.trim() || "rex",
+    bin: env.TR3X_REX_BIN?.trim() || "rex",
     sessionId,
     blockId: env.REX_BLOCK?.trim() || null,
   };

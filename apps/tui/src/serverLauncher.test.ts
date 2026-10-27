@@ -70,26 +70,26 @@ describe("resolveAttachedServerConnection", () => {
   it("builds base URLs from the attach env and keeps the bearer out of them", () => {
     expect(
       resolveAttachedServerConnection({
-        T1CODE_TUI_ATTACH_ONLY: "1",
-        T1CODE_HOST: "127.0.0.1",
-        T1CODE_PORT: "43111",
-        T1CODE_AUTH_TOKEN: "bearer-1",
+        TR3X_TUI_ATTACH_ONLY: "1",
+        TR3X_HOST: "127.0.0.1",
+        TR3X_PORT: "43111",
+        TR3X_AUTH_TOKEN: "bearer-1",
       }),
     ).toEqual({
       httpBaseUrl: "http://127.0.0.1:43111",
       wsBaseUrl: "ws://127.0.0.1:43111",
       bearerToken: "bearer-1",
     });
-    expect(resolveAttachedServerConnection({ T1CODE_PORT: "43111" })).toBeNull();
+    expect(resolveAttachedServerConnection({ TR3X_PORT: "43111" })).toBeNull();
   });
 
   it("requires a port and a bearer token", () => {
     expect(() =>
-      resolveAttachedServerConnection({ T1CODE_TUI_ATTACH_ONLY: "1", T1CODE_AUTH_TOKEN: "x" }),
-    ).toThrow("T1CODE_TUI_ATTACH_ONLY requires a valid T1CODE_PORT.");
+      resolveAttachedServerConnection({ TR3X_TUI_ATTACH_ONLY: "1", TR3X_AUTH_TOKEN: "x" }),
+    ).toThrow("TR3X_TUI_ATTACH_ONLY requires a valid TR3X_PORT.");
     expect(() =>
-      resolveAttachedServerConnection({ T1CODE_TUI_ATTACH_ONLY: "1", T1CODE_PORT: "43111" }),
-    ).toThrow("T1CODE_TUI_ATTACH_ONLY requires T1CODE_AUTH_TOKEN");
+      resolveAttachedServerConnection({ TR3X_TUI_ATTACH_ONLY: "1", TR3X_PORT: "43111" }),
+    ).toThrow("TR3X_TUI_ATTACH_ONLY requires TR3X_AUTH_TOKEN");
   });
 });
 
@@ -97,14 +97,14 @@ describe("startManagedServer", () => {
   it("spawns upstream's server in desktop mode with the secret on stdin, not argv", async () => {
     const { children, calls, spawnImpl } = fakeSpawn();
     const server = await startManagedServer(
-      { baseDir: "/tmp/.t1" },
+      { baseDir: "/tmp/.tr3x" },
       {
         spawnImpl,
         reservePort: async () => 43111,
         waitUntilReady: ready,
         randomToken: () => "bootstrap-secret",
         exchangeBearerToken: async ({ credential }) => `bearer-for-${credential}`,
-        env: { T1CODE_PORT: "49999", T1CODE_AUTH_TOKEN: "ambient", NODE_ENV: "production" },
+        env: { TR3X_PORT: "49999", TR3X_AUTH_TOKEN: "ambient", NODE_ENV: "production" },
       },
     );
 
@@ -115,7 +115,7 @@ describe("startManagedServer", () => {
     expect(call.command).toBe("node");
     expect(call.args[0]).toContain("/apps/server/dist/bin.mjs");
     expect(call.args.slice(1)).toEqual(
-      buildServerArgs({ entryArgs: [], host: "127.0.0.1", port: 43111, baseDir: "/tmp/.t1" }),
+      buildServerArgs({ entryArgs: [], host: "127.0.0.1", port: 43111, baseDir: "/tmp/.tr3x" }),
     );
     expect(call.args).toContain("--mode");
     expect(call.args).toContain("desktop");
@@ -124,8 +124,8 @@ describe("startManagedServer", () => {
     expect(call.args).toContain("--auto-bootstrap-project-from-cwd");
     expect(call.args.join(" ")).not.toContain("bootstrap-secret");
     expect(call.args.join(" ")).not.toContain("--auth-token");
-    expect(call.env.T1CODE_PORT).toBeUndefined();
-    expect(call.env.T1CODE_AUTH_TOKEN).toBeUndefined();
+    expect(call.env.TR3X_PORT).toBeUndefined();
+    expect(call.env.TR3X_AUTH_TOKEN).toBeUndefined();
 
     const child = children[0]!;
     expect(child.stdinEnded).toBe(true);
@@ -133,7 +133,7 @@ describe("startManagedServer", () => {
       buildBootstrapEnvelope({
         host: "127.0.0.1",
         port: 43111,
-        baseDir: "/tmp/.t1",
+        baseDir: "/tmp/.tr3x",
         bootstrapToken: "bootstrap-secret",
       }),
     );
@@ -153,7 +153,7 @@ describe("startManagedServer", () => {
     const isBearerAccepted = vi.fn(async () => accepted);
     let tokenIndex = 0;
     const server = await startManagedServer(
-      { baseDir: "/tmp/.t1", port: 43114, restartDelayMs: 25 },
+      { baseDir: "/tmp/.tr3x", port: 43114, restartDelayMs: 25 },
       {
         spawnImpl,
         waitUntilReady: ready,
@@ -196,7 +196,7 @@ describe("startManagedServer", () => {
     const isBearerAccepted = vi.fn(async () => true);
     let tokenIndex = 0;
     const server = await startManagedServer(
-      { baseDir: "/tmp/.t1", port: 43116, restartDelayMs: 25 },
+      { baseDir: "/tmp/.tr3x", port: 43116, restartDelayMs: 25 },
       {
         spawnImpl,
         waitUntilReady: ready,
@@ -233,7 +233,7 @@ describe("startManagedServer", () => {
     vi.useFakeTimers();
     const { children, spawnImpl } = fakeSpawn();
     const started = startManagedServer(
-      { baseDir: "/tmp/.t1", port: 43115, restartDelayMs: 25 },
+      { baseDir: "/tmp/.tr3x", port: 43115, restartDelayMs: 25 },
       {
         spawnImpl,
         waitUntilReady: () => Promise.reject(new Error("not ready")),
@@ -256,7 +256,7 @@ describe("startManagedServer", () => {
     let tokenIndex = 0;
     const onRestart = vi.fn();
     const server = await startManagedServer(
-      { baseDir: "/tmp/.t1", port: 43112, restartDelayMs: 25, onRestart },
+      { baseDir: "/tmp/.tr3x", port: 43112, restartDelayMs: 25, onRestart },
       {
         spawnImpl,
         waitUntilReady: ready,
@@ -290,7 +290,7 @@ describe("startManagedServer", () => {
     const { children, calls, spawnImpl } = fakeSpawn();
     const onFatal = vi.fn();
     const server = await startManagedServer(
-      { baseDir: "/tmp/.t1", port: 43113, restartDelayMs: 25, onFatal },
+      { baseDir: "/tmp/.tr3x", port: 43113, restartDelayMs: 25, onFatal },
       { spawnImpl, waitUntilReady: ready, env: {} },
     );
     const fatal = vi.fn();
@@ -300,7 +300,7 @@ describe("startManagedServer", () => {
     await vi.advanceTimersByTimeAsync(25);
 
     expect(calls).toHaveLength(1);
-    expect(onFatal).toHaveBeenCalledWith(expect.stringContaining("already owns /tmp/.t1"));
+    expect(onFatal).toHaveBeenCalledWith(expect.stringContaining("already owns /tmp/.tr3x"));
     expect(fatal).toHaveBeenCalledTimes(1);
   });
 
@@ -310,7 +310,7 @@ describe("startManagedServer", () => {
     const onRestart = vi.fn();
     await expect(
       startManagedServer(
-        { baseDir: "/tmp/.t1", port: 43114, restartDelayMs: 25, onRestart },
+        { baseDir: "/tmp/.tr3x", port: 43114, restartDelayMs: 25, onRestart },
         {
           spawnImpl,
           env: {},
@@ -318,7 +318,7 @@ describe("startManagedServer", () => {
             const child = process as unknown as FakeChildProcess;
             child.stderr.emit(
               "data",
-              "Error: EACCES: permission denied, mkdir '/tmp/.t1/userdata'",
+              "Error: EACCES: permission denied, mkdir '/tmp/.tr3x/userdata'",
             );
             child.exitCode = 1;
             child.emit("exit", 1, null);
@@ -326,7 +326,7 @@ describe("startManagedServer", () => {
           },
         },
       ),
-    ).rejects.toThrow("T1Code could not start because a required path is not writable.");
+    ).rejects.toThrow("tr3x could not start because a required path is not writable.");
     await vi.advanceTimersByTimeAsync(25);
     expect(onRestart).not.toHaveBeenCalled();
     expect(calls).toHaveLength(1);

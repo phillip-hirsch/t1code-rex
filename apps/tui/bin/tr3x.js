@@ -11,7 +11,7 @@ function printError(error) {
 }
 
 if (process.versions.bun === undefined) {
-  const bunBin = process.env.T1CODE_BUN_BIN?.trim() || "bun";
+  const bunBin = process.env.TR3X_BUN_BIN?.trim() || "bun";
   const child = NodeChildProcess.spawn(bunBin, [entryPath, ...process.argv.slice(2)], {
     stdio: "inherit",
     env: process.env,
@@ -27,7 +27,7 @@ if (process.versions.bun === undefined) {
 
   child.once("error", (error) => {
     if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT") {
-      printError("t1code requires Bun on your PATH to launch the TUI runtime.");
+      printError("tr3x requires Bun on your PATH to launch the TUI runtime.");
       process.exit(1);
       return;
     }

@@ -53,7 +53,7 @@ export function resolveTuiResponsiveLayout(input: {
     // should track sidebar visibility rather than the overall terminal width.
     showWindowDots: showSidebar,
     showSidebarAlphaBadge: showSidebar,
-    sidebarTitle: showSidebar ? "T1 Code" : "T1",
+    sidebarTitle: showSidebar ? "tr3x" : "T1",
     showHeaderProjectBadge: input.viewportColumns >= 144,
     showComposerModeLabels,
     showComposerModelLabel,

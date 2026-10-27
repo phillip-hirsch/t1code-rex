@@ -25,7 +25,7 @@ describe("resolveRexContext", () => {
     expect(resolveRexContext({ REX_SESSION: "session:1", REX_BLOCK: "block:tui" })).toEqual(
       context,
     );
-    expect(resolveRexContext({ REX_SESSION: "session:1", T1CODE_REX_BIN: "/opt/rex" })).toEqual({
+    expect(resolveRexContext({ REX_SESSION: "session:1", TR3X_REX_BIN: "/opt/rex" })).toEqual({
       bin: "/opt/rex",
       sessionId: "session:1",
       blockId: null,
@@ -60,7 +60,7 @@ describe("rex arguments", () => {
     ]);
   });
 
-  it("splits beside the T1Code block by default and runs a shell without a command", () => {
+  it("splits beside the tr3x block by default and runs a shell without a command", () => {
     expect(
       buildSplitArgs(context, { label: "Terminal", direction: "below", ratio: 30, cwd: "/repo" }),
     ).toEqual([
@@ -95,7 +95,7 @@ describe("rex output parsing", () => {
     ]).toEqual(["window:1", "window:2"]);
   });
 
-  it("rejects output without the IDs T1Code needs", () => {
+  it("rejects output without the IDs tr3x needs", () => {
     expect(() => parseWindowNewResult("{}")).toThrow("did not return a window");
     expect(() => parseSplitResult('{"block_ids":[]}')).toThrow("did not return a block");
     expect(() => parseWindowNewResult("oops")).toThrow("invalid JSON");
