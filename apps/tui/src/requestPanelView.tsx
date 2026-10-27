@@ -419,7 +419,8 @@ export function RequestPanel(props: RequestPanelProps) {
         />
       ) : null}
       {note !== "" && !busy && line === null ? (
-        <text wrapMode="none" truncate content={note} style={{ fg: tone }} />
+        // Wraps rather than truncates: cut in the middle, it no longer says what to do.
+        <text content={note} style={{ fg: tone }} />
       ) : null}
       {line ? (
         <text
