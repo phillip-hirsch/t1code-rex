@@ -10,6 +10,7 @@ import {
   type SupervisorConnectionState,
 } from "@t3tools/client-runtime/connection";
 import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
+import { onThreadRequestsResolved } from "@t3tools/client-runtime/state/thread-requests";
 import {
   CommandId,
   ProjectId,
@@ -21,7 +22,7 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import * as Option from "effect/Option";
-import { AsyncResult } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import {
   useCallback,
@@ -92,8 +93,13 @@ import {
 } from "./modelPicker.ts";
 import { ModelPickerView } from "./modelPickerView.tsx";
 import { NewThreadView } from "./newThreadView.tsx";
+import { createRequestPanelStore } from "./requestPanelStore.ts";
+import { RequestPanel } from "./requestPanelView.tsx";
+import { NO_PENDING_REQUESTS, type PendingRequest } from "./requestQueue.ts";
+import { createRequestResponder } from "./requestResponder.ts";
 
 const APP_VERSION = packageJson.version ?? "0.0.0";
+const NO_REQUESTS_ATOM = Atom.make<ReadonlyArray<PendingRequest>>(NO_PENDING_REQUESTS);
 const HEADER_THREAD_TITLE_MAX_LENGTH = 44;
 const CONTEXT_MENU_WIDTH = 24;
 
@@ -370,6 +376,37 @@ function Shell(props: AppProps) {
     }),
   );
   useEffect(() => () => sender.dispose(), [sender]);
+  // Approvals and questions: what each thread's panel shows, and the answers on their way.
+  const [requestPanelStore] = useState(createRequestPanelStore);
+  const [responder] = useState(() =>
+    createRequestResponder({
+      respondToApproval: connection.respondToApproval,
+      respondToUserInput: connection.respondToUserInput,
+      dismissUserInput: connection.dismissUserInput,
+      schedule: (run, delayMs) => {
+        const timer = setTimeout(run, delayMs);
+        return () => clearTimeout(timer);
+      },
+      onFailure: (requestId, error, action) =>
+        logger.log("request.respond.failed", {
+          requestId,
+          action,
+          error: describeSendFailure(error),
+        }),
+    }),
+  );
+  useEffect(() => () => responder.dispose(), [responder]);
+  // A request can resolve anywhere: here, another window or client, an interrupt, the run ending.
+  useEffect(
+    () =>
+      onThreadRequestsResolved(({ environmentId, threadId, pendingRequestIds }) => {
+        if (environmentId !== connection.environmentId) return;
+        responder.prune(threadId, pendingRequestIds);
+        requestPanelStore.prune(threadId, pendingRequestIds);
+      }),
+    [connection.environmentId, requestPanelStore, responder],
+  );
+  const [panelHints, setPanelHints] = useState("");
 
   const connectionState = Option.getOrNull(AsyncResult.value(connectionResult));
   const connectionView = describeConnection(connectionState, connection.session.mode);
@@ -405,8 +442,10 @@ function Shell(props: AppProps) {
   // Sends that lost the connection go out again, with the same ids, once it's back.
   const connected = connectionView.label === "Connected";
   useEffect(() => {
-    if (connected) void sender.retryWaiting();
-  }, [connected, sender]);
+    if (!connected) return;
+    void sender.retryWaiting();
+    responder.retryWaiting();
+  }, [connected, responder, sender]);
 
   const retryNow = useCallback(() => {
     void runAtomCommand(connection.registry, connection.retryNow, connection.environmentId);
@@ -555,6 +594,12 @@ function Shell(props: AppProps) {
     baseSettings === null || composerTarget === null
       ? null
       : applySettingsPatch(baseSettings, composerStore.getPatch(composerTarget.threadId));
+  const requestQueue = useAtomValue(
+    composerTarget?.kind === "thread"
+      ? connection.thread(composerTarget.threadId).requestQueueAtom
+      : NO_REQUESTS_ATOM,
+  );
+  const showRequests = composerTarget?.kind === "thread" && requestQueue.length > 0;
   const running = threadRuntimeIsActive(activeThread?.runtime);
   const activeRunId = activeThread?.runtime?.activeRunId ?? null;
   const stopRequested = running && stopRequestedRunId === (activeRunId ?? "unknown");
@@ -919,9 +964,11 @@ function Shell(props: AppProps) {
     ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
     : sidebarFocused
       ? "↑↓ move  ←→ fold  ⏎ open  m menu  ⌘N new  tab focus  ⌘K palette  q quit"
-      : composerFocused
-        ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  tab focus  ⌘K palette`
-        : `↑↓ scroll  PgUp/PgDn page  End bottom  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette  q quit`;
+      : composerFocused && showRequests
+        ? panelHints
+        : composerFocused
+          ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  tab focus  ⌘K palette`
+          : `↑↓ scroll  PgUp/PgDn page  End bottom  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette  q quit`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -1022,29 +1069,50 @@ function Shell(props: AppProps) {
                   theme={theme}
                 />
               ) : null}
-              <Composer
-                key={`composer:${composerTarget.threadId}`}
-                ref={composerRef}
-                target={composerTarget}
-                store={composerStore}
-                sender={sender}
-                theme={theme}
-                focused={composerFocused && modelPicker === null && !paletteOpen}
-                baseSettings={baseSettings}
-                modelLabel={modelLabel}
-                providerBadge={providerBadge}
-                running={running}
-                stopRequested={stopRequested}
-                clipboardDir={NodePath.join(paths.stateHomeDir, "clipboard")}
-                onFocus={() => setFocusArea("composer")}
-                onStop={stopRun}
-                onExit={requestExit}
-                onNewThread={() => openNewThread(composerTarget.projectId)}
-                onOpenModelPicker={toggleModelPicker}
-                onSetInteractionMode={setInteractionMode}
-                onSetRuntimeMode={setRuntimeMode}
-                onStatus={setStatus}
-              />
+              {showRequests ? (
+                <RequestPanel
+                  key={`requests:${composerTarget.threadId}`}
+                  ref={composerRef}
+                  threadId={composerTarget.threadId}
+                  queue={requestQueue}
+                  store={requestPanelStore}
+                  responder={responder}
+                  theme={theme}
+                  focused={composerFocused && modelPicker === null && !paletteOpen}
+                  cwd={
+                    activeThread
+                      ? threadWorkspacePath(activeThread, activeProject ?? undefined)
+                      : null
+                  }
+                  onFocus={() => setFocusArea("composer")}
+                  onStatus={setStatus}
+                  onHints={setPanelHints}
+                />
+              ) : (
+                <Composer
+                  key={`composer:${composerTarget.threadId}`}
+                  ref={composerRef}
+                  target={composerTarget}
+                  store={composerStore}
+                  sender={sender}
+                  theme={theme}
+                  focused={composerFocused && modelPicker === null && !paletteOpen}
+                  baseSettings={baseSettings}
+                  modelLabel={modelLabel}
+                  providerBadge={providerBadge}
+                  running={running}
+                  stopRequested={stopRequested}
+                  clipboardDir={NodePath.join(paths.stateHomeDir, "clipboard")}
+                  onFocus={() => setFocusArea("composer")}
+                  onStop={stopRun}
+                  onExit={requestExit}
+                  onNewThread={() => openNewThread(composerTarget.projectId)}
+                  onOpenModelPicker={toggleModelPicker}
+                  onSetInteractionMode={setInteractionMode}
+                  onSetRuntimeMode={setRuntimeMode}
+                  onStatus={setStatus}
+                />
+              )}
             </>
           ) : (
             <ServerSummary
