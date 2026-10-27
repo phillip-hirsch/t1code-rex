@@ -186,7 +186,9 @@ export function useManagement(options: ManagementOptions) {
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   // The latest sidebar, for code that reads it after an await.
   const sidebarRef = useRef(sidebar);
-  sidebarRef.current = sidebar;
+  useEffect(() => {
+    sidebarRef.current = sidebar;
+  }, [sidebar]);
   /** Bumped by each remove-project request, so a superseded one drops its dialog. */
   const removalRequest = useRef(0);
   /** Remounts the prompt's input so a picked suggestion's text lands with the cursor at its end. */
