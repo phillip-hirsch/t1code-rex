@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import { type KeybindingShortcut, type ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import {
+  compileResolvedKeybindingsConfig,
+  DEFAULT_RESOLVED_KEYBINDINGS,
+} from "@t3tools/shared/keybindings";
+import {
   modelPickerJumpIndexFromCommand,
+  modShortcutLabel,
   resolveTuiShortcutCommand,
   threadJumpIndexFromCommand,
   threadTraversalDirectionFromCommand,
@@ -118,6 +123,51 @@ describe("resolveTuiShortcutCommand", () => {
         platform: "linux",
       }),
     ).toBe("terminal.toggle");
+  });
+});
+
+describe("Ctrl+D with upstream's default bindings (diff.toggle is mod+d)", () => {
+  const ctrlD = { keyName: "d", ctrl: true, sequence: "\u0004" };
+
+  it("toggles the diff with Cmd+D on macOS", () => {
+    expect(
+      resolveTuiShortcutCommand({ keyName: "d", super: true }, DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "darwin",
+      }),
+    ).toBe("diff.toggle");
+    expect(
+      resolveTuiShortcutCommand(ctrlD, DEFAULT_RESOLVED_KEYBINDINGS, { platform: "darwin" }),
+    ).toBeNull();
+  });
+
+  it("leaves Ctrl+D and Ctrl+U to scrolling and the composer on Windows and Linux", () => {
+    for (const platform of ["linux", "win32"] as const) {
+      expect(
+        resolveTuiShortcutCommand(ctrlD, DEFAULT_RESOLVED_KEYBINDINGS, { platform }),
+      ).toBeNull();
+      expect(
+        resolveTuiShortcutCommand({ keyName: "u", ctrl: true }, DEFAULT_RESOLVED_KEYBINDINGS, {
+          platform,
+        }),
+      ).toBeNull();
+      // Other mod shortcuts still map to Ctrl.
+      expect(
+        resolveTuiShortcutCommand({ keyName: "k", ctrl: true }, DEFAULT_RESOLVED_KEYBINDINGS, {
+          platform,
+        }),
+      ).toBe("commandPalette.toggle");
+    }
+  });
+
+  it("still honors an explicit ctrl+d binding", () => {
+    const custom = compileResolvedKeybindingsConfig([{ key: "ctrl+d", command: "diff.toggle" }]);
+    expect(resolveTuiShortcutCommand(ctrlD, custom, { platform: "linux" })).toBe("diff.toggle");
+  });
+
+  it("labels mod shortcuts per platform, and none for a kept Ctrl key", () => {
+    expect(modShortcutLabel("d", "darwin")).toBe("⌘D");
+    expect(modShortcutLabel("d", "linux")).toBeNull();
+    expect(modShortcutLabel("k", "win32")).toBe("Ctrl+K");
   });
 });
 

@@ -68,7 +68,7 @@ import {
   STOPPING,
   type FooterStatus,
 } from "./footerStatus.ts";
-import { resolveTuiShortcutCommand } from "./keybindings.ts";
+import { modShortcutLabel, resolveTuiShortcutCommand } from "./keybindings.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
 import {
@@ -1098,7 +1098,10 @@ function Shell(props: AppProps) {
   actions.push({
     id: "diff:toggle",
     label: diff.open ? "Hide diff" : "Show diff",
-    description: activeThread === null ? "Select a thread first" : "d in the thread  ⌘D",
+    description:
+      activeThread === null
+        ? "Select a thread first"
+        : ["d in the thread", modShortcutLabel("d")].filter((hint) => hint !== null).join("  "),
     disabled: !diff.open && composerTarget?.kind !== "thread",
     run: toggleDiff,
   });
