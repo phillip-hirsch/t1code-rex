@@ -248,7 +248,23 @@ import {
   shouldTrackSystemThemeMode,
 } from "./rendererTheme";
 import { resolveTuiResponsiveLayout, TUI_SIDEBAR_WIDTH } from "./responsiveLayout";
-import { resolveAttachedServerConnection, startServerSupervisor } from "./serverSupervisor";
+import {
+  buildServerWsUrl,
+  resolveAttachedServerConnection,
+  startServerSupervisor,
+} from "./serverSupervisor";
+import {
+  buildThreadWindowCommand,
+  type ThreadWindowLaunch,
+  type ThreadWindowServer,
+  writeThreadWindowLaunch,
+} from "./threadWindowLaunch";
+import {
+  createRexClient,
+  createRexWindowRegistry,
+  resolveRexContext,
+  rexTabLabel,
+} from "./rexWorkspace";
 import { createCoalescedRefreshRunner } from "./snapshotRefresh";
 import {
   cacheRemoteAttachmentToFile,
@@ -4115,6 +4131,7 @@ export function App({
   initialTuiThemeId,
   initialSystemThemeMode,
   initialTerminalThemeColors,
+  threadWindowLaunch,
 }: {
   renderer: CliRenderer;
   interruptRequestToken?: number;
@@ -4123,11 +4140,20 @@ export function App({
   initialTuiThemeId?: TuiThemeId;
   initialSystemThemeMode?: TuiThemeMode | null;
   initialTerminalThemeColors?: TerminalColors | null;
+  /** Set when this instance is a thread window opened in a Rex tab. */
+  threadWindowLaunch?: ThreadWindowLaunch | null;
 }) {
   const terminalRenderer = _renderer as unknown as TerminalRenderer;
   const paths = useMemo(() => resolveTuiPaths(), []);
   const logger = useMemo(() => createT1Logger(paths.logPath), [paths.logPath]);
   const [api, setApi] = useState<T1Api | null>(null);
+  const serverConnectionRef = useRef<ThreadWindowServer | null>(null);
+  const rex = useMemo(() => {
+    const context = resolveRexContext();
+    if (!context) return null;
+    const client = createRexClient(context);
+    return { client, windows: createRexWindowRegistry(client) };
+  }, []);
   const [snapshot, setSnapshot] = useState<OrchestrationReadModel | null>(null);
   const [serverConfig, setServerConfig] = useState<TuiServerConfig>(null);
   const [serverSettings, setServerSettings] = useState<ServerSettings | null>(null);
@@ -4742,7 +4768,15 @@ export function App({
           configHomeDir: paths.configHomeDir,
           logPath: paths.logPath,
         });
-        const prefs = await readPrefs(paths);
+        const storedPrefs = await readPrefs(paths);
+        const prefs: TuiPrefs = threadWindowLaunch
+          ? {
+              ...storedPrefs,
+              selectedProjectId: threadWindowLaunch.projectId,
+              selectedThreadId: threadWindowLaunch.threadId,
+              mainView: "thread",
+            }
+          : storedPrefs;
         logger.log("prefs.loaded", prefs as Record<string, unknown>);
         if (disposed) return;
         setStartupIssue(null);
@@ -4842,10 +4876,19 @@ export function App({
         setDiffView(prefs.diffView ?? "unified");
         setPrefsReady(true);
 
-        const attachedServer = resolveAttachedServerConnection();
+        const attachedServer = threadWindowLaunch
+          ? {
+              ...threadWindowLaunch.server,
+              wsUrl: buildServerWsUrl(
+                threadWindowLaunch.server.host,
+                threadWindowLaunch.server.port,
+                threadWindowLaunch.server.authToken,
+              ),
+            }
+          : resolveAttachedServerConnection();
         const server = attachedServer
           ? {
-              wsUrl: attachedServer.wsUrl,
+              ...attachedServer,
               stop: () => undefined,
             }
           : await startServerSupervisor({
@@ -4863,6 +4906,11 @@ export function App({
               },
               onLog: (event, details) => logger.log(event, details),
             });
+        serverConnectionRef.current = {
+          host: server.host,
+          port: server.port,
+          authToken: server.authToken,
+        };
         if (attachedServer) {
           logger.log("server.attached", {
             host: attachedServer.host,
@@ -5043,7 +5091,7 @@ export function App({
       clearTerminalImagePreview(terminalRenderer);
       cleanup?.();
     };
-  }, [logger, paths, terminalRenderer]);
+  }, [logger, paths, terminalRenderer, threadWindowLaunch]);
 
   useEffect(() => {
     selectedProjectIdRef.current = selectedProjectId;
@@ -5054,7 +5102,8 @@ export function App({
   }, [selectedThreadId]);
 
   useEffect(() => {
-    if (!prefsReady) return;
+    // Thread windows share prefs.json with the main window; only the main window saves it.
+    if (!prefsReady || threadWindowLaunch) return;
     const prefs = {
       mainView,
       draftProvider,
@@ -5107,6 +5156,7 @@ export function App({
     expandedProjectIds,
     selectedProjectId,
     selectedThreadId,
+    threadWindowLaunch,
   ]);
 
   const projects = useMemo(
@@ -5201,6 +5251,7 @@ export function App({
   const activeWorktreePath = activeThread?.worktreePath ?? activeDraftThread?.worktreePath ?? null;
   const activeThreadGitSyncKey = resolveThreadGitSyncKey(activeThread);
   const activeProjectCwd = activeProject?.workspaceRoot ?? null;
+  const activeRexCwd = activeWorktreePath ?? activeProjectCwd;
   const hasServerThread = activeThread !== null;
   const assistantStreamingEnabled =
     serverSettings?.enableAssistantStreaming ?? appSettings.enableAssistantStreaming;
@@ -6033,8 +6084,38 @@ export function App({
         description: `Open ${MAIN_VIEW_TITLES[item.view]}`,
         keywords: [MAIN_VIEW_TITLES[item.view], "settings", "panel"],
       })),
+      ...(rex
+        ? [
+            {
+              id: "rex:thread",
+              section: "Rex",
+              icon: "󰓩",
+              label: "Open thread in Rex tab",
+              description: activeThread ? activeThread.title : "Select a saved thread first",
+              keywords: ["rex", "tab", "window", "thread"],
+              disabled: !activeThread,
+            },
+            {
+              id: "rex:terminal",
+              section: "Rex",
+              icon: "",
+              label: "Open terminal in Rex split",
+              description: activeRexCwd ?? "Open a shell below T1Code",
+              keywords: ["rex", "terminal", "shell", "split", "pane"],
+            },
+            {
+              id: "rex:diff",
+              section: "Rex",
+              icon: "",
+              label: "Open diff in Rex tab",
+              description: activeRexCwd ?? "Select a project first",
+              keywords: ["rex", "diff", "git", "changes", "tab"],
+              disabled: !activeRexCwd,
+            },
+          ]
+        : []),
     ],
-    [activeProject, activeProjectId],
+    [activeProject, activeProjectId, activeRexCwd, activeThread, rex],
   );
   const commandPaletteProjectItems = useMemo<CommandPaletteItem[]>(
     () =>
@@ -7252,6 +7333,7 @@ export function App({
     const thread = snapshot?.threads.find((entry) => entry.id === threadId);
     return buildThreadContextMenuItems({
       archived: thread?.archivedAt !== null && thread?.archivedAt !== undefined,
+      rex: rex !== null,
     });
   }
 
@@ -7516,6 +7598,73 @@ export function App({
     );
   }
 
+  async function runRexAction(name: string, action: () => Promise<string>) {
+    if (!rex) {
+      setStatus("Rex not detected");
+      return;
+    }
+    try {
+      setStatus(await action());
+    } catch (error) {
+      logger.log("rex.failed", {
+        action: name,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      setStatus(error instanceof Error ? error.message : "Rex action failed");
+    }
+  }
+
+  function openThreadInRexTab(thread: ThreadReadModel) {
+    return runRexAction("open-thread", async () => {
+      const server = serverConnectionRef.current;
+      if (!rex || !server) return "Server not ready";
+      const { reused } = await rex.windows.openOrFocus(`thread:${thread.id}`, async () => {
+        const launchFile = await writeThreadWindowLaunch(
+          path.join(paths.stateHomeDir, "thread-windows"),
+          { server, projectId: thread.projectId, threadId: thread.id },
+        );
+        try {
+          return await rex.client.openWindow({
+            label: rexTabLabel(thread.title),
+            cwd: resolveThreadWorkspacePath(thread) ?? undefined,
+            command: buildThreadWindowCommand(launchFile),
+          });
+        } catch (error) {
+          await fs.rm(launchFile, { force: true });
+          throw error;
+        }
+      });
+      return reused ? "Focused Rex tab" : "Opened thread in Rex tab";
+    });
+  }
+
+  function openRexTerminal(cwd: string | null) {
+    return runRexAction("open-terminal", async () => {
+      if (!rex) return "Rex not detected";
+      await rex.client.split({
+        label: "Terminal",
+        direction: "below",
+        ratio: 30,
+        cwd: cwd ?? undefined,
+      });
+      return "Opened Rex terminal";
+    });
+  }
+
+  function openRexDiff(cwd: string | null, title: string) {
+    return runRexAction("open-diff", async () => {
+      if (!rex) return "Rex not detected";
+      if (!cwd) return "Path unavailable";
+      await rex.client.openWindow({
+        label: `Diff: ${rexTabLabel(title, 24)}`,
+        cwd,
+        keepOpen: true,
+        command: ["git", "diff", "HEAD"],
+      });
+      return "Opened diff in Rex tab";
+    });
+  }
+
   function promptConfirm(input: ConfirmDialogState) {
     closeSidebarContextMenu();
     setOverlayMenu(null);
@@ -7571,6 +7720,11 @@ export function App({
 
     if (actionId === "rename") {
       setRenameThreadDialog({ threadId: thread.id, value: thread.title });
+      return;
+    }
+
+    if (actionId === "open-rex-tab") {
+      await openThreadInRexTab(thread);
       return;
     }
 
@@ -10634,6 +10788,18 @@ export function App({
     }
     if (item.id === "model:picker") {
       toggleModelMenu();
+      return;
+    }
+    if (item.id === "rex:thread") {
+      if (activeThread) await openThreadInRexTab(activeThread);
+      return;
+    }
+    if (item.id === "rex:terminal") {
+      await openRexTerminal(activeRexCwd);
+      return;
+    }
+    if (item.id === "rex:diff") {
+      await openRexDiff(activeRexCwd, activeThread?.title ?? activeProject?.title ?? "Workspace");
       return;
     }
     if (item.id === "thread:view") {
