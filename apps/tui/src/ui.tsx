@@ -1504,7 +1504,12 @@ function Shell(props: AppProps) {
                     : null
                 }
                 focus={
-                  modelPicker !== null || paletteOpen
+                  // Overlays with their own text box take OpenTUI's focus; releasing the
+                  // dock's here makes it take focus back when they close.
+                  modelPicker !== null ||
+                  paletteOpen ||
+                  management.dialogOpen ||
+                  archivedIndex !== null
                     ? null
                     : composerFocused
                       ? "composer"

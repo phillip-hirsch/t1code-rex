@@ -11,9 +11,11 @@ import {
 import {
   EDITORS,
   ProjectId,
+  projectCloneProgressSummary,
   ThreadId,
   type EditorId,
   type FilesystemBrowseResult,
+  type ProjectCloneListEvent,
   type ServerConfig,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -75,16 +77,37 @@ interface ConfirmState {
   readonly run: () => Promise<void>;
 }
 
+type ClonesAtom = Atom.Atom<AsyncResult.AsyncResult<ProjectCloneListEvent, unknown>>;
+const NO_CLONES: ClonesAtom = Atom.make(AsyncResult.initial<ProjectCloneListEvent, unknown>());
 type BrowseAtom = Atom.Atom<AsyncResult.AsyncResult<FilesystemBrowseResult, unknown>>;
 const NO_BROWSE: BrowseAtom = Atom.make(AsyncResult.initial<FilesystemBrowseResult, unknown>());
 const SUGGESTION_DEBOUNCE_MS = 80;
 
-export function describeError(error: unknown): string {
+function messageOf(error: unknown): string {
   if (typeof error === "object" && error !== null && "message" in error) {
-    const message = String(error.message).trim();
-    if (message.length > 0) return message;
+    return String(error.message).trim();
   }
-  return String(error);
+  return "";
+}
+
+function causeOf(error: unknown): unknown {
+  return typeof error === "object" && error !== null && "cause" in error ? error.cause : undefined;
+}
+
+/**
+ * The error's message, plus the innermost cause's when the server wraps one in a generic
+ * message ("Failed to mutate project." around "…does not exist").
+ */
+export function describeError(error: unknown): string {
+  const message = messageOf(error);
+  let root = "";
+  let cause = causeOf(error);
+  for (let depth = 0; depth < 4 && cause !== undefined; depth += 1) {
+    root = messageOf(cause) || root;
+    cause = causeOf(cause);
+  }
+  if (message.length === 0) return root.length > 0 ? root : String(error);
+  return root.length > 0 && root !== message ? `${message} ${root}` : message;
 }
 
 /** The first code editor the host has, in upstream's order; web falls back the same way. */
@@ -120,6 +143,28 @@ export function useManagement(options: ManagementOptions) {
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const capabilities = serverConfig?.environment.capabilities;
+  // A clone the server runs in the background: its progress, then how it ended.
+  const [cloning, setCloning] = useState<{ projectId: string; label: string } | null>(null);
+  const clonesAtom: ClonesAtom = cloning === null ? NO_CLONES : connection.projectClonesAtom;
+  const clones = Option.getOrNull(AsyncResult.value(useAtomValue(clonesAtom)));
+  const tracked =
+    cloning === null ? undefined : clones?.find((clone) => clone.projectId === cloning.projectId);
+  // Each new snapshot updates the status once, while rendering; a finished clone stops watching.
+  const cloneKey = tracked === undefined ? null : `${tracked.phase}:${tracked.sequence}`;
+  const [seenCloneKey, setSeenCloneKey] = useState<string | null>(null);
+  if (cloning !== null && tracked !== undefined && cloneKey !== seenCloneKey) {
+    setSeenCloneKey(cloneKey);
+    setStatus(
+      tracked.phase === "running"
+        ? `Cloning ${cloning.label}: ${projectCloneProgressSummary(tracked)}`
+        : tracked.phase === "done"
+          ? `Cloned ${cloning.label}`
+          : tracked.phase === "cancelled"
+            ? "Clone cancelled"
+            : `Clone failed: ${tracked.error ?? "unknown error"}`,
+    );
+    if (tracked.phase !== "running") setCloning(null);
+  }
   const platform = serverConfig?.environment.platform.os ?? "";
 
   // Folder suggestions for the add-project prompt, from the server, after a short pause.
@@ -383,7 +428,9 @@ export function useManagement(options: ManagementOptions) {
       });
       if (!result.ok) return describeError(result.error);
       openNewThread(projectId);
-      setStatus(`Cloning ${result.value.repository?.nameWithOwner ?? result.value.remoteUrl}`);
+      const label = result.value.repository?.nameWithOwner ?? result.value.remoteUrl;
+      setStatus(`Cloning ${label}`);
+      setCloning({ projectId, label });
       return null;
     }
     // Older servers clone first and add the project after.
