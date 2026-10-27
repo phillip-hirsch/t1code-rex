@@ -1,7 +1,7 @@
 import type { ScrollBoxRenderable } from "@opentui/core";
 import { useLayoutEffect, useState, type RefObject } from "react";
 
-import { isNearBottom, PrependAnchorTracker } from "./threadScroll.ts";
+import { isAtBottom, PrependAnchorTracker } from "./threadScroll.ts";
 
 export function timelineRowId(key: string): string {
   return `timeline-row:${key}`;
@@ -61,7 +61,7 @@ export function useTranscriptScrollbox(
       anchor.commit(
         rowKeys,
         (key) => timelineRowTop(scrollbox, key),
-        isNearBottom({
+        isAtBottom({
           scrollTop: scrollbox.scrollTop,
           scrollHeight: scrollbox.scrollHeight,
           viewportHeight: scrollbox.viewport.height,

@@ -60,13 +60,23 @@ function scanBlocks(source: string, from: number, blocks: MessageBlock[]): void 
   let markdownEnd = -1;
   let blankSinceMarkdown = false;
   let fence: { state: FenceState; start: number; bodyStart: number } | null = null;
+  // Inside an HTML comment (CommonMark HTML block type 2), blank lines don't end the block.
+  let inComment = false;
+
+  // A block ending in a setext underline ("Title\n====") keeps its newline: the
+  // highlighter only styles the heading when the underline line is terminated.
+  const markdownEndWithSetextNewline = () => {
+    if (source[markdownEnd] !== "\n") return markdownEnd;
+    const lastLine = source.slice(source.lastIndexOf("\n", markdownEnd - 1) + 1, markdownEnd);
+    return /^ {0,3}(=+|-+)\s*$/.test(lastLine) ? markdownEnd + 1 : markdownEnd;
+  };
 
   const flushMarkdown = () => {
     if (markdownStart === -1) return;
     blocks.push({
       kind: "markdown",
       start: markdownStart,
-      content: source.slice(markdownStart, markdownEnd),
+      content: source.slice(markdownStart, markdownEndWithSetextNewline()),
     });
     markdownStart = -1;
     blankSinceMarkdown = false;
@@ -89,6 +99,9 @@ function scanBlocks(source: string, from: number, blocks: MessageBlock[]): void 
         });
         fence = null;
       }
+    } else if (inComment) {
+      markdownEnd = lineEnd;
+      if (line.includes("-->")) inComment = false;
     } else if (line.trim() === "") {
       if (markdownStart !== -1) blankSinceMarkdown = true;
     } else {
@@ -103,6 +116,10 @@ function scanBlocks(source: string, from: number, blocks: MessageBlock[]): void 
         if (markdownStart === -1) markdownStart = offset;
         markdownEnd = lineEnd;
         blankSinceMarkdown = false;
+        // "<!-->" and "<!--->" close on the same line, so check the whole line.
+        if (/^ {0,3}<!--/.test(line) && !line.includes("-->")) {
+          inComment = true;
+        }
       }
     }
     offset = next;

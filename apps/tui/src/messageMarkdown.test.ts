@@ -100,6 +100,36 @@ const SAMPLE = [
 ].join("\n");
 
 describe("splitMessageBlocks", () => {
+  it("keeps a setext heading's newline so it still highlights", () => {
+    const { blocks } = splitMessageBlocks("Heading\n=======\n\nText");
+    expect(blocks.map((block) => block.content)).toEqual(["Heading\n=======\n", "Text"]);
+  });
+
+  it("keeps an HTML comment with blank lines in one block", () => {
+    const { blocks } = splitMessageBlocks("<!--\nhello\n\n**literal**\n\n-->\n\nafter");
+    expect(blocks.map((block) => block.content)).toEqual([
+      "<!--\nhello\n\n**literal**\n\n-->",
+      "after",
+    ]);
+  });
+
+  it("treats <!--> and <!---> as closed comments, so a following fence is code", () => {
+    for (const opener of ["<!-->", "<!--->", "<!-- x -->"]) {
+      const { blocks } = splitMessageBlocks(`${opener}\n\n\`\`\`js\nlet a = 1;\n\`\`\``);
+      expect(blocks.map((block) => block.kind)).toEqual(["markdown", "code"]);
+    }
+  });
+
+  it("matches a full split at every prefix of a message with a comment", () => {
+    const message = "intro\n\n<!--\na\n\nb\n-->\n\ntail";
+    let previous = null;
+    for (let end = 1; end <= message.length; end += 1) {
+      const next = splitMessageBlocks(message.slice(0, end), previous);
+      expect(next.blocks).toEqual(splitMessageBlocks(message.slice(0, end)).blocks);
+      previous = next;
+    }
+  });
+
   it("splits prose into chunks at blank lines", () => {
     expect(shape("hello\n\nworld\n")).toEqual([
       { kind: "markdown", content: "hello" },
