@@ -13,6 +13,7 @@ import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { act, createRef, type RefObject } from "react";
 
 import { Composer, type ComposerHandle } from "../src/composer.tsx";
+import { UNCONFIRMED_NOTICE } from "../src/composerRecovery.ts";
 import { createComposerSend, DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
 import {
   createComposerSender,
@@ -107,6 +108,7 @@ function recordingSender(
   store: ComposerStore,
   reply: (input: StartThreadTurnInput) => Promise<ComposerCommandResult> = () =>
     Promise.resolve({ ok: true }),
+  resumeReply: () => Promise<ComposerCommandResult> = () => Promise.resolve({ ok: true }),
 ) {
   const sent: Array<StartThreadTurnInput> = [];
   /** Every command in order: message texts, and "queue.resume". */
@@ -120,7 +122,7 @@ function recordingSender(
     },
     resumeQueue: () => {
       order.push("queue.resume");
-      return Promise.resolve({ ok: true });
+      return resumeReply();
     },
     setRuntimeMode: () => Promise.resolve({ ok: true }),
     setInteractionMode: () => Promise.resolve({ ok: true }),
@@ -241,8 +243,79 @@ async function checkResumeHeld(): Promise<void> {
   sender.dispose();
 }
 
+/** A message the last quit couldn't confirm comes back with its note, mounted or not. */
+async function checkRestoredNote(): Promise<void> {
+  for (const mounted of [false, true]) {
+    const store = createComposerStore({ initialPrefs: {}, persist: null });
+    const { sender } = recordingSender(store);
+    const restore = () =>
+      store.restoreDraft(threadId, { text: "bravo", attachments: [] }, UNCONFIRMED_NOTICE);
+    if (!mounted) restore();
+    const { setup } = await mountComposer({ store, sender, running: false });
+    if (mounted) act(restore);
+    await settle(setup.renderOnce);
+    const frame = setup.captureCharFrame();
+    const when = mounted ? "into a mounted composer" : "before the composer mounts";
+    check(`restore ${when}: the text is back`, frame.includes("bravo"), true);
+    check(`restore ${when}: the note shows`, frame.includes("Maybe not sent"), true);
+    await act(async () => {
+      await setup.mockInput.typeText("!");
+    });
+    await settle(setup.renderOnce);
+    check(`restore ${when}: typing dismisses the note`, store.snapshot(threadId).notice, null);
+    setup.renderer.destroy();
+    sender.dispose();
+  }
+}
+
+/** /discard typed into the composer puts the held message back, even behind a hung resume. */
+async function checkDiscardHeld(hungResume: boolean): Promise<void> {
+  const store = createComposerStore({ initialPrefs: {}, persist: null });
+  const never = () => new Promise<ComposerCommandResult>(() => undefined);
+  const { sender } = recordingSender(
+    store,
+    (input) =>
+      input.message.text === "first" && !hungResume ? never() : Promise.resolve({ ok: true }),
+    never,
+  );
+  const base = { target: { kind: "thread" as const, threadId, projectId: ProjectId.make("p") } };
+  const make = (text: string) =>
+    createComposerSend({ ...base, text, attachments: [], dispatch: "queue", settings });
+  act(() => {
+    void sender.send(make("first"));
+    void sender.send(make("second"));
+    sender.hold(threadId);
+  });
+  if (hungResume) {
+    await act(async () => {
+      await settle(() => Promise.resolve());
+      sender.resume(threadId);
+    });
+  }
+  const { setup } = await mountComposer({ store, sender, running: false });
+  await act(async () => {
+    await setup.mockInput.typeText("/discard");
+  });
+  await settle(setup.renderOnce);
+  act(() => setup.mockInput.pressEnter());
+  await settle(setup.renderOnce);
+  const label = hungResume ? "/discard behind a hung resume" : "/discard";
+  check(`${label}: the held message is back in the draft`, store.getDraft(threadId).text, "second");
+  check(`${label}: the composer shows it`, setup.captureCharFrame().includes("│ second"), true);
+  check(
+    `${label}: with its note`,
+    store.snapshot(threadId).notice,
+    "Not sent; edit it and send again",
+  );
+  setup.renderer.destroy();
+  sender.dispose();
+}
+
 await checkDoubleEnter();
 await checkBusyEnter();
 await checkResumeHeld();
+await checkRestoredNote();
+await checkDiscardHeld(false);
+await checkDiscardHeld(true);
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

@@ -5,8 +5,7 @@ import * as Option from "effect/Option";
 import type { UnconfirmedComposerSend } from "./composerSend.ts";
 import type { ComposerStore } from "./composerStore.ts";
 
-export const UNCONFIRMED_NOTICE =
-  "May not have been sent before tr3x quit; check the thread, then send it again";
+export const UNCONFIRMED_NOTICE = "Maybe not sent; check the thread first";
 
 /** The part of a thread's state the check reads. */
 export interface ThreadMessagesState {

@@ -161,7 +161,10 @@ export function Composer(props: ComposerProps) {
     const virtualRows = textareaRef.current?.virtualLineCount ?? 1;
     setRows(Math.min(MAX_ROWS, Math.max(MIN_ROWS, virtualRows)));
   };
+  /** Text we just set ourselves; its change event mustn't overwrite the store again. */
+  const setByUs = useRef<string | null>(null);
   const replaceText = (text: string) => {
+    setByUs.current = text;
     textareaRef.current?.setText(text);
     textareaRef.current?.gotoBufferEnd();
     store.setDraftText(threadId, text);
@@ -433,9 +436,14 @@ export function Composer(props: ComposerProps) {
               ]}
               onContentChange={() => {
                 const text = readText();
-                store.setDraftText(threadId, text);
+                // Our own setText can report late, after the store moved on (a /discard
+                // restores right after clearing); mounting reports the saved text too.
+                const echo = text === setByUs.current;
+                setByUs.current = null;
                 syncFromText(text);
-                if (snapshot.notice !== null) store.setNotice(threadId, null);
+                if (echo || text === store.getDraft(threadId).text) return;
+                store.setDraftText(threadId, text);
+                store.setNotice(threadId, null);
               }}
               onPaste={(event: PasteEvent) => {
                 const pasted = decodePaste(event);
