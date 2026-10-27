@@ -1,10 +1,7 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"],
-    "allowImportingTsExtensions": true,
-    "noEmit": true
+    "types": ["node"]
   },
-  "include": ["src", "scripts"],
-  "exclude": ["src/**/*.test.ts", "test"]
+  "include": ["src", "scripts", "test"]
 }

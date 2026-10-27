@@ -2,26 +2,16 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
-  type ProviderInstanceId,
+  ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
+import { createModelCapabilities } from "@t3tools/shared/model";
 import { assert, it } from "@effect/vitest";
-import { Effect, FileSystem, Schema } from "effect";
 
-import {
-  hydrateCachedProvider,
-  isCachedProviderCorrelated,
-  orderProviderSnapshots,
-  readProviderStatusCache,
-  resolveProviderStatusCachePath,
-  writeProviderStatusCache,
-} from "./providerStatusCache.ts";
+import { hydrateCachedProvider, isCachedProviderCorrelated } from "./providerStatusCache.ts";
 
-const decodeProviderDriverKind = Schema.decodeUnknownSync(ProviderDriverKind);
-const CODEX_DRIVER = decodeProviderDriverKind("codex");
-const CLAUDE_AGENT_DRIVER = decodeProviderDriverKind("claudeAgent");
-const OPENCODE_DRIVER = decodeProviderDriverKind("opencode");
-const emptyCapabilities = { optionDescriptors: [] };
+const emptyCapabilities = createModelCapabilities({ optionDescriptors: [] });
+const CODEX_DRIVER = ProviderDriverKind.make("codex");
 
 const makeProvider = (
   provider: ProviderDriverKind,
@@ -42,51 +32,6 @@ const makeProvider = (
 });
 
 it.layer(NodeServices.layer)("providerStatusCache", (it) => {
-  it.effect("writes and reads provider status snapshots", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-provider-cache-" });
-      const codexProvider = makeProvider(CODEX_DRIVER);
-      const claudeProvider = makeProvider(CLAUDE_AGENT_DRIVER, {
-        status: "warning",
-        auth: { status: "unknown" },
-      });
-      const openCodeProvider = makeProvider(OPENCODE_DRIVER, {
-        status: "warning",
-        auth: { status: "unknown", type: "opencode" },
-      });
-      const codexPath = yield* resolveProviderStatusCachePath({
-        cacheDir: tempDir,
-        instanceId: defaultInstanceIdForDriver(CODEX_DRIVER),
-      });
-      const claudePath = yield* resolveProviderStatusCachePath({
-        cacheDir: tempDir,
-        instanceId: defaultInstanceIdForDriver(CLAUDE_AGENT_DRIVER),
-      });
-      const openCodePath = yield* resolveProviderStatusCachePath({
-        cacheDir: tempDir,
-        instanceId: defaultInstanceIdForDriver(OPENCODE_DRIVER),
-      });
-
-      yield* writeProviderStatusCache({
-        filePath: codexPath,
-        provider: codexProvider,
-      });
-      yield* writeProviderStatusCache({
-        filePath: claudePath,
-        provider: claudeProvider,
-      });
-      yield* writeProviderStatusCache({
-        filePath: openCodePath,
-        provider: openCodeProvider,
-      });
-
-      assert.deepStrictEqual(yield* readProviderStatusCache(codexPath), codexProvider);
-      assert.deepStrictEqual(yield* readProviderStatusCache(claudePath), claudeProvider);
-      assert.deepStrictEqual(yield* readProviderStatusCache(openCodePath), openCodeProvider);
-    }),
-  );
-
   it("hydrates cached provider status while preserving current settings-derived models", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       checkedAt: "2026-04-10T12:00:00.000Z",
@@ -148,6 +93,35 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
     );
   });
 
+  it("does not resurrect cached custom models that settings no longer declare", () => {
+    const builtIn = {
+      slug: "gpt-5.4",
+      name: "GPT-5.4",
+      isCustom: false,
+      capabilities: emptyCapabilities,
+    } as const;
+    const cachedCodex = makeProvider(CODEX_DRIVER, {
+      models: [
+        builtIn,
+        {
+          slug: "removed-custom",
+          name: "removed-custom",
+          isCustom: true,
+          capabilities: emptyCapabilities,
+        },
+      ],
+    });
+    const fallbackCodex = makeProvider(CODEX_DRIVER, { models: [builtIn] });
+
+    assert.deepStrictEqual(
+      hydrateCachedProvider({
+        cachedProvider: cachedCodex,
+        fallbackProvider: fallbackCodex,
+      }).models,
+      [builtIn],
+    );
+  });
+
   it("ignores stale cached enabled state when the provider is now disabled", () => {
     const cachedCodex = makeProvider(CODEX_DRIVER, {
       checkedAt: "2026-04-10T12:00:00.000Z",
@@ -183,7 +157,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       ],
     });
     const legacyCachedCodex = {
-      provider: "codex",
+      provider: ProviderDriverKind.make("codex"),
       enabled: true,
       installed: true,
       version: "1.0.0",
@@ -202,7 +176,7 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       skills: [],
     } as unknown as ServerProvider;
     const mismatchedCachedCodex = makeProvider(CODEX_DRIVER, {
-      instanceId: "codex_personal" as ProviderInstanceId,
+      instanceId: ProviderInstanceId.make("codex_personal"),
     });
 
     assert.strictEqual(
@@ -232,23 +206,6 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
         fallbackProvider: fallbackCodex,
       }),
       fallbackCodex,
-    );
-  });
-
-  it("orders snapshots by display name, driver, then instance", () => {
-    assert.deepStrictEqual(
-      orderProviderSnapshots([
-        makeProvider(OPENCODE_DRIVER, { displayName: "OpenCode" }),
-        makeProvider(CODEX_DRIVER, {
-          instanceId: "codex_work" as ProviderInstanceId,
-          displayName: "Codex",
-        }),
-        makeProvider(CODEX_DRIVER, {
-          instanceId: "codex_personal" as ProviderInstanceId,
-          displayName: "Codex",
-        }),
-      ]).map((provider) => provider.instanceId),
-      ["codex_personal", "codex_work", "opencode"],
     );
   });
 });

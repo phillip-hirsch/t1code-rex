@@ -1,31 +1,78 @@
-import { spawn, spawnSync } from "node:child_process";
-import { watch } from "node:fs";
-import { join } from "node:path";
-import waitOn from "wait-on";
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
-import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import {
+  desktopDir,
+  resolveDevProtocolClient,
+  resolveElectronLaunchCommand,
+} from "./electron-launcher.mjs";
+import { waitForResources } from "./wait-for-resources.mjs";
 
-const port = Number(process.env.ELECTRON_RENDERER_PORT ?? 5733);
-const devServerUrl = `http://localhost:${port}`;
+const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
+if (!devServerUrl) {
+  throw new Error("VITE_DEV_SERVER_URL is required for desktop development.");
+}
+
+const devServer = new URL(devServerUrl);
+const port = Number.parseInt(devServer.port, 10);
+if (!Number.isInteger(port) || port <= 0) {
+  throw new Error(`VITE_DEV_SERVER_URL must include an explicit port: ${devServerUrl}`);
+}
+
 const requiredFiles = [
-  "dist-electron/main.js",
-  "dist-electron/preload.js",
-  "../server/dist/index.mjs",
+  "dist-electron/main.cjs",
+  "dist-electron/electron/WindowsForegroundFocusWorker.cjs",
+  "dist-electron/preload.cjs",
+  "dist-electron/snapShot/GlobalShiftShortcutWorker.cjs",
+  "dist-electron/snapShot/RegionSnapShotWorker.cjs",
+  "dist-electron/snapShot/SnapShotAccessibilityWorker.cjs",
+  "../server/dist/bin.mjs",
 ];
 const watchedDirectories = [
-  { directory: "dist-electron", files: new Set(["main.js", "preload.js"]) },
-  { directory: "../server/dist", files: new Set(["index.mjs"]) },
+  { directory: "dist-electron", files: new Set(["main.cjs", "preload.cjs"]) },
+  {
+    directory: "dist-electron/electron",
+    files: new Set(["WindowsForegroundFocusWorker.cjs"]),
+  },
+  {
+    directory: "dist-electron/snapShot",
+    files: new Set([
+      "GlobalShiftShortcutWorker.cjs",
+      "RegionSnapShotWorker.cjs",
+      "SnapShotAccessibilityWorker.cjs",
+    ]),
+  },
+  { directory: "../server/dist", files: new Set(["bin.mjs"]) },
 ];
 const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
+const remoteDebuggingPort = process.env.T3CODE_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
+const hostPlatform = NodeOS.platform();
 
-await waitOn({
-  resources: [`tcp:${port}`, ...requiredFiles.map((filePath) => `file:${filePath}`)],
+NodeChildProcess.execFileSync(
+  process.execPath,
+  [NodePath.join(desktopDir, "scripts/build-browser-secret.mjs")],
+  { stdio: "inherit" },
+);
+
+await waitForResources({
+  baseDir: desktopDir,
+  files: requiredFiles,
+  tcpHost: devServer.hostname,
+  tcpPort: port,
 });
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
+const devProtocolClient = resolveDevProtocolClient();
+if (devProtocolClient) {
+  childEnv.T3CODE_DESKTOP_APP_USER_MODEL_ID = devProtocolClient.appBundleId;
+  childEnv.T3CODE_DESKTOP_PROTOCOL_REGISTRATION_MANAGED = "1";
+}
 
 let shuttingDown = false;
 let restartTimer = null;
@@ -35,19 +82,26 @@ const expectedExits = new WeakSet();
 const watchers = [];
 
 function killChildTreeByPid(pid, signal) {
-  if (process.platform === "win32" || typeof pid !== "number") {
+  if (hostPlatform === "win32" || typeof pid !== "number") {
     return;
   }
 
-  spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
+  NodeChildProcess.spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
 }
 
 function cleanupStaleDevApps() {
-  if (process.platform === "win32") {
+  if (hostPlatform === "win32") {
     return;
   }
 
-  spawnSync("pkill", ["-f", "--", `--t3code-dev-root=${desktopDir}`], { stdio: "ignore" });
+  const escapedDesktopDir = desktopDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  NodeChildProcess.spawnSync(
+    "pkill",
+    ["-f", "--", `(^| )--t3code-dev-root=${escapedDesktopDir}( |$)`],
+    {
+      stdio: "ignore",
+    },
+  );
 }
 
 function startApp() {
@@ -55,18 +109,18 @@ function startApp() {
     return;
   }
 
-  const app = spawn(
-    resolveElectronPath(),
-    [`--t3code-dev-root=${desktopDir}`, "dist-electron/main.js"],
-    {
-      cwd: desktopDir,
-      env: {
-        ...childEnv,
-        VITE_DEV_SERVER_URL: devServerUrl,
-      },
-      stdio: "inherit",
-    },
-  );
+  const electronArgs = remoteDebuggingPort
+    ? [`--remote-debugging-port=${remoteDebuggingPort}`]
+    : [];
+  const launchArgs = devProtocolClient
+    ? electronArgs
+    : [...electronArgs, `--t3code-dev-root=${desktopDir}`, "dist-electron/main.cjs"];
+  const electronCommand = resolveElectronLaunchCommand(launchArgs);
+  const app = NodeChildProcess.spawn(electronCommand.electronPath, electronCommand.args, {
+    cwd: desktopDir,
+    env: childEnv,
+    stdio: "inherit",
+  });
 
   currentApp = app;
 
@@ -116,6 +170,7 @@ async function stopApp() {
     app.once("exit", finish);
     app.kill("SIGTERM");
     killChildTreeByPid(app.pid, "TERM");
+    cleanupStaleDevApps();
 
     setTimeout(() => {
       if (settled) {
@@ -124,6 +179,7 @@ async function stopApp() {
 
       app.kill("SIGKILL");
       killChildTreeByPid(app.pid, "KILL");
+      cleanupStaleDevApps();
       finish();
     }, forcedShutdownTimeoutMs).unref();
   });
@@ -153,8 +209,8 @@ function scheduleRestart() {
 
 function startWatchers() {
   for (const { directory, files } of watchedDirectories) {
-    const watcher = watch(
-      join(desktopDir, directory),
+    const watcher = NodeFS.watch(
+      NodePath.join(desktopDir, directory),
       { persistent: true },
       (_eventType, filename) => {
         if (typeof filename !== "string" || !files.has(filename)) {
@@ -170,12 +226,13 @@ function startWatchers() {
 }
 
 function killChildTree(signal) {
-  if (process.platform === "win32") {
+  if (hostPlatform === "win32") {
     return;
   }
 
-  // Kill direct children as a final fallback in case normal shutdown leaves stragglers.
-  spawnSync("pkill", [`-${signal}`, "-P", String(process.pid)], { stdio: "ignore" });
+  NodeChildProcess.spawnSync("pkill", [`-${signal}`, "-P", String(process.pid)], {
+    stdio: "ignore",
+  });
 }
 
 async function shutdown(exitCode) {

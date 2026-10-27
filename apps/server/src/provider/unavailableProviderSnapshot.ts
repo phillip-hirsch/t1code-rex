@@ -5,9 +5,8 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
 
-import { buildServerProvider } from "./providerSnapshot.ts";
+import { buildServerProvider } from "@t3tools/provider-core/server/snapshotProbe";
 
 export interface UnavailableProviderSnapshotInput {
   readonly driverKind: ProviderDriverKind | string;
@@ -19,41 +18,38 @@ export interface UnavailableProviderSnapshotInput {
 }
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-const decodeProviderDriverKind = Schema.decodeUnknownSync(ProviderDriverKind);
 
-function toProviderDriverKind(value: ProviderDriverKind | string): ProviderDriverKind {
-  return typeof value === "string" ? decodeProviderDriverKind(value) : value;
-}
+export const buildUnavailableProviderSnapshot = Effect.fn(
+  "unavailableProviderSnapshot.buildUnavailableProviderSnapshot",
+)(function* (input: UnavailableProviderSnapshotInput): Effect.fn.Return<ServerProvider> {
+  const checkedAt = input.checkedAt ?? (yield* nowIso);
+  const displayName = input.displayName?.trim() || (input.driverKind as string);
 
-export function buildUnavailableProviderSnapshot(
-  input: UnavailableProviderSnapshotInput,
-): Effect.Effect<ServerProvider> {
-  return Effect.gen(function* () {
-    const checkedAt = input.checkedAt ?? (yield* nowIso);
-    const displayName = input.displayName?.trim() || (input.driverKind as string);
-
-    const base = buildServerProvider({
-      presentation: { displayName },
-      enabled: false,
-      checkedAt,
-      models: [],
-      skills: [],
-      probe: {
-        installed: false,
-        version: null,
-        status: "error",
-        auth: { status: "unknown" },
-        message: input.reason,
-      },
-    });
-
-    return {
-      ...base,
-      instanceId: input.instanceId,
-      ...(input.accentColor ? { accentColor: input.accentColor } : {}),
-      driver: toProviderDriverKind(input.driverKind),
-      availability: "unavailable",
-      unavailableReason: input.reason,
-    };
+  // No driver ran, so its setup capabilities are still unknown.
+  const { setup: _setup, ...base } = buildServerProvider({
+    presentation: { displayName },
+    enabled: false,
+    checkedAt,
+    models: [],
+    skills: [],
+    probe: {
+      installed: false,
+      version: null,
+      status: "error",
+      auth: { status: "unknown" },
+      message: input.reason,
+    },
   });
-}
+
+  return {
+    ...base,
+    instanceId: input.instanceId,
+    ...(input.accentColor ? { accentColor: input.accentColor } : {}),
+    driver:
+      typeof input.driverKind === "string"
+        ? ProviderDriverKind.make(input.driverKind)
+        : input.driverKind,
+    availability: "unavailable",
+    unavailableReason: input.reason,
+  };
+});

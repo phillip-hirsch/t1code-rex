@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas";
+import { TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 export const AdvertisedEndpointProviderKind = Schema.Literals([
   "core",

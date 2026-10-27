@@ -1,85 +1,32 @@
 import {
-  CLAUDE_CODE_EFFORT_OPTIONS,
-  CODEX_REASONING_EFFORT_OPTIONS,
-  DEFAULT_MODEL_BY_PROVIDER,
-  DEFAULT_GIT_TEXT_GENERATION_MODEL,
-  DEFAULT_REASONING_EFFORT_BY_PROVIDER,
-  MODEL_OPTIONS_BY_PROVIDER,
+  type CustomModelSetting,
   MODEL_SLUG_ALIASES_BY_PROVIDER,
-  REASONING_EFFORT_OPTIONS_BY_PROVIDER,
-  type ClaudeModelOptions,
-  type ClaudeCodeEffort,
-  type CodexModelOptions,
-  type CodexReasoningEffort,
-  type ModelSlug,
-  type ProviderReasoningEffort,
-  type ProviderKind,
-  type ProviderDriverKind,
-  type ProviderInstanceId,
-  type ModelCapabilities,
+  ModelCapabilities,
+  type ModelSelection,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
-  type ModelSelection,
 } from "@t3tools/contracts";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import { copySorted } from "./Array.ts";
 
-const MODEL_SLUG_SET_BY_PROVIDER: Record<ProviderKind, ReadonlySet<ModelSlug>> = {
-  claudeAgent: new Set(MODEL_OPTIONS_BY_PROVIDER.claudeAgent.map((option) => option.slug)),
-  codex: new Set(MODEL_OPTIONS_BY_PROVIDER.codex.map((option) => option.slug)),
-};
+const DEFAULT_PROVIDER_DRIVER_KIND = ProviderDriverKind.make("codex");
 
-const CLAUDE_OPUS_4_8_MODEL = "claude-opus-4-8";
-const CLAUDE_OPUS_4_7_MODEL = "claude-opus-4-7";
-const CLAUDE_OPUS_4_6_MODEL = "claude-opus-4-6";
-const CLAUDE_SONNET_4_6_MODEL = "claude-sonnet-4-6";
-const CLAUDE_HAIKU_4_5_MODEL = "claude-haiku-4-5";
-const CODEX_DRIVER_KIND = "codex" as ProviderDriverKind;
-const CLAUDE_DRIVER_KIND = "claudeAgent" as ProviderDriverKind;
-const CURSOR_DRIVER_KIND = "cursor" as ProviderDriverKind;
-const OPENCODE_DRIVER_KIND = "opencode" as ProviderDriverKind;
-
-export const DEFAULT_MODEL_BY_DRIVER: Partial<Record<ProviderDriverKind, string>> = {
-  [CODEX_DRIVER_KIND]: DEFAULT_MODEL_BY_PROVIDER.codex,
-  [CLAUDE_DRIVER_KIND]: DEFAULT_MODEL_BY_PROVIDER.claudeAgent,
-  [CURSOR_DRIVER_KIND]: "auto",
-  [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
-};
-
-export const DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_DRIVER: Partial<
-  Record<ProviderDriverKind, string>
-> = {
-  [CODEX_DRIVER_KIND]: DEFAULT_GIT_TEXT_GENERATION_MODEL,
-  [CLAUDE_DRIVER_KIND]: "claude-haiku-4-5",
-  [CURSOR_DRIVER_KIND]: "composer-2",
-  [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
-};
-
-export const PROVIDER_DISPLAY_NAMES_BY_DRIVER: Partial<Record<ProviderDriverKind, string>> = {
-  [CODEX_DRIVER_KIND]: "Codex",
-  [CLAUDE_DRIVER_KIND]: "Claude",
-  [CURSOR_DRIVER_KIND]: "Cursor",
-  [OPENCODE_DRIVER_KIND]: "OpenCode",
-};
-
-const MODEL_SLUG_ALIASES_BY_OPEN_DRIVER: Partial<
-  Record<ProviderDriverKind, Record<string, string>>
-> = {
-  [CURSOR_DRIVER_KIND]: {
-    composer: "composer-2",
-    "composer-1.5": "composer-1.5",
-    "composer-1": "composer-1.5",
-    "opus-4.6-thinking": "claude-opus-4-6",
-    "opus-4.6": "claude-opus-4-6",
-    "sonnet-4.6-thinking": "claude-sonnet-4-6",
-    "sonnet-4.6": "claude-sonnet-4-6",
-    "opus-4.5-thinking": "claude-opus-4-5",
-    "opus-4.5": "claude-opus-4-5",
-  },
-  [OPENCODE_DRIVER_KIND]: {},
-};
+export function modelSelectionCommandType(
+  currentInstanceId: ProviderInstanceId,
+  selection: ModelSelection,
+) {
+  return currentInstanceId === selection.instanceId
+    ? ("thread.model-selection.set" as const)
+    : ("provider.switch" as const);
+}
 
 export interface SelectableModelOption {
   slug: string;
   name: string;
+  aliases?: ReadonlyArray<string> | undefined;
 }
 
 export function createModelCapabilities(input: {
@@ -90,23 +37,6 @@ export function createModelCapabilities(input: {
   };
 }
 
-function cloneDescriptor(descriptor: ProviderOptionDescriptor): ProviderOptionDescriptor {
-  if (descriptor.type === "select") {
-    return {
-      ...descriptor,
-      options: descriptor.options.map((option) => ({ ...option })),
-      ...(descriptor.promptInjectedValues
-        ? { promptInjectedValues: [...descriptor.promptInjectedValues] }
-        : {}),
-    };
-  }
-  return { ...descriptor };
-}
-
-function cloneSelection(selection: ProviderOptionSelection): ProviderOptionSelection {
-  return { ...selection };
-}
-
 function getRawSelectionValueById(
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
   id: string,
@@ -115,14 +45,14 @@ function getRawSelectionValueById(
   return selection?.value;
 }
 
-export function getProviderOptionSelectionValue(
+function getProviderOptionSelectionValue(
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
   id: string,
 ): string | boolean | undefined {
   return getRawSelectionValueById(selections, id);
 }
 
-export function getProviderOptionStringSelectionValue(
+function getProviderOptionStringSelectionValue(
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
   id: string,
 ): string | undefined {
@@ -130,19 +60,12 @@ export function getProviderOptionStringSelectionValue(
   return typeof value === "string" ? value : undefined;
 }
 
-export function getProviderOptionBooleanSelectionValue(
+function getProviderOptionBooleanSelectionValue(
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
   id: string,
 ): boolean | undefined {
   const value = getProviderOptionSelectionValue(selections, id);
   return typeof value === "boolean" ? value : undefined;
-}
-
-export function getModelSelectionOptionValue(
-  modelSelection: ModelSelection | null | undefined,
-  id: string,
-): string | boolean | undefined {
-  return getProviderOptionSelectionValue(modelSelection?.options, id);
 }
 
 export function getModelSelectionStringOptionValue(
@@ -157,6 +80,54 @@ export function getModelSelectionBooleanOptionValue(
   id: string,
 ): boolean | undefined {
   return getProviderOptionBooleanSelectionValue(modelSelection?.options, id);
+}
+
+function canonicalModelSelectionOptions(
+  modelSelection: ModelSelection,
+): ReadonlyArray<readonly [id: string, value: string | boolean]> {
+  return copySorted(
+    (modelSelection.options ?? []).map(
+      (selection): readonly [id: string, value: string | boolean] => [
+        selection.id,
+        selection.value,
+      ],
+    ),
+    (
+      [leftId, leftValue]: readonly [id: string, value: string | boolean],
+      [rightId, rightValue]: readonly [id: string, value: string | boolean],
+    ) => {
+      const idOrder = leftId.localeCompare(rightId);
+      return idOrder !== 0 ? idOrder : String(leftValue).localeCompare(String(rightValue));
+    },
+  );
+}
+
+export function modelSelectionsEqual(left: ModelSelection, right: ModelSelection): boolean {
+  if (left.instanceId !== right.instanceId || left.model !== right.model) {
+    return false;
+  }
+  const leftOptions = canonicalModelSelectionOptions(left);
+  const rightOptions = canonicalModelSelectionOptions(right);
+  return (
+    leftOptions.length === rightOptions.length &&
+    leftOptions.every(
+      ([id, value], index) => id === rightOptions[index]?.[0] && value === rightOptions[index]?.[1],
+    )
+  );
+}
+
+/**
+ * Whether a composer's draft model pick is what the thread already runs. Web sends
+ * `fastMode: false` for models with a fast toggle while mobile omits it, so off counts as unset.
+ */
+export function draftModelPickMatchesThread(pick: ModelSelection, thread: ModelSelection): boolean {
+  const withoutFastModeOff = (selection: ModelSelection) =>
+    createModelSelection(
+      selection.instanceId,
+      selection.model,
+      selection.options?.filter((option) => option.id !== "fastMode" || option.value !== false),
+    );
+  return modelSelectionsEqual(withoutFastModeOff(pick), withoutFastModeOff(thread));
 }
 
 function resolveDescriptorChoiceValue(
@@ -180,6 +151,22 @@ function resolveDescriptorChoiceValue(
     return trimmed;
   }
   return descriptor.currentValue ?? descriptor.options.find((option) => option.isDefault)?.id;
+}
+
+function cloneDescriptor(descriptor: ProviderOptionDescriptor): ProviderOptionDescriptor {
+  return descriptor.type === "select"
+    ? {
+        ...descriptor,
+        options: [...descriptor.options],
+        ...(descriptor.promptInjectedValues
+          ? { promptInjectedValues: [...descriptor.promptInjectedValues] }
+          : {}),
+      }
+    : { ...descriptor };
+}
+
+function cloneSelection(selection: ProviderOptionSelection): ProviderOptionSelection {
+  return { ...selection };
 }
 
 function withDescriptorCurrentValue(
@@ -224,12 +211,46 @@ export function getProviderOptionDescriptors(input: {
   );
 }
 
+function getReportedOptionValue(
+  id: string,
+  selection?: ModelSelection | null,
+  reportedSelection?: ModelSelection | null,
+) {
+  if (
+    !selection ||
+    !reportedSelection ||
+    selection.instanceId !== reportedSelection.instanceId ||
+    selection.model !== reportedSelection.model ||
+    selection.options?.some((option) => option.id === id)
+  )
+    return undefined;
+  return getRawSelectionValueById(reportedSelection.options, id);
+}
+
+export function getProviderOptionStatedValue(
+  id: string,
+  selection?: ModelSelection | null,
+  reportedSelection?: ModelSelection | null,
+) {
+  return (
+    getRawSelectionValueById(selection?.options, id) ??
+    getReportedOptionValue(id, selection, reportedSelection)
+  );
+}
+
 export function getProviderOptionCurrentValue(
   descriptor: ProviderOptionDescriptor | null | undefined,
+  selection?: ModelSelection | null,
+  reportedSelection?: ModelSelection | null,
 ): string | boolean | undefined {
   if (!descriptor) {
     return undefined;
   }
+  const hasExplicitOption = selection?.options?.some((option) => option.id === descriptor.id);
+  // Reported values are display-only; callers that build dispatch options omit this context.
+  const reportedValue = getReportedOptionValue(descriptor.id, selection, reportedSelection);
+  if (reportedValue !== undefined) return reportedValue;
+  if (descriptor.id === "variant" && selection && !hasExplicitOption) return undefined;
   if (descriptor.type === "boolean") {
     return descriptor.currentValue;
   }
@@ -241,6 +262,8 @@ export function getProviderOptionCurrentValue(
 
 export function getProviderOptionCurrentLabel(
   descriptor: ProviderOptionDescriptor | null | undefined,
+  selection?: ModelSelection | null,
+  reportedSelection?: ModelSelection | null,
 ): string | undefined {
   if (!descriptor) {
     return undefined;
@@ -252,11 +275,15 @@ export function getProviderOptionCurrentLabel(
         : "Off"
       : undefined;
   }
-  const currentValue = getProviderOptionCurrentValue(descriptor);
-  if (typeof currentValue !== "string") {
-    return undefined;
-  }
-  return descriptor.options.find((option) => option.id === currentValue)?.label;
+  const currentValue = getProviderOptionCurrentValue(descriptor, selection, reportedSelection);
+  return (
+    descriptor.options.find((option) => option.id === currentValue)?.label ??
+    (getReportedOptionValue(descriptor.id, selection, reportedSelection) === "default"
+      ? "Default"
+      : descriptor.id === "variant"
+        ? "Unknown"
+        : undefined)
+  );
 }
 
 export function buildProviderOptionSelectionsFromDescriptors(
@@ -278,116 +305,131 @@ export function buildProviderOptionSelectionsFromDescriptors(
   return nextSelections.length > 0 ? nextSelections : undefined;
 }
 
-export function getModelSelectionOptionDescriptors(
-  modelSelection: ModelSelection | null | undefined,
-  caps?: ModelCapabilities | null | undefined,
-): ReadonlyArray<ProviderOptionDescriptor> {
-  if (!modelSelection || !caps) {
-    return [];
+export function buildExplicitProviderOptionSelectionsFromDescriptors(
+  descriptors: ReadonlyArray<ProviderOptionDescriptor> | null | undefined,
+  selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+): Array<ProviderOptionSelection> | undefined {
+  if (!selections || selections.length === 0) {
+    return undefined;
   }
-  return getProviderOptionDescriptors({
-    caps,
-    selections: modelSelection.options,
-  });
-}
-
-export function getModelOptions(provider: ProviderKind = "codex") {
-  return MODEL_OPTIONS_BY_PROVIDER[provider];
-}
-
-export function getDefaultModel(provider: ProviderKind = "codex"): ModelSlug {
-  return DEFAULT_MODEL_BY_PROVIDER[provider];
-}
-
-export function getDefaultModelForDriver(
-  provider: ProviderDriverKind | ProviderKind = "codex",
-): string {
-  return DEFAULT_MODEL_BY_DRIVER[provider as ProviderDriverKind] ?? DEFAULT_MODEL_BY_PROVIDER.codex;
-}
-
-export function getDefaultGitTextGenerationModelForDriver(
-  provider: ProviderDriverKind | ProviderKind = "codex",
-): string {
-  return (
-    DEFAULT_GIT_TEXT_GENERATION_MODEL_BY_DRIVER[provider as ProviderDriverKind] ??
-    DEFAULT_GIT_TEXT_GENERATION_MODEL
+  const explicitIds = new Set(selections.map((selection) => selection.id));
+  const normalized = buildProviderOptionSelectionsFromDescriptors(descriptors)?.filter(
+    (selection) => explicitIds.has(selection.id),
   );
-}
-
-export function supportsClaudeFastMode(model: string | null | undefined): boolean {
-  return normalizeModelSlug(model, "claudeAgent") === CLAUDE_OPUS_4_6_MODEL;
-}
-
-export function supportsClaudeAdaptiveReasoning(model: string | null | undefined): boolean {
-  const normalized = normalizeModelSlug(model, "claudeAgent");
-  return (
-    normalized === CLAUDE_OPUS_4_8_MODEL ||
-    normalized === CLAUDE_OPUS_4_7_MODEL ||
-    normalized === CLAUDE_OPUS_4_6_MODEL ||
-    normalized === CLAUDE_SONNET_4_6_MODEL
-  );
-}
-
-export function supportsClaudeExtraHighEffort(model: string | null | undefined): boolean {
-  const normalized = normalizeModelSlug(model, "claudeAgent");
-  return normalized === CLAUDE_OPUS_4_8_MODEL || normalized === CLAUDE_OPUS_4_7_MODEL;
-}
-
-export function supportsClaudeUltracodeEffort(model: string | null | undefined): boolean {
-  return normalizeModelSlug(model, "claudeAgent") === CLAUDE_OPUS_4_8_MODEL;
-}
-
-export function supportsClaudeMaxEffort(model: string | null | undefined): boolean {
-  const normalized = normalizeModelSlug(model, "claudeAgent");
-  return normalized === CLAUDE_OPUS_4_8_MODEL || normalized === CLAUDE_OPUS_4_6_MODEL;
-}
-
-export function supportsClaudeUltrathinkKeyword(model: string | null | undefined): boolean {
-  return supportsClaudeAdaptiveReasoning(model);
-}
-
-export function supportsClaudeThinkingToggle(model: string | null | undefined): boolean {
-  return normalizeModelSlug(model, "claudeAgent") === CLAUDE_HAIKU_4_5_MODEL;
+  return normalized && normalized.length > 0 ? normalized : undefined;
 }
 
 export function isClaudeUltrathinkPrompt(text: string | null | undefined): boolean {
   return typeof text === "string" && /\bultrathink\b/i.test(text);
 }
 
-export function trimOrNull<T extends string>(value: T | null | undefined): T | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim() as T;
-  return trimmed || null;
+export function codexModelFamily(slug: string): string {
+  return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
+}
+
+export function formatCodexModelName(name: string): string {
+  return name.replace(/^gpt/i, "GPT").replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
+}
+
+export function formatModelSlugName(slug: string): string {
+  const separator = slug.lastIndexOf("/") + 1;
+  const prefix = slug.slice(0, separator);
+  const name = slug.slice(separator);
+  if (/^gpt-\d/i.test(name)) return prefix + formatCodexModelName(name);
+  if (!/^(claude-(opus|sonnet|haiku|fable)|gemini|grok|composer)-\d/i.test(name)) return slug;
+  return (
+    prefix +
+    name
+      .replace(/^(claude-[a-z]+-\d+)-(\d{1,2})(?=-|\[|$)/i, "$1.$2")
+      .split("-")
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ")
+  );
 }
 
 export function normalizeModelSlug(
   model: string | null | undefined,
-  provider: ProviderDriverKind | ProviderKind = "codex",
-): ModelSlug | null {
-  if (typeof model !== "string") {
-    return null;
-  }
-
-  const trimmed = model.trim();
+  provider: ProviderDriverKind = DEFAULT_PROVIDER_DRIVER_KIND,
+): string | null {
+  const trimmed = normalizeCustomModelSlug(model);
   if (!trimmed) {
     return null;
   }
 
-  const aliases = {
-    ...((MODEL_SLUG_ALIASES_BY_PROVIDER[provider as ProviderKind] ?? {}) as Record<string, string>),
-    ...MODEL_SLUG_ALIASES_BY_OPEN_DRIVER[provider as ProviderDriverKind],
-  };
+  const aliases = MODEL_SLUG_ALIASES_BY_PROVIDER[provider] ?? {};
   const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
     ? aliases[trimmed]
     : undefined;
-  return typeof aliased === "string" ? (aliased as ModelSlug) : (trimmed as ModelSlug);
+  return typeof aliased === "string" ? aliased : trimmed;
+}
+
+/** Custom model identifiers are provider-owned, so only trim them; never expand aliases. */
+export function normalizeCustomModelSlug(model: string | null | undefined): string | null {
+  if (typeof model !== "string") {
+    return null;
+  }
+
+  return model.trim() || null;
+}
+
+export interface CustomModelDefinition {
+  readonly slug: string;
+  readonly name: string;
+  readonly capabilities: ModelCapabilities | null;
+}
+
+const decodeCustomModelCapabilities = Schema.decodeUnknownOption(ModelCapabilities);
+
+export function readCustomModelEntries(value: unknown): CustomModelDefinition[] {
+  if (!Array.isArray(value)) return [];
+  const entries: CustomModelDefinition[] = [];
+  const seen = new Set<string>();
+  for (const raw of value) {
+    const record =
+      typeof raw === "string"
+        ? { slug: raw }
+        : raw !== null && typeof raw === "object"
+          ? (raw as { slug?: unknown; name?: unknown; capabilities?: unknown })
+          : null;
+    if (!record) continue;
+    const slug = normalizeCustomModelSlug(typeof record.slug === "string" ? record.slug : null);
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    const name =
+      (typeof record.name === "string" ? normalizeCustomModelSlug(record.name) : null) ?? slug;
+    const capabilities =
+      record.capabilities === undefined || record.capabilities === null
+        ? null
+        : Option.getOrNull(decodeCustomModelCapabilities(record.capabilities));
+    entries.push({
+      slug,
+      name,
+      capabilities: capabilities
+        ? createModelCapabilities({ optionDescriptors: capabilities.optionDescriptors ?? [] })
+        : null,
+    });
+  }
+  return entries;
+}
+
+export function toCustomModelSetting(entry: CustomModelDefinition): CustomModelSetting {
+  const descriptors = entry.capabilities?.optionDescriptors ?? [];
+  const name = entry.name !== entry.slug ? entry.name : undefined;
+  if (!name && descriptors.length === 0) return entry.slug;
+  return {
+    slug: entry.slug,
+    ...(name ? { name } : {}),
+    ...(descriptors.length > 0
+      ? { capabilities: createModelCapabilities({ optionDescriptors: descriptors }) }
+      : {}),
+  };
 }
 
 export function resolveSelectableModel(
-  provider: ProviderKind,
+  provider: ProviderDriverKind,
   value: string | null | undefined,
   options: ReadonlyArray<SelectableModelOption>,
-): ModelSlug | null {
+): string | null {
   if (typeof value !== "string") {
     return null;
   }
@@ -407,6 +449,13 @@ export function resolveSelectableModel(
     return byName.slug;
   }
 
+  const byAlias = options.find((option) =>
+    option.aliases?.some((alias) => alias.toLowerCase() === trimmed.toLowerCase()),
+  );
+  if (byAlias) {
+    return byAlias.slug;
+  }
+
   const normalized = normalizeModelSlug(trimmed, provider);
   if (!normalized) {
     return null;
@@ -416,161 +465,44 @@ export function resolveSelectableModel(
   return resolved ? resolved.slug : null;
 }
 
-export function resolveModelSlug(
-  model: string | null | undefined,
-  provider: ProviderKind = "codex",
-): ModelSlug {
-  const normalized = normalizeModelSlug(model, provider);
-  if (!normalized) {
-    return DEFAULT_MODEL_BY_PROVIDER[provider];
-  }
-
-  return MODEL_SLUG_SET_BY_PROVIDER[provider].has(normalized)
-    ? normalized
-    : DEFAULT_MODEL_BY_PROVIDER[provider];
+function trimOrNull<T extends string>(value: T | null | undefined): T | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim() as T;
+  return trimmed || null;
 }
 
-export function resolveModelSlugForProvider(
-  provider: ProviderKind,
-  model: string | null | undefined,
-): ModelSlug {
-  return resolveModelSlug(model, provider);
+function cloneSelections(
+  selections: ReadonlyArray<ProviderOptionSelection>,
+): Array<ProviderOptionSelection> {
+  return selections.map(cloneSelection);
 }
 
-export function inferProviderForModel(
-  model: string | null | undefined,
-  fallback: ProviderKind = "codex",
-): ProviderKind {
-  const normalizedClaude = normalizeModelSlug(model, "claudeAgent");
-  if (normalizedClaude && MODEL_SLUG_SET_BY_PROVIDER.claudeAgent.has(normalizedClaude)) {
-    return "claudeAgent";
-  }
-
-  const normalizedCodex = normalizeModelSlug(model, "codex");
-  if (normalizedCodex && MODEL_SLUG_SET_BY_PROVIDER.codex.has(normalizedCodex)) {
-    return "codex";
-  }
-
-  return typeof model === "string" && model.trim().startsWith("claude-") ? "claudeAgent" : fallback;
-}
-
-export function getReasoningEffortOptions(provider: "codex"): ReadonlyArray<CodexReasoningEffort>;
-export function getReasoningEffortOptions(
-  provider: "claudeAgent",
-  model?: string | null | undefined,
-): ReadonlyArray<ClaudeCodeEffort>;
-export function getReasoningEffortOptions(
-  provider?: ProviderKind,
-  model?: string | null | undefined,
-): ReadonlyArray<ProviderReasoningEffort>;
-export function getReasoningEffortOptions(
-  provider: ProviderKind = "codex",
-  model?: string | null | undefined,
-): ReadonlyArray<ProviderReasoningEffort> {
-  if (provider === "claudeAgent") {
-    if (supportsClaudeUltracodeEffort(model)) {
-      return ["low", "medium", "high", "xhigh", "max", "ultracode", "ultrathink"];
-    }
-    if (supportsClaudeExtraHighEffort(model)) {
-      return ["low", "medium", "high", "xhigh", "ultrathink"];
-    }
-    if (supportsClaudeMaxEffort(model)) {
-      return ["low", "medium", "high", "max", "ultrathink"];
-    }
-    if (supportsClaudeAdaptiveReasoning(model)) {
-      return ["low", "medium", "high", "ultrathink"];
-    }
-    return [];
-  }
-  return REASONING_EFFORT_OPTIONS_BY_PROVIDER[provider];
-}
-
-export function getDefaultReasoningEffort(provider: "codex"): CodexReasoningEffort;
-export function getDefaultReasoningEffort(provider: "claudeAgent"): ClaudeCodeEffort;
-export function getDefaultReasoningEffort(provider?: ProviderKind): ProviderReasoningEffort;
-export function getDefaultReasoningEffort(
-  provider: ProviderKind = "codex",
-): ProviderReasoningEffort {
-  return DEFAULT_REASONING_EFFORT_BY_PROVIDER[provider];
-}
-
-export function resolveReasoningEffortForProvider(
-  provider: "codex",
-  effort: string | null | undefined,
-): CodexReasoningEffort | null;
-export function resolveReasoningEffortForProvider(
-  provider: "claudeAgent",
-  effort: string | null | undefined,
-): ClaudeCodeEffort | null;
-export function resolveReasoningEffortForProvider(
-  provider: ProviderKind,
-  effort: string | null | undefined,
-): ProviderReasoningEffort | null;
-export function resolveReasoningEffortForProvider(
-  provider: ProviderKind,
-  effort: string | null | undefined,
-): ProviderReasoningEffort | null {
-  if (typeof effort !== "string") {
-    return null;
-  }
-
-  const trimmed = effort.trim();
-  if (!trimmed) {
-    return null;
-  }
-
-  const options = REASONING_EFFORT_OPTIONS_BY_PROVIDER[provider] as ReadonlyArray<string>;
-  return options.includes(trimmed) ? (trimmed as ProviderReasoningEffort) : null;
-}
-
-export function getEffectiveClaudeCodeEffort(
-  effort: ClaudeCodeEffort | null | undefined,
-): Exclude<ClaudeCodeEffort, "ultrathink"> | null {
-  if (!effort) {
-    return null;
-  }
-  return effort === "ultrathink" ? null : effort;
-}
-
-export function normalizeCodexModelOptions(
-  modelOptions: CodexModelOptions | null | undefined,
-): CodexModelOptions | undefined {
-  const defaultReasoningEffort = getDefaultReasoningEffort("codex");
-  const reasoningEffort =
-    resolveReasoningEffortForProvider("codex", modelOptions?.reasoningEffort) ??
-    defaultReasoningEffort;
-  const fastModeEnabled = modelOptions?.fastMode === true;
-  const nextOptions: CodexModelOptions = {
-    ...(reasoningEffort !== defaultReasoningEffort ? { reasoningEffort } : {}),
-    ...(fastModeEnabled ? { fastMode: true } : {}),
+export function createModelSelection(
+  instanceId: ProviderInstanceId,
+  model: string,
+  options?: ReadonlyArray<ProviderOptionSelection> | null,
+): ModelSelection {
+  const selections = options ? cloneSelections(options) : [];
+  const base: ModelSelection = {
+    instanceId,
+    model,
   };
-  return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
+  return selections.length > 0 ? { ...base, options: selections } : base;
 }
 
-export function normalizeClaudeModelOptions(
-  model: string | null | undefined,
-  modelOptions: ClaudeModelOptions | null | undefined,
-): ClaudeModelOptions | undefined {
-  const reasoningOptions = getReasoningEffortOptions("claudeAgent", model);
-  const defaultReasoningEffort = getDefaultReasoningEffort("claudeAgent");
-  const resolvedEffort = resolveReasoningEffortForProvider("claudeAgent", modelOptions?.effort);
-  const effort =
-    resolvedEffort &&
-    resolvedEffort !== "ultrathink" &&
-    reasoningOptions.includes(resolvedEffort) &&
-    resolvedEffort !== defaultReasoningEffort
-      ? resolvedEffort
-      : undefined;
-  const thinking =
-    supportsClaudeThinkingToggle(model) && modelOptions?.thinking === false ? false : undefined;
-  const fastMode =
-    supportsClaudeFastMode(model) && modelOptions?.fastMode === true ? true : undefined;
-  const nextOptions: ClaudeModelOptions = {
-    ...(thinking === false ? { thinking: false } : {}),
-    ...(effort ? { effort } : {}),
-    ...(fastMode ? { fastMode: true } : {}),
-  };
-  return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
+export function resolvePromptInjectedEffort(
+  caps: ModelCapabilities,
+  rawEffort: string | null | undefined,
+): string | null {
+  const trimmed = trimOrNull(rawEffort);
+  if (!trimmed) return null;
+  const descriptors = getProviderOptionDescriptors({ caps });
+  for (const descriptor of descriptors) {
+    if (descriptor.type === "select" && descriptor.promptInjectedValues?.includes(trimmed)) {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 export function applyClaudePromptEffortPrefix(
@@ -581,7 +513,8 @@ export function applyClaudePromptEffortPrefix(
   if (!trimmed) {
     return trimmed;
   }
-  if (effort !== "ultrathink") {
+  // Prefixing slash commands prevents Claude invocation; command names allow any token without a second slash.
+  if (effort !== "ultrathink" || /^\/[^\s/]+(?:\s|$)/u.test(trimmed)) {
     return trimmed;
   }
   if (trimmed.startsWith("Ultrathink:")) {
@@ -589,39 +522,3 @@ export function applyClaudePromptEffortPrefix(
   }
   return `Ultrathink:\n${trimmed}`;
 }
-
-/**
- * Returns the effort value if it is a prompt-injected value according to
- * any select descriptor in the given capabilities, or null otherwise.
- */
-export function resolvePromptInjectedEffort(
-  caps: ModelCapabilities,
-  rawEffort: string | null | undefined,
-): string | null {
-  const trimmed = trimOrNull(rawEffort);
-  if (!trimmed) {
-    return null;
-  }
-  const descriptors = getProviderOptionDescriptors({ caps });
-  for (const descriptor of descriptors) {
-    if (descriptor.type === "select" && descriptor.promptInjectedValues?.includes(trimmed)) {
-      return trimmed;
-    }
-  }
-  return null;
-}
-
-export function createModelSelection(
-  instanceId: ProviderInstanceId,
-  model: string,
-  options?: ReadonlyArray<ProviderOptionSelection> | null,
-): ModelSelection {
-  const selections = options ? options.map(cloneSelection) : [];
-  const base: ModelSelection = {
-    instanceId,
-    model,
-  };
-  return selections.length > 0 ? { ...base, options: selections } : base;
-}
-
-export { CLAUDE_CODE_EFFORT_OPTIONS, CODEX_REASONING_EFFORT_OPTIONS };

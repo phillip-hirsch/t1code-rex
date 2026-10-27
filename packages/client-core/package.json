@@ -43,7 +43,7 @@
   },
   "scripts": {
     "build": "tsdown",
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
@@ -53,8 +53,8 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "tsdown": "catalog:",
+    "tsdown": "^0.20.3",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "^4.0.0"
   }
 }

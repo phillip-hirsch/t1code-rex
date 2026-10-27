@@ -32,12 +32,12 @@
     "prepack": "bun run build && node scripts/prepare-package-json.mjs",
     "postpack": "node scripts/restore-package-json.mjs",
     "start": "bun dist/index.mjs",
-    "typecheck": "tsgo --noEmit",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
-    "@opentui/core": "^0.2.7",
-    "@opentui/react": "^0.2.7",
+    "@opentui/core": "0.2.7",
+    "@opentui/react": "0.2.7",
     "effect": "catalog:",
     "react": "^19.0.0",
     "react-devtools-core": "^7.0.1",
@@ -50,9 +50,9 @@
     "@t3tools/shared": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "^19.0.0",
-    "tsdown": "catalog:",
+    "tsdown": "^0.20.3",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "^4.0.0"
   },
   "optionalDependencies": {
     "@opentui/core-darwin-arm64": "0.2.7",
