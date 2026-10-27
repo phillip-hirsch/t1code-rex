@@ -1,7 +1,7 @@
 // @effect-diagnostics globalTimers:off -- The TUI runs on Bun outside the Effect runtime.
 import { ThreadId, type ProjectId } from "@t3tools/contracts";
 
-import type { ComposerAttachment, ComposerSend } from "./composerSend.ts";
+import type { ComposerAttachment, ComposerSend, PendingComposerSend } from "./composerSend.ts";
 import {
   applySettingsPatch,
   defaultsFromSettings,
@@ -29,7 +29,11 @@ export interface ComposerDraft {
   readonly attachments: ReadonlyArray<ComposerAttachment>;
 }
 
-export type ComposerSendStatus = "sending" | "waiting";
+/**
+ * `sending`: going out, or next in line. `waiting`: the connection dropped; it retries.
+ * `held`: Stop held it until resumed or discarded. `stuck`: a command got no reply in time.
+ */
+export type ComposerSendStatus = "sending" | "waiting" | "held" | "stuck";
 
 export interface ComposerSendEntry {
   readonly send: ComposerSend;
@@ -62,6 +66,29 @@ export interface ComposerStoreOptions {
 
 const EMPTY_DRAFT: ComposerDraft = { text: "", attachments: [] };
 const PERSIST_DELAY_MS = 300;
+
+/** Saved sends that look like ours; anything else in prefs.json is ignored. */
+function readPendingSends(value: unknown): ReadonlyArray<PendingComposerSend> {
+  if (!Array.isArray(value)) return [];
+  return value.filter((entry: unknown): entry is PendingComposerSend => {
+    if (typeof entry !== "object" || entry === null) return false;
+    const { send, stages, next } = entry as Record<string, unknown>;
+    if (typeof send !== "object" || send === null || !Array.isArray(stages)) return false;
+    const { target, commandId, messageId, text, attachments } = send as Record<string, unknown>;
+    return (
+      typeof target === "object" &&
+      target !== null &&
+      typeof (target as Record<string, unknown>).threadId === "string" &&
+      typeof commandId === "string" &&
+      typeof messageId === "string" &&
+      typeof text === "string" &&
+      Array.isArray(attachments) &&
+      typeof next === "number" &&
+      next >= 0 &&
+      next < stages.length
+    );
+  });
+}
 
 function isEmptyDraft(draft: ComposerDraft): boolean {
   return draft.text.length === 0 && draft.attachments.length === 0;
@@ -137,10 +164,13 @@ export function createComposerStore(options: ComposerStoreOptions) {
   const globalListeners = new Set<() => void>();
   let globalVersion = 0;
 
-  let dirty: { drafts: boolean; newThreads: boolean; defaults: boolean } = {
+  let pendingSends: ReadonlyArray<PendingComposerSend> = [];
+
+  let dirty: { drafts: boolean; newThreads: boolean; defaults: boolean; pendingSends: boolean } = {
     drafts: false,
     newThreads: false,
     defaults: false,
+    pendingSends: false,
   };
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -175,8 +205,11 @@ export function createComposerStore(options: ComposerStoreOptions) {
       patch.draftRuntimeMode = defaults.draftRuntimeMode;
       patch.draftInteractionMode = defaults.draftInteractionMode;
     }
-    const wrote = dirty.drafts || dirty.newThreads || dirty.defaults;
-    dirty = { drafts: false, newThreads: false, defaults: false };
+    if (dirty.pendingSends) {
+      patch.composerPendingSends = pendingSends.length === 0 ? undefined : pendingSends;
+    }
+    const wrote = dirty.drafts || dirty.newThreads || dirty.defaults || dirty.pendingSends;
+    dirty = { drafts: false, newThreads: false, defaults: false, pendingSends: false };
     if (wrote) persist(patch);
   };
 
@@ -204,6 +237,19 @@ export function createComposerStore(options: ComposerStoreOptions) {
   };
 
   return {
+    /** False in windows that never save prefs: Rex thread tabs and locked-out windows. */
+    canPersist: persist !== null,
+
+    /** Sends the last quit saved, for the window that owns prefs.json; none elsewhere. */
+    pendingSendsAtLaunch: (): ReadonlyArray<PendingComposerSend> =>
+      persist === null ? [] : readPendingSends(initialPrefs.composerPendingSends),
+
+    /** Saves sends that may have reached the server, replacing any saved before. */
+    setPendingSends(sends: ReadonlyArray<PendingComposerSend>) {
+      pendingSends = sends;
+      schedulePersist("pendingSends");
+    },
+
     getDraft: (threadId: string): ComposerDraft => drafts.get(threadId) ?? EMPTY_DRAFT,
 
     /** Text edits; silent, since the textarea already shows them. */

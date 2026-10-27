@@ -26,6 +26,7 @@ import {
   chooseDispatch,
   createComposerSend,
   type ComposerAttachment,
+  type ComposerDispatch,
   type ComposerTarget,
 } from "./composerSend.ts";
 import type { ComposerSender } from "./composerSender.ts";
@@ -75,9 +76,13 @@ export interface ComposerProps {
   readonly providerBadge: (settings: ComposerSettings) => ProviderBadge;
   readonly running: boolean;
   readonly stopRequested: boolean;
+  /** What Enter does while a run is busy; the alternate key does the other. */
+  readonly followUpBehavior: ComposerDispatch;
   readonly clipboardDir: string;
   readonly onFocus: () => void;
   readonly onStop: () => void;
+  /** `/resume`: also releases the thread's queue the server holds after Stop. */
+  readonly onResumeQueue: () => void;
   readonly onExit: () => void;
   readonly onNewThread: () => void;
   readonly onOpenModelPicker: () => void;
@@ -132,8 +137,22 @@ export function Composer(props: ComposerProps) {
   const slashMenuOpen = props.focused && slashItems.length > 0;
   const attachments = snapshot.attachments;
 
+  const heldCount = snapshot.sends.filter((entry) => entry.status === "held").length;
   /** What the send button shows, and what Enter on an empty composer does. */
-  const primary = running && !hasText && attachments.length === 0 ? "stop" : "send";
+  const primary =
+    hasText || attachments.length > 0
+      ? "send"
+      : running
+        ? "stop"
+        : heldCount > 0
+          ? "resume"
+          : "send";
+
+  const resumeHeld = () => {
+    const pending = sender.resume(threadId);
+    if (pending > 0) props.onStatus(`Sending ${pending} held message${pending === 1 ? "" : "s"}`);
+    return pending;
+  };
 
   const readText = () => textareaRef.current?.plainText ?? "";
   const syncFromText = (text: string) => {
@@ -223,6 +242,21 @@ export function Composer(props: ComposerProps) {
           case "send":
             submit(false, { dispatch: action.dispatch, text: action.text });
             return;
+          case "resume": {
+            const pending = resumeHeld();
+            if (target.kind === "thread") props.onResumeQueue();
+            else if (pending === 0) props.onStatus("Nothing to resume");
+            return;
+          }
+          case "discard": {
+            const count = sender.discard(threadId);
+            props.onStatus(
+              count === 0
+                ? "No unsent messages"
+                : `${count} unsent message${count === 1 ? "" : "s"} back in the composer`,
+            );
+            return;
+          }
         }
       }
     }
@@ -231,8 +265,10 @@ export function Composer(props: ComposerProps) {
     const draftAttachments = store.getDraft(threadId).attachments;
     if (text.trim().length === 0 && draftAttachments.length === 0) {
       // Like before, Enter on an empty composer stops a running turn, but only one that
-      // showed empty; a second quick Enter after a send must not stop the run.
+      // showed empty; a second quick Enter after a send must not stop the run. Once the
+      // run stopped, it sends what Stop held, like upstream's "Resume thread" button.
       if (primary === "stop" && !stopRequested) props.onStop();
+      if (primary === "resume") resumeHeld();
       return;
     }
     if (pasting) {
@@ -250,6 +286,7 @@ export function Composer(props: ComposerProps) {
         attachments: draftAttachments,
         dispatch: chooseDispatch({
           alternate,
+          followUpBehavior: props.followUpBehavior,
           ...(requested === undefined ? {} : { requested: requested.dispatch }),
         }),
         settings,
@@ -328,8 +365,12 @@ export function Composer(props: ComposerProps) {
       : target.kind === "draft"
         ? "Start a new thread with a prompt"
         : running
-          ? "Queue a follow-up (Alt+Enter steers)"
-          : "Ask for follow-up changes or attach images";
+          ? props.followUpBehavior === "steer"
+            ? "Steer the run (⌘Enter or Alt+Enter queues)"
+            : "Queue a follow-up (⌘Enter or Alt+Enter steers)"
+          : heldCount > 0
+            ? "Enter sends held messages; /discard edits them"
+            : "Ask for follow-up changes or attach images";
 
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
@@ -445,7 +486,13 @@ export function Composer(props: ComposerProps) {
             variant={primary}
             disabled={pasting || (primary === "send" && !hasText && attachments.length === 0)}
             theme={theme}
-            onPress={() => (primary === "stop" ? props.onStop() : submit(false))}
+            onPress={() =>
+              primary === "stop"
+                ? props.onStop()
+                : primary === "resume"
+                  ? resumeHeld()
+                  : submit(false)
+            }
           />
         </box>
       </box>
@@ -568,7 +615,7 @@ function ToolbarButton(props: {
 }
 
 function SendButton(props: {
-  variant: "send" | "stop";
+  variant: "send" | "stop" | "resume";
   disabled: boolean;
   theme: TuiTheme;
   onPress: () => void;
@@ -603,7 +650,7 @@ function SendButton(props: {
       }}
     >
       <text
-        content={stop ? "■" : "↑"}
+        content={stop ? "■" : props.variant === "resume" ? "▶" : "↑"}
         style={{
           fg: props.disabled ? palette.subtle : props.theme.colors.primaryButtonText,
         }}
@@ -691,13 +738,25 @@ function PendingSendRow(props: { entry: ComposerSendEntry; running: boolean; the
           : entry.send.dispatch === "steer"
             ? "Steering…"
             : "Queueing…"
-      : "Not sent yet; retrying when connected";
+      : entry.status === "held"
+        ? "Held after Stop:"
+        : entry.status === "stuck"
+          ? "No reply (/resume retries, /discard edits):"
+          : "Not sent yet; retrying when connected";
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
       <text
         wrapMode="none"
-        content={`󰁝 ${label} `}
-        style={{ fg: entry.status === "sending" ? palette.info : palette.warning, flexShrink: 0 }}
+        content={`${entry.status === "held" ? "󰏤" : "󰁝"} ${label} `}
+        style={{
+          fg:
+            entry.status === "sending"
+              ? palette.info
+              : entry.status === "held"
+                ? palette.subtle
+                : palette.warning,
+          flexShrink: 0,
+        }}
       />
       <text
         wrapMode="none"

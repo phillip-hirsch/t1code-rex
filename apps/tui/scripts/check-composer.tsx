@@ -13,9 +13,14 @@ import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { act, createRef, type RefObject } from "react";
 
 import { Composer, type ComposerHandle } from "../src/composer.tsx";
-import { createComposerSender } from "../src/composerSender.ts";
+import { createComposerSend, DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
+import {
+  createComposerSender,
+  type ComposerCommandResult,
+  type ComposerSender,
+} from "../src/composerSender.ts";
 import type { ComposerSettings } from "../src/composerSettings.ts";
-import { createComposerStore } from "../src/composerStore.ts";
+import { createComposerStore, type ComposerStore } from "../src/composerStore.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
 
 let failures = 0;
@@ -51,6 +56,74 @@ function Harness(props: {
   return <>{props.children}</>;
 }
 
+interface Mounted {
+  readonly setup: Awaited<ReturnType<typeof testRender>>;
+  readonly stops: () => number;
+}
+
+async function mountComposer(input: {
+  readonly store: ComposerStore;
+  readonly sender: ComposerSender;
+  readonly running: boolean;
+}): Promise<Mounted> {
+  let stops = 0;
+  const composer = createRef<ComposerHandle>();
+  const setup = await testRender(
+    <Harness composer={composer}>
+      <Composer
+        ref={composer}
+        target={{ kind: "thread", threadId, projectId: ProjectId.make("p") }}
+        store={input.store}
+        sender={input.sender}
+        theme={DEFAULT_TUI_THEME}
+        focused
+        baseSettings={settings}
+        modelLabel={() => "Claude Haiku 5.5"}
+        providerBadge={() => ({ icon: "✱", color: "#ffffff" })}
+        running={input.running}
+        stopRequested={false}
+        followUpBehavior={DEFAULT_FOLLOW_UP_BEHAVIOR}
+        clipboardDir="/tmp"
+        onFocus={() => undefined}
+        onStop={() => {
+          stops += 1;
+        }}
+        onResumeQueue={() => undefined}
+        onExit={() => undefined}
+        onNewThread={() => undefined}
+        onOpenModelPicker={() => undefined}
+        onSetInteractionMode={() => undefined}
+        onSetRuntimeMode={() => undefined}
+        onStatus={() => undefined}
+      />
+    </Harness>,
+    { width: 70, height: 12, kittyKeyboard: true },
+  );
+  await settle(setup.renderOnce);
+  return { setup, stops: () => stops };
+}
+
+/** A sender whose dispatches land in `sent`; `reply` answers each one. */
+function recordingSender(
+  store: ComposerStore,
+  reply: (input: StartThreadTurnInput) => Promise<ComposerCommandResult> = () =>
+    Promise.resolve({ ok: true }),
+) {
+  const sent: Array<StartThreadTurnInput> = [];
+  const sender = createComposerSender({
+    store,
+    startTurn: (input) => {
+      sent.push(input);
+      return reply(input);
+    },
+    setRuntimeMode: () => Promise.resolve({ ok: true }),
+    setInteractionMode: () => Promise.resolve({ ok: true }),
+    threadSettings: () => settings,
+    schedule: () => () => undefined,
+  });
+  return { sent, sender };
+}
+
 /** A composer on a running thread, with text and one image, as two quick Enters find it. */
 async function checkDoubleEnter(): Promise<void> {
   const store = createComposerStore({ initialPrefs: {}, persist: null });
@@ -63,50 +136,8 @@ async function checkDoubleEnter(): Promise<void> {
     sizeBytes: 68,
     dataUrl: "data:image/png;base64,AAAA",
   });
-  const sent: Array<StartThreadTurnInput> = [];
-  const sender = createComposerSender({
-    store,
-    startTurn: (input) => {
-      sent.push(input);
-      return Promise.resolve({ ok: true });
-    },
-    setRuntimeMode: () => Promise.resolve({ ok: true }),
-    setInteractionMode: () => Promise.resolve({ ok: true }),
-    threadSettings: () => settings,
-    schedule: () => () => undefined,
-  });
-  let stops = 0;
-  const composer = createRef<ComposerHandle>();
-  const setup = await testRender(
-    <Harness composer={composer}>
-      <Composer
-        ref={composer}
-        target={{ kind: "thread", threadId, projectId: ProjectId.make("p") }}
-        store={store}
-        sender={sender}
-        theme={DEFAULT_TUI_THEME}
-        focused
-        baseSettings={settings}
-        modelLabel={() => "Claude Haiku 5.5"}
-        providerBadge={() => ({ icon: "✱", color: "#ffffff" })}
-        running
-        stopRequested={false}
-        clipboardDir="/tmp"
-        onFocus={() => undefined}
-        onStop={() => {
-          stops += 1;
-        }}
-        onExit={() => undefined}
-        onNewThread={() => undefined}
-        onOpenModelPicker={() => undefined}
-        onSetInteractionMode={() => undefined}
-        onSetRuntimeMode={() => undefined}
-        onStatus={() => undefined}
-      />
-    </Harness>,
-    { width: 70, height: 12 },
-  );
-  await settle(setup.renderOnce);
+  const { sent, sender } = recordingSender(store);
+  const { setup, stops } = await mountComposer({ store, sender, running: true });
   // Both Enters land before React renders again.
   act(() => {
     setup.mockInput.pressEnter();
@@ -120,17 +151,91 @@ async function checkDoubleEnter(): Promise<void> {
     sent.filter((input) => input.message.attachments.length > 0).length,
     1,
   );
-  check("S2: the second Enter doesn't stop the run", stops, 0);
+  check("S2: the second Enter doesn't stop the run", stops(), 0);
   check("S2: the composer is empty after", store.getDraft(threadId).attachments.length, 0);
 
   // Control: Enter on a composer that showed empty during a run still stops it.
   act(() => setup.mockInput.pressEnter());
   await settle(setup.renderOnce);
-  check("S2 control: Enter on an empty composer stops the run", stops, 1);
+  check("S2 control: Enter on an empty composer stops the run", stops(), 1);
+  setup.renderer.destroy();
+  sender.dispose();
+}
+
+/** Upstream web's default: Enter steers a busy run, Cmd/Ctrl+Enter queues (Alt+Enter too). */
+async function checkBusyEnter(): Promise<void> {
+  const store = createComposerStore({ initialPrefs: {}, persist: null });
+  const { sent, sender } = recordingSender(store);
+  const { setup } = await mountComposer({ store, sender, running: true });
+  check(
+    "parity: the busy placeholder says Enter steers",
+    setup.captureCharFrame().includes("Steer the run"),
+    true,
+  );
+  const presses: ReadonlyArray<[string, Parameters<typeof setup.mockInput.pressEnter>[0]]> = [
+    ["Enter", undefined],
+    ["Cmd+Enter", { super: true }],
+    ["Ctrl+Enter", { ctrl: true }],
+    ["Alt+Enter", { meta: true }],
+  ];
+  for (const [label, modifiers] of presses) {
+    await act(async () => {
+      await setup.mockInput.typeText(label);
+    });
+    await settle(setup.renderOnce);
+    act(() => setup.mockInput.pressEnter(modifiers));
+    await settle(setup.renderOnce);
+  }
+  check("parity: Enter steers a busy run", sent[0]?.dispatchMode, "steer");
+  check("parity: Cmd+Enter queues", sent[1]?.dispatchMode, "queue");
+  check("parity: Ctrl+Enter queues", sent[2]?.dispatchMode, "queue");
+  check("parity: Alt+Enter queues", sent[3]?.dispatchMode, "queue");
+  setup.renderer.destroy();
+  sender.dispose();
+}
+
+/** N3: Stop holds unsent messages; Enter on the empty composer after the run stops sends them. */
+async function checkResumeHeld(): Promise<void> {
+  const store = createComposerStore({ initialPrefs: {}, persist: null });
+  let answerFirst: (result: ComposerCommandResult) => void = () => undefined;
+  const { sent, sender } = recordingSender(store, (input) =>
+    input.message.text === "first"
+      ? new Promise((resolve) => {
+          answerFirst = resolve;
+        })
+      : Promise.resolve({ ok: true }),
+  );
+  const base = { target: { kind: "thread" as const, threadId, projectId: ProjectId.make("p") } };
+  const make = (text: string) =>
+    createComposerSend({ ...base, text, attachments: [], dispatch: "queue", settings });
+  let held = 0;
+  act(() => {
+    void sender.send(make("first"));
+    void sender.send(make("second"));
+    held = sender.hold(threadId);
+  });
+  check("N3: Stop holds the message behind the one in flight", held, 1);
+  await act(async () => {
+    answerFirst({ ok: true });
+    await settle(() => Promise.resolve());
+  });
+  check("N3: nothing more goes out after Stop", sent.length, 1);
+  const { setup } = await mountComposer({ store, sender, running: false });
+  check(
+    "N3: the held message shows as held",
+    setup.captureCharFrame().includes("Held after Stop: second"),
+    true,
+  );
+  act(() => setup.mockInput.pressEnter());
+  await settle(setup.renderOnce);
+  check("N3: Enter on the empty composer sends it", sent.at(-1)?.message.text, "second");
+  check("N3: sent once", sent.filter((input) => input.message.text === "second").length, 1);
   setup.renderer.destroy();
   sender.dispose();
 }
 
 await checkDoubleEnter();
+await checkBusyEnter();
+await checkResumeHeld();
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

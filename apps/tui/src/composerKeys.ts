@@ -59,8 +59,13 @@ export function resolveComposerKey(
       return { type: "slash-complete" };
     }
   }
+  // Upstream's alternate send is Cmd/Ctrl+Enter; Alt+Enter also works, since many
+  // terminals only report Cmd or Ctrl with Enter under the kitty keyboard protocol.
   if (isEnterKey(name) && !key.shift) {
-    return { type: "submit", alternate: Boolean(key.meta || key.option) };
+    return {
+      type: "submit",
+      alternate: Boolean(key.meta || key.option || key.super || key.ctrl),
+    };
   }
   if (name === "escape") return state.running && !state.stopRequested ? { type: "stop" } : null;
   if (key.ctrl && name === "y") return { type: "paste-image" };

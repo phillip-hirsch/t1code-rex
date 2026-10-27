@@ -43,15 +43,21 @@ function send(overrides: Partial<ComposerSend> = {}): ComposerSend {
 }
 
 describe("chooseDispatch", () => {
-  it("queues on Enter and steers on Alt+Enter, whatever the cached run state says", () => {
-    expect(chooseDispatch({ alternate: false })).toBe("queue");
-    expect(chooseDispatch({ alternate: true })).toBe("steer");
+  it("steers on Enter and queues on the alternate key by default, as upstream web does", () => {
+    expect(chooseDispatch({ alternate: false })).toBe("steer");
+    expect(chooseDispatch({ alternate: true })).toBe("queue");
+  });
+
+  it("swaps the two when the followUpBehavior pref says queue, like upstream's setting", () => {
+    expect(chooseDispatch({ alternate: false, followUpBehavior: "queue" })).toBe("queue");
+    expect(chooseDispatch({ alternate: true, followUpBehavior: "queue" })).toBe("steer");
   });
 
   it("keeps an explicit /queue or /steer even when the thread looks idle", () => {
     // A stale idle snapshot must not turn /queue into a dispatch that can steer a live run.
     expect(chooseDispatch({ alternate: false, requested: "queue" })).toBe("queue");
     expect(chooseDispatch({ alternate: false, requested: "steer" })).toBe("steer");
+    expect(chooseDispatch({ alternate: true, requested: "steer" })).toBe("steer");
   });
 });
 

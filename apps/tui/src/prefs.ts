@@ -9,6 +9,7 @@ import {
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import type { ComposerDispatch, PendingComposerSend } from "./composerSend.ts";
 import type { TuiPaths } from "./config.ts";
 import type { TuiThemeId } from "./theme.ts";
 
@@ -49,6 +50,10 @@ export interface TuiPrefs {
   readonly threadLastVisitedAtById?: Readonly<Record<string, string>>;
   readonly draftThreadsByProjectId?: Readonly<Record<string, PersistedDraftThreadState>>;
   readonly composerDraftsByThreadId?: Readonly<Record<string, PersistedComposerDraft>>;
+  /** Sends that may have reached the server when tr3x quit; the next launch finishes them. */
+  readonly composerPendingSends?: readonly PendingComposerSend[];
+  /** What Enter does while a run is busy, as upstream's "Follow-up behavior"; steer by default. */
+  readonly followUpBehavior?: ComposerDispatch;
   readonly mainView?:
     | "thread"
     | "settings"

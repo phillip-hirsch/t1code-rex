@@ -26,6 +26,17 @@ Linux notes:
 - Bundled T3 Code server (orchestration v2) for local use
 - Codex-first workflow tuned for terminal usage
 
+## Composer
+
+Keys match upstream T3 Code's web app:
+
+- **Enter** sends. While a run is busy, Enter steers it, the way upstream's default "Follow-up behavior" does. **Cmd+Enter** or **Ctrl+Enter** queues the message behind the run instead. Many terminals only report Cmd or Ctrl with Enter under the kitty keyboard protocol, so **Alt+Enter** queues too. `/steer <message>` and `/queue <message>` do the same from any terminal. Set `"followUpBehavior": "queue"` in `prefs.json` to swap Enter and the alternate key, like upstream's setting.
+- **Shift+Enter** or **Ctrl+J** adds a newline.
+- **Esc** stops a run. Ctrl+C clears the text, then stops a run, then quits. Enter on an empty composer stops a busy run too.
+- After a stop, messages that hadn't gone out yet are held, like the queue the server holds. Enter on the empty composer or `/resume` sends them (`/resume` also releases the server's held queue). `/discard` puts them back in the composer. Sending a new message releases the hold, held messages first, as upstream does.
+- A message that gets no reply for 30 seconds shows as stuck. `/resume` sends it again with the same ids, so the server doesn't take it twice, and `/discard` puts it back in the composer. If it may already have been sent, the composer says so.
+- On quit, messages that may have reached the server are saved and sent again on the next launch with the same ids. Messages that never went out go back into their thread's composer. A window that can't save prefs (a Rex thread tab, or a second main window) asks you to quit again before dropping unsent messages.
+
 ## Server and data
 
 tr3x starts upstream's T3 Code server in `desktop` mode on `127.0.0.1` and keeps its data under `~/.tr3x` (`TR3X_HOME`), so it never shares a data directory with a T3 Code install in `~/.t3`. The server needs Node 24 or newer on your `PATH`; set `TR3X_NODE_BIN` to use another binary.

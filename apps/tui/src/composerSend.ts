@@ -21,18 +21,23 @@ export type ComposerTarget =
 export type ComposerAttachment = UploadChatImageAttachment & { readonly id: string };
 
 /**
- * How a message meets a run in progress. Enter queues behind it and Alt+Enter steers it; on
- * an idle thread both start a run (client-runtime and the server resolve that, from the
- * thread's live state). So the choice never depends on the TUI's cached run state, which
- * can be stale: an explicit `/queue` must never become a dispatch that steers a live run.
+ * How a message meets a busy run: Enter steers and the alternate key queues, as upstream's
+ * default `followUpBehavior`, which the pref of that name swaps. An idle thread starts a run
+ * either way, resolved from live state, so this never reads the TUI's cached run state.
  */
 export type ComposerDispatch = "queue" | "steer";
 
+export const DEFAULT_FOLLOW_UP_BEHAVIOR: ComposerDispatch = "steer";
+
 export function chooseDispatch(input: {
   readonly alternate: boolean;
+  readonly followUpBehavior?: ComposerDispatch;
   readonly requested?: ComposerDispatch;
 }): ComposerDispatch {
-  return input.requested ?? (input.alternate ? "steer" : "queue");
+  if (input.requested !== undefined) return input.requested;
+  const primary = input.followUpBehavior ?? DEFAULT_FOLLOW_UP_BEHAVIOR;
+  if (!input.alternate) return primary;
+  return primary === "steer" ? "queue" : "steer";
 }
 
 /** One message on its way to the server. Its ids stay fixed, so a retry can't double-send. */
@@ -70,6 +75,20 @@ export type ComposerSettingsCommand =
       readonly commandId: CommandId;
       readonly value: ComposerSettings["interactionMode"];
     };
+
+/** One step of a send's plan: a mode change, then the message itself. */
+export type ComposerStage = ComposerSettingsCommand | { readonly kind: "start-turn" };
+
+/**
+ * A send that may already have reached the server, saved at quit with its ids and plan so
+ * the next launch finishes it; the server answers a repeated id from its command receipt.
+ */
+export interface PendingComposerSend {
+  readonly send: ComposerSend;
+  readonly stages: ReadonlyArray<ComposerStage>;
+  /** Stages before this one were accepted. */
+  readonly next: number;
+}
 
 /**
  * Mode changes a send applies first, each with an id derived from the send's own. `base` is
@@ -169,10 +188,10 @@ export function classifySendFailure(error: unknown, interrupted: boolean): "retr
   return isTransportConnectionErrorMessage(message) ? "retry" : "restore";
 }
 
-const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000];
+const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 
 export function retryDelayMs(attempt: number): number {
-  return RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)] ?? 15_000;
+  return RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)] ?? 60_000;
 }
 
 /** A readable reason for a send the server turned down. */

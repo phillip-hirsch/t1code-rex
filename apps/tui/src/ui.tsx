@@ -36,7 +36,11 @@ import {
 import packageJson from "../package.json" with { type: "json" };
 import { copyTextToClipboard } from "./clipboardText.ts";
 import { Composer, QueuedMessages, type ComposerHandle, type ProviderBadge } from "./composer.tsx";
-import { describeSendFailure, type ComposerTarget } from "./composerSend.ts";
+import {
+  DEFAULT_FOLLOW_UP_BEHAVIOR,
+  describeSendFailure,
+  type ComposerTarget,
+} from "./composerSend.ts";
 import { createComposerSender } from "./composerSender.ts";
 import {
   applySettingsPatch,
@@ -360,16 +364,29 @@ function Shell(props: AppProps) {
         const timer = setTimeout(run, delayMs);
         return () => clearTimeout(timer);
       },
+      // Sends the last quit saved because they may have reached the server.
+      restore: composerStore.pendingSendsAtLaunch(),
       onFailure: (send, error, action) =>
         logger.log("composer.send.failed", {
           threadId: send.target.threadId,
           commandId: send.commandId,
           action,
-          error: describeSendFailure(error),
+          error: action === "stuck" ? "no reply yet" : describeSendFailure(error),
         }),
     }),
   );
   useEffect(() => () => sender.dispose(), [sender]);
+  // Forget modes and launches the shell now lists.
+  const listedThreads = sidebar.threadsById;
+  useEffect(
+    () =>
+      sender.reconcile((threadId) => {
+        const thread = listedThreads.get(threadId);
+        return thread ? threadSettings(thread) : null;
+      }),
+    [sender, listedThreads],
+  );
+  const followUpBehavior = props.initialPrefs.followUpBehavior ?? DEFAULT_FOLLOW_UP_BEHAVIOR;
 
   const connectionState = Option.getOrNull(AsyncResult.value(connectionResult));
   const connectionView = describeConnection(connectionState, connection.session.mode);
@@ -392,15 +409,40 @@ function Shell(props: AppProps) {
   // Rex tabs open from the main window only; a thread tab never opens more tabs.
   const rexTabs = rex !== null && !threadWindowLaunch;
 
-  // Unsaved draft edits go to disk before the app exits.
-  const requestExit = useCallback(() => {
+  // A window that can't save prefs asks once before dropping unsent messages.
+  const [exitArmed, setExitArmed] = useState(false);
+  useEffect(() => {
+    if (!exitArmed) return;
+    const timer = setTimeout(() => setExitArmed(false), 5_000);
+    return () => clearTimeout(timer);
+  }, [exitArmed]);
+  // Unsent messages and unsaved draft edits go to disk before the app exits.
+  const finishExit = useCallback(() => {
+    if (composerStore.canPersist) {
+      sender.handOff();
+    } else {
+      const pending = sender.pendingCount();
+      if (pending > 0) logger.log("composer.sends.dropped", { count: pending });
+    }
     composerStore.flush();
     onRequestExit?.();
-  }, [composerStore, onRequestExit]);
+  }, [composerStore, logger, onRequestExit, sender]);
+  const requestExit = useCallback(() => {
+    const pending = composerStore.canPersist ? 0 : sender.pendingCount();
+    if (pending > 0 && !exitArmed) {
+      setStatus(
+        `${pending} message${pending === 1 ? "" : "s"} not sent yet, and this window can't save them. Quit again to drop them`,
+      );
+      setExitArmed(true);
+      return;
+    }
+    finishExit();
+  }, [composerStore, exitArmed, finishExit, sender]);
 
+  // A signal quits without asking.
   useEffect(() => {
-    if ((interruptRequestToken ?? 0) > 0) requestExit();
-  }, [interruptRequestToken, requestExit]);
+    if ((interruptRequestToken ?? 0) > 0) finishExit();
+  }, [interruptRequestToken, finishExit]);
 
   // Sends that lost the connection go out again, with the same ids, once it's back.
   const connected = connectionView.label === "Connected";
@@ -655,7 +697,13 @@ function Shell(props: AppProps) {
     if (!activeThread || !running) return;
     const runKey = activeRunId ?? "unknown";
     setStopRequestedRunId(runKey);
-    setStatus("Stopping");
+    // Messages not sent yet stay here until resumed, like the queue the server holds.
+    const held = sender.hold(activeThread.id);
+    setStatus(
+      held === 0
+        ? "Stopping"
+        : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. Enter or /resume sends, /discard edits`,
+    );
     void connection
       .interruptTurn({
         commandId: CommandId.make(NodeCrypto.randomUUID()),
@@ -666,6 +714,15 @@ function Shell(props: AppProps) {
         if (result.ok) return;
         setStopRequestedRunId(null);
         setStatus(`Stop failed: ${describeSendFailure(result.error)}`);
+      });
+  };
+
+  // `/resume`: releases what the server holds after Stop, like upstream's "Resume thread".
+  const resumeQueue = (threadId: ThreadId) => {
+    void connection
+      .resumeQueue({ commandId: CommandId.make(NodeCrypto.randomUUID()), threadId })
+      .then((result) => {
+        if (!result.ok) setStatus(`Resume failed: ${describeSendFailure(result.error)}`);
       });
   };
 
@@ -1035,9 +1092,11 @@ function Shell(props: AppProps) {
                 providerBadge={providerBadge}
                 running={running}
                 stopRequested={stopRequested}
+                followUpBehavior={followUpBehavior}
                 clipboardDir={NodePath.join(paths.stateHomeDir, "clipboard")}
                 onFocus={() => setFocusArea("composer")}
                 onStop={stopRun}
+                onResumeQueue={() => resumeQueue(composerTarget.threadId)}
                 onExit={requestExit}
                 onNewThread={() => openNewThread(composerTarget.projectId)}
                 onOpenModelPicker={toggleModelPicker}

@@ -1,4 +1,5 @@
 import { Connection } from "@t3tools/client-runtime/connection";
+import type { ResumeThreadQueueInput } from "@t3tools/client-runtime/operations";
 import { createEnvironmentCatalogAtoms } from "@t3tools/client-runtime/state/connections";
 import { createEnvironmentServerConfigsAtom } from "@t3tools/client-runtime/state/shell";
 import { createServerEnvironmentAtoms } from "@t3tools/client-runtime/state/server";
@@ -156,6 +157,8 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     startTurn: (input: StartThreadTurnInput) => runThreadCommand(threadCommands.startTurn, input),
     interruptTurn: (input: InterruptThreadTurnInput) =>
       runThreadCommand(threadCommands.interruptTurn, input),
+    resumeQueue: (input: ResumeThreadQueueInput) =>
+      runThreadCommand(threadCommands.resumeThreadQueue, input),
     setRuntimeMode: (input: SetThreadRuntimeModeInput) =>
       runThreadCommand(threadCommands.setRuntimeMode, input),
     setInteractionMode: (input: SetThreadInteractionModeInput) =>
