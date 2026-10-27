@@ -1,8 +1,8 @@
 # tr3x fork
 
-This repository is tr3x: T3 Code's server and orchestration v2, used from Rex, with each thread in a Rex tab. The rest of this file is upstream T3 Code's guide and still applies to the shared code.
+This repository is tr3x. The plan is T3 Code's server and orchestration v2, used from Rex, with each thread in a Rex tab. The rest of this file is upstream T3 Code's guide and still applies to the shared code.
 
-- The design is `docs/tr3x-design.md` (PR #24). The tr3x package (`apps/tr3x`) comes in a later PR.
+- The design is in [PR #24](https://github.com/phillip-hirsch/tr3x/pull/24). The tr3x package (`apps/tr3x`) comes in a later PR.
 - Everything else tracks upstream `pingdotgg/t3code`. Keep it as close to upstream as possible, so future merges stay cheap.
 - This fork doesn't publish to npm and has no GitHub workflows.
 - Use conventional commit messages, e.g. `feat(tr3x): open threads as Rex tabs`.

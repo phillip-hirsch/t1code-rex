@@ -6,11 +6,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
-import * as Path from "effect/Path";
-import * as Schema from "effect/Schema";
 import { Command } from "effect/cli";
 import { HttpClient, HttpClientError, HttpClientResponse, UrlParams } from "effect/http";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import {
   buildDiscordReleaseAnnouncement,
@@ -49,19 +46,6 @@ const cliArgs = (target: "latest" | "prerelease") => [
 const configLayer = ConfigProvider.layer(
   ConfigProvider.fromEnv({ env: { DISCORD_WEBHOOK_URL: webhookUrl.href } }),
 );
-const PayloadSchema = Schema.fromJsonString(
-  Schema.Struct({
-    content: Schema.String,
-    allowed_mentions: Schema.Struct({
-      parse: Schema.Array(Schema.String),
-      roles: Schema.Array(Schema.String),
-    }),
-    embeds: Schema.Array(
-      Schema.Struct({ title: Schema.String, description: Schema.String, url: Schema.String }),
-    ),
-  }),
-);
-const decodePayload = Schema.decodeUnknownSync(PayloadSchema);
 const payloadDescription = (payloads: ReturnType<typeof buildDiscordReleaseAnnouncement>) =>
   payloads.flatMap((payload) => payload.embeds.map((embed) => embed.description)).join("");
 const captureClient = (requests: string[], status = 204) =>
@@ -311,136 +295,7 @@ it.effect(
     }),
 );
 
-function workflowRun(workflow: string, stepName: string) {
-  const step = workflow.split(`      - name: ${stepName}\n`)[1]?.split("\n      - name:")[0];
-  assert.ok(step, `Missing workflow step: ${stepName}`);
-  const run = step.split("        run: |\n")[1];
-  assert.ok(run, `Missing run block: ${stepName}`);
-  return run
-    .split("\n")
-    .map((line) => line.replace(/^          /, ""))
-    .join("\n");
-}
-
-it.layer(NodeServices.layer)("Discord release CLI and workflow", (it) => {
-  it.effect("passes the published nightly body from the workflow to ordered sends", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const temp = yield* fs.makeTempDirectoryScoped({ prefix: "discord release " });
-      const workflow = yield* fs.readFileString(
-        yield* path.fromFileUrl(new URL("../.github/workflows/release.yml", import.meta.url)),
-      );
-      const publishedNotes =
-        Array.from({ length: 50 }, () => notes).join("\n\n") +
-        '\n* Literal $(touch "$RUNNER_TEMP/executed") and `touch "$RUNNER_TEMP/executed"`';
-      const read = workflowRun(workflow, "Read published release notes");
-      const shellEnv = {
-        RUNNER_TEMP: temp,
-        RELEASE_TAG: nightlyAnnouncement.tag,
-        RELEASE_CHANNEL: "nightly",
-        FIXTURE_NOTES: publishedNotes,
-      };
-      const readStatus = yield* spawner.exitCode(
-        ChildProcess.make(
-          "bash",
-          [
-            "-e",
-            "-c",
-            `gh() { [ "$*" = 'release view v1.2.3 --json body --jq .body // ""' ] || return 1; printf '%s' "$FIXTURE_NOTES"; }\n${read}`,
-          ],
-          { env: shellEnv },
-        ),
-      );
-      assert.equal(readStatus, 0);
-      assert.equal(yield* fs.readFileString(`${temp}/discord-release-notes.md`), publishedNotes);
-      const replacements: Record<string, string> = {
-        "needs.preflight.outputs.release_name": latestAnnouncement.releaseName,
-        "needs.preflight.outputs.version": latestAnnouncement.version,
-        "needs.preflight.outputs.tag": latestAnnouncement.tag,
-        "github.repository": "pingdotgg/t3code",
-      };
-      const announce = workflowRun(workflow, "Announce prerelease on Discord").replace(
-        /\$\{\{ (.*?) \}\}/g,
-        (_, key: string) => {
-          assert.ok(replacements[key], `Unexpected expression: ${key}`);
-          return replacements[key]!;
-        },
-      );
-      const announceStatus = yield* spawner.exitCode(
-        ChildProcess.make(
-          "bash",
-          ["-e", "-c", `node() { printf '%s\\0' "$@" > "$RUNNER_TEMP/args"; }\n${announce}`],
-          { env: { RUNNER_TEMP: temp, DISCORD_MENTION_ROLE_ID: latestAnnouncement.roleId } },
-        ),
-      );
-      assert.equal(announceStatus, 0);
-      const args = (yield* fs.readFileString(`${temp}/args`)).split("\0").slice(1, -1);
-      const requests: string[] = [];
-      yield* runCli(args).pipe(Effect.provide([configLayer, captureClient(requests)]));
-      const payloads = requests.map((request) => decodePayload(request));
-      assert.ok(payloads.length > 2);
-      assert.equal(
-        payloads.flatMap((payload) => payload.embeds.map((embed) => embed.description)).join(""),
-        `${intro}\n\n${Array.from({ length: 50 }, () => formattedNotes).join("\n\n")}\n* Literal $(touch "$RUNNER_TEMP/executed") and \`touch "$RUNNER_TEMP/executed"\``,
-      );
-      for (const [index, payload] of payloads.entries())
-        assert.deepStrictEqual(payload.allowed_mentions, {
-          parse: [],
-          roles: index === 0 ? [latestAnnouncement.roleId] : [],
-        });
-      assert.equal(yield* fs.exists(`${temp}/executed`), false);
-      assert.equal(
-        yield* spawner.exitCode(
-          ChildProcess.make("bash", ["-e", "-c", `gh() { return 99; }\n${read}`], {
-            env: { ...shellEnv, RELEASE_CHANNEL: "stable" },
-          }),
-        ),
-        0,
-      );
-      assert.equal(yield* fs.readFileString(`${temp}/discord-release-notes.md`), "");
-      assert.equal(
-        yield* spawner.exitCode(
-          ChildProcess.make(
-            "bash",
-            ["-e", "-c", `gh() { printf '%s' 'partial changelog'; return 42; }\n${read}`],
-            { env: shellEnv },
-          ),
-        ),
-        0,
-      );
-      assert.equal(yield* fs.readFileString(`${temp}/discord-release-notes.md`), "");
-      const fallbackRequests: string[] = [];
-      yield* runCli(args).pipe(Effect.provide([configLayer, captureClient(fallbackRequests)]));
-      assert.equal(fallbackRequests.length, 1);
-      const fallback = decodePayload(fallbackRequests[0]!);
-      assert.equal(fallback.embeds[0]?.description, intro);
-      assert.equal(fallback.content, `-# <@&${latestAnnouncement.roleId}>`);
-      assert.deepStrictEqual(fallback.allowed_mentions, {
-        parse: [],
-        roles: [latestAnnouncement.roleId],
-      });
-      assert.ok(
-        workflow
-          .split("      - name: Announce prerelease on Discord\n")[1]
-          ?.startsWith("        if: needs.preflight.outputs.is_prerelease == 'true'\n"),
-      );
-      assert.ok(workflow.includes("GH_REPO: ${{ github.repository }}"));
-      assert.ok(workflow.includes("RELEASE_TAG: ${{ needs.preflight.outputs.tag }}"));
-      assert.ok(
-        !workflowRun(workflow, "Announce latest release on Discord").includes(
-          "--release-notes-file",
-        ),
-      );
-      assert.ok(
-        workflow
-          .slice(workflow.indexOf("  announce_discord:"))
-          .includes("needs.preflight.outputs.release_channel != 'preview'"),
-      );
-    }),
-  );
-
+it.layer(NodeServices.layer)("Discord release CLI", (it) => {
   it.effect("fails before sending when the requested nightly notes file cannot be read", () =>
     Effect.gen(function* () {
       const requests: string[] = [];
