@@ -1,19 +1,35 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+// prefsLock.ts needs Bun (bun:sqlite) and Vitest runs on Node, so every test here drives
+// real Bun processes running prefsLockTestProbe.ts against one temp config dir.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeReadline from "node:readline";
+import * as NodeURL from "node:url";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import {
-  acquirePrefsLock,
-  isProcessAlive,
-  prefsLockPath,
-  resolvePrefsAccess,
-} from "./prefsLock.ts";
+const PROBE_PATH = NodeURL.fileURLToPath(new URL("./prefsLockTestProbe.ts", import.meta.url));
+const BUN_ON_PATH = NodeChildProcess.spawnSync("bun", ["--version"]).error === undefined;
+
+interface ProbeResult {
+  readonly kind: string;
+  readonly error?: string;
+}
+
+interface Probe {
+  /** Resolves prefs access in the probe and returns what it got. */
+  readonly go: () => Promise<ProbeResult>;
+  readonly release: () => Promise<ProbeResult>;
+  /** kill -9, resolved once the process is gone. */
+  readonly kill: () => Promise<void>;
+}
 
 const tempRoots: string[] = [];
-afterEach(() => {
+const running = new Set<NodeChildProcess.ChildProcess>();
+
+afterEach(async () => {
+  await Promise.all([...running].map(killChild));
   for (const root of tempRoots.splice(0)) NodeFS.rmSync(root, { recursive: true, force: true });
 });
 
@@ -24,97 +40,113 @@ function makePrefsPath(): string {
   return NodePath.join(root, "config", "prefs.json");
 }
 
-/** The pid of a process that has already exited. */
-function deadPid(): number {
-  const { pid } = NodeChildProcess.spawnSync("true");
-  if (pid === undefined || isProcessAlive(pid)) throw new Error("expected an exited pid");
-  return pid;
+function killChild(child: NodeChildProcess.ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+  child.kill("SIGKILL");
+  return exited;
 }
 
-// Two live pids: this test process and its parent.
-const OTHER_WINDOW = process.ppid;
-const THIS_WINDOW = process.pid;
-
-describe("acquirePrefsLock", () => {
-  it("creates the lock holding the owner's pid and removes it on release", () => {
-    const prefsPath = makePrefsPath();
-    const lock = acquirePrefsLock(prefsPath, THIS_WINDOW);
-    expect(lock).not.toBeNull();
-    expect(NodeFS.readFileSync(prefsLockPath(prefsPath), "utf8")).toBe(`${THIS_WINDOW}\n`);
-    expect(NodeFS.readdirSync(NodePath.dirname(prefsPath))).toEqual(["prefs.json.lock"]);
-
-    lock?.release();
-    lock?.release();
-    expect(NodeFS.existsSync(prefsLockPath(prefsPath))).toBe(false);
+/** Starts a probe and resolves once it has loaded and is waiting for "go". */
+async function startProbe(prefsPath: string, mode: "write" | "read"): Promise<Probe> {
+  const child = NodeChildProcess.spawn("bun", [PROBE_PATH, prefsPath, mode], {
+    stdio: ["pipe", "pipe", "inherit"],
   });
+  running.add(child);
+  child.once("exit", () => running.delete(child));
 
-  it("leaves a second window read-only while the owner is alive", () => {
-    const prefsPath = makePrefsPath();
-    const owner = acquirePrefsLock(prefsPath, OTHER_WINDOW);
-    expect(owner).not.toBeNull();
-
-    expect(acquirePrefsLock(prefsPath, THIS_WINDOW)).toBeNull();
-    expect(NodeFS.readFileSync(prefsLockPath(prefsPath), "utf8")).toBe(`${OTHER_WINDOW}\n`);
-
-    // Once the owner quits, the next window takes the lock.
-    owner?.release();
-    const next = acquirePrefsLock(prefsPath, THIS_WINDOW);
-    expect(next).not.toBeNull();
-    expect(NodeFS.readFileSync(prefsLockPath(prefsPath), "utf8")).toBe(`${THIS_WINDOW}\n`);
-    next?.release();
+  const pending: Array<(line: string) => void> = [];
+  const buffered: string[] = [];
+  NodeReadline.createInterface({ input: child.stdout }).on("line", (line) => {
+    const waiter = pending.shift();
+    if (waiter) waiter(line);
+    else buffered.push(line);
   });
+  const nextLine = () =>
+    new Promise<string>((resolve, reject) => {
+      const line = buffered.shift();
+      if (line !== undefined) return resolve(line);
+      pending.push(resolve);
+      child.once("exit", (code, signal) =>
+        reject(new Error(`probe exited (${signal ?? code}) before answering`)),
+      );
+    });
+  const ask = async (command: string): Promise<ProbeResult> => {
+    child.stdin.write(`${command}\n`);
+    return JSON.parse(await nextLine()) as ProbeResult;
+  };
 
-  it("takes over a lock whose owner died", () => {
-    const prefsPath = makePrefsPath();
-    NodeFS.mkdirSync(NodePath.dirname(prefsPath), { recursive: true });
-    NodeFS.writeFileSync(prefsLockPath(prefsPath), `${deadPid()}\n`);
+  expect(await nextLine()).toBe("ready");
+  return { go: () => ask("go"), release: () => ask("release"), kill: () => killChild(child) };
+}
 
-    const lock = acquirePrefsLock(prefsPath, THIS_WINDOW);
-    expect(lock).not.toBeNull();
-    expect(NodeFS.readFileSync(prefsLockPath(prefsPath), "utf8")).toBe(`${THIS_WINDOW}\n`);
-    lock?.release();
-  });
+describe.skipIf(!BUN_ON_PATH)(
+  `prefs lock across Bun processes${BUN_ON_PATH ? "" : " (skipped: bun is not on PATH)"}`,
+  () => {
+    it("lets the first main window own prefs and keeps a second one read-only", async () => {
+      const prefsPath = makePrefsPath();
+      // A pid lock from an older build, naming a live process, doesn't block anyone.
+      NodeFS.mkdirSync(NodePath.dirname(prefsPath), { recursive: true });
+      NodeFS.writeFileSync(`${prefsPath}.lock`, `${process.pid}\n`);
 
-  it("takes over an unreadable lock", () => {
-    const prefsPath = makePrefsPath();
-    NodeFS.mkdirSync(NodePath.dirname(prefsPath), { recursive: true });
-    NodeFS.writeFileSync(prefsLockPath(prefsPath), "not a pid");
+      const first = await startProbe(prefsPath, "write");
+      expect(await first.go()).toEqual({ kind: "owner" });
+      const second = await startProbe(prefsPath, "write");
+      expect(await second.go()).toEqual({ kind: "locked-out" });
 
-    expect(acquirePrefsLock(prefsPath, THIS_WINDOW)).not.toBeNull();
-  });
-
-  it("doesn't remove a lock another window took over", () => {
-    const prefsPath = makePrefsPath();
-    const stale = acquirePrefsLock(prefsPath, deadPid());
-    const live = acquirePrefsLock(prefsPath, OTHER_WINDOW);
-    expect(live).not.toBeNull();
-
-    stale?.release();
-    expect(NodeFS.readFileSync(prefsLockPath(prefsPath), "utf8")).toBe(`${OTHER_WINDOW}\n`);
-    live?.release();
-  });
-});
-
-describe("resolvePrefsAccess", () => {
-  it("makes the first main window the owner and later ones read-only", () => {
-    const prefsPath = makePrefsPath();
-    const first = resolvePrefsAccess({ prefsPath, pid: OTHER_WINDOW, wantsWrites: true });
-    expect(first.kind).toBe("owner");
-    expect(resolvePrefsAccess({ prefsPath, pid: THIS_WINDOW, wantsWrites: true })).toEqual({
-      kind: "locked-out",
+      // Once the owner releases (twice, which is harmless), the next window owns prefs.
+      expect(await first.release()).toEqual({ kind: "released" });
+      const third = await startProbe(prefsPath, "write");
+      expect(await third.go()).toEqual({ kind: "owner" });
     });
 
-    if (first.kind === "owner") first.lock.release();
-    const next = resolvePrefsAccess({ prefsPath, pid: THIS_WINDOW, wantsWrites: true });
-    expect(next.kind).toBe("owner");
-    if (next.kind === "owner") next.lock.release();
-  });
+    it("frees the lock when the owner is killed", async () => {
+      const prefsPath = makePrefsPath();
+      const owner = await startProbe(prefsPath, "write");
+      expect(await owner.go()).toEqual({ kind: "owner" });
+      const lockedOut = await startProbe(prefsPath, "write");
+      expect(await lockedOut.go()).toEqual({ kind: "locked-out" });
 
-  it("never locks for a thread tab", () => {
-    const prefsPath = makePrefsPath();
-    expect(resolvePrefsAccess({ prefsPath, pid: THIS_WINDOW, wantsWrites: false })).toEqual({
-      kind: "reader",
+      await owner.kill();
+      const next = await startProbe(prefsPath, "write");
+      expect(await next.go()).toEqual({ kind: "owner" });
     });
-    expect(NodeFS.existsSync(prefsLockPath(prefsPath))).toBe(false);
-  });
-});
+
+    it("gives exactly one owner when windows start at the same instant", async () => {
+      for (let round = 0; round < 20; round += 1) {
+        const prefsPath = makePrefsPath();
+        const probes = await Promise.all(
+          Array.from({ length: 5 }, () => startProbe(prefsPath, "write")),
+        );
+        // Every probe has loaded before any of them asks for the lock.
+        const kinds = (await Promise.all(probes.map((probe) => probe.go()))).map(
+          (result) => result.kind,
+        );
+        expect(kinds.toSorted(), `round ${round}`).toEqual([
+          "locked-out",
+          "locked-out",
+          "locked-out",
+          "locked-out",
+          "owner",
+        ]);
+        await Promise.all(probes.map((probe) => probe.kill()));
+      }
+    });
+
+    it("never locks for a thread tab", async () => {
+      const prefsPath = makePrefsPath();
+      const reader = await startProbe(prefsPath, "read");
+      expect(await reader.go()).toEqual({ kind: "reader" });
+      expect(NodeFS.existsSync(NodePath.dirname(prefsPath))).toBe(false);
+    });
+
+    it("stays read-only, without crashing, when the lock file isn't a database", async () => {
+      const prefsPath = makePrefsPath();
+      NodeFS.mkdirSync(NodePath.dirname(prefsPath), { recursive: true });
+      NodeFS.writeFileSync(NodePath.join(NodePath.dirname(prefsPath), "prefs.lock.db"), "garbage");
+
+      const probe = await startProbe(prefsPath, "write");
+      expect(await probe.go()).toEqual({ kind: "locked-out", error: "file is not a database" });
+    });
+  },
+);

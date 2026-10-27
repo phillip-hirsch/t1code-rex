@@ -40,7 +40,7 @@ TR3X_TUI_ATTACH_ONLY=1 TR3X_HOST=127.0.0.1 TR3X_PORT=3773 \
 
 `TR3X_AUTH_TOKEN` is a bearer token, never a server bootstrap secret.
 
-Only one main window saves prefs for a config directory. The first one holds `prefs.json.lock` next to `prefs.json` until it quits. Any other main window reads prefs but doesn't save them, and its footer says "prefs not saved here". If the owner dies without quitting, the next window takes the lock over.
+Only one main window saves prefs for a config directory. The first one holds an OS file lock on `prefs.lock.db` next to `prefs.json` until it exits. Any other main window reads prefs but doesn't save them, and its footer says "prefs not saved here". The OS releases the lock when the owner dies, even from `kill -9`, so the next window takes it. A `prefs.json.lock` left by an older build is ignored and safe to delete.
 
 ## Rex
 

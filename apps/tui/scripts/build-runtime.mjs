@@ -12,6 +12,10 @@ const openTuiCoreDir = NodePath.dirname(
   require.resolve("@opentui/core/package.json", { paths: [packageDir] }),
 );
 const openTuiWorkerEntries = ["parser.worker.js", "parser.worker.js.map"];
+// Packages the bundle still loads from node_modules at runtime: OpenTUI's native
+// renderer (a computed import) and web-tree-sitter for the copied parser worker.
+// oxlint-disable-next-line t3code/no-global-process-runtime -- Bun build script with no Effect runtime; stages the host's native package.
+const runtimePackages = [`@opentui/core-${process.platform}-${process.arch}`, "web-tree-sitter"];
 
 await NodeFSP.rm(distDir, { force: true, recursive: true });
 await NodeFSP.mkdir(distDir, { recursive: true });
@@ -66,4 +70,14 @@ for (const entry of openTuiWorkerEntries) {
       throw error;
     }
   }
+}
+
+for (const name of runtimePackages) {
+  const sourceDir = NodePath.dirname(
+    require.resolve(`${name}/package.json`, { paths: [openTuiCoreDir] }),
+  );
+  await NodeFSP.cp(sourceDir, NodePath.join(distDir, "node_modules", name), {
+    recursive: true,
+    dereference: true,
+  });
 }
