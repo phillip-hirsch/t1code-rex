@@ -1,8 +1,8 @@
 // @effect-diagnostics globalConsole:off globalTimers:off globalDate:off nodeBuiltinImport:off -- A Bun check script against a real server; it runs outside the Effect runtime.
 /**
- * The worktree guard on a real server: a /tmp repo whose post-checkout hook fails makes a
- * failed worktree preparation, with a run held behind it. Sends and resumes from the sender
- * must start nothing until a retry makes the worktree.  bun apps/tui/scripts/check-worktree-guard.ts
+ * The worktree guard on a real server, on a /tmp repo whose post-checkout hook fails on demand.
+ * Provider-free by default (codex `no-such-model`). TR3X_CHECK_PROVIDER=1 adds paid Claude
+ * Haiku runs, so the run held behind the retried launch can follow it.
  */
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
@@ -128,7 +128,8 @@ const CODEX_FAILING: ComposerSettings = {
   runtimeMode: "full-access",
   interactionMode: "default",
 };
-// The thread that gets retried runs for real, so the runs held behind it can follow.
+// Opt-in: the thread that gets retried runs for real, so the runs held behind it can follow.
+const PAID = process.env.TR3X_CHECK_PROVIDER === "1";
 const HAIKU: ComposerSettings = {
   ...CODEX_FAILING,
   modelSelection: { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-haiku-5-5" },
@@ -233,7 +234,12 @@ try {
     },
   });
 
-  settings = HAIKU;
+  if (PAID) settings = HAIKU;
+  else {
+    console.log(
+      "note: provider-free run; TR3X_CHECK_PROVIDER=1 also checks that the held run follows the retried launch (paid Claude Haiku runs)",
+    );
+  }
   const { threadId } = await launchFailedWorktreeThread(OK_PROMPT);
   await sendDirect(threadId, OK_PROMPT, "queue");
   const before = await waitFor(threadId, "a held run", (p) => heldRuns(p).length === 1);
@@ -297,24 +303,38 @@ try {
     ready.runs.find((run) => run.id === launch!.runId)?.startedAt != null,
     true,
   );
-  // The retry let the held run follow the launch's run again, and it does, in order.
-  const followed = await waitFor(threadId, "the held run to follow", (p) =>
-    ["completed", "failed"].includes(p.runs.find((run) => run.id === heldRunId)?.status ?? ""),
-  );
-  const first = followed.runs.find((run) => run.id === launch!.runId);
-  const held = followed.runs.find((run) => run.id === heldRunId);
-  check("S3: the launch's run completed", first?.status, "completed");
-  check("S3: the held run went out after it", held?.status, "completed");
-  check(
-    "S3: in order",
-    first?.completedAt != null &&
-      held?.startedAt != null &&
-      DateTime.toEpochMillis(held.startedAt) >= DateTime.toEpochMillis(first.completedAt),
-    true,
-  );
-  check("S3: in the worktree", followed.thread.worktreePath, ready.thread.worktreePath);
+  if (PAID) {
+    // The retry let the held run follow the launch's run again, and it does, in order.
+    const followed = await waitFor(threadId, "the held run to follow", (p) =>
+      ["completed", "failed"].includes(p.runs.find((run) => run.id === heldRunId)?.status ?? ""),
+    );
+    const first = followed.runs.find((run) => run.id === launch!.runId);
+    const held = followed.runs.find((run) => run.id === heldRunId);
+    check("S3: the launch's run completed", first?.status, "completed");
+    check("S3: the held run went out after it", held?.status, "completed");
+    check(
+      "S3: in order",
+      first?.completedAt != null &&
+        held?.startedAt != null &&
+        DateTime.toEpochMillis(held.startedAt) >= DateTime.toEpochMillis(first.completedAt),
+      true,
+    );
+    check("S3: in the worktree", followed.thread.worktreePath, ready.thread.worktreePath);
+  } else {
+    // codex no-such-model fails the launch's run, and the server holds what's queued after a
+    // provider failure, so the held run can't follow here. It still mustn't start elsewhere.
+    await sleep(3_000);
+    const after = await waitFor(threadId, "the thread", () => true);
+    check(
+      "S3: the launch's run failed at the provider",
+      after.runs.find((run) => run.id === launch!.runId)?.status,
+      "failed",
+    );
+    check("S3: the held run is still held, unstarted", heldRuns(after)[0]?.id, heldRunId);
+    console.log("skip S3: the held run follows in order, in the worktree (TR3X_CHECK_PROVIDER=1)");
+  }
   const guard = connection.guardWorkspace(threadId);
-  check("S3: the guard lets sends through now", guard.blockedReason(), null);
+  check("S3: the guard lets sends through now", await guard.blockedReason(), null);
   guard.dispose();
   const next = message(threadId, OK_PROMPT, "queue");
   await sender.send(next);
@@ -326,8 +346,13 @@ try {
     afterNext.messages.some((m) => m.id === next.messageId),
     true,
   );
+  // Held runs stay held in the provider-free run.
   await waitFor(threadId, "the thread to settle", (p) =>
-    p.runs.every((run) => ["completed", "failed", "interrupted", "cancelled"].includes(run.status)),
+    p.runs.every(
+      (run) =>
+        ["completed", "failed", "interrupted", "cancelled"].includes(run.status) ||
+        (run.status === "queued" && run.queueHeld === true),
+    ),
   );
   sender.dispose();
 } catch (error) {
