@@ -1,9 +1,10 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { createClipboardImageFileName, saveClipboardImageToFile } from "./clipboardImage";
+import { createClipboardImageFileName, saveClipboardImageToFile } from "./clipboardImage.ts";
 
 type SpawnEventHandler = (...args: unknown[]) => void;
 
@@ -56,7 +57,7 @@ const tempRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
+    tempRoots.splice(0).map((root) => NodeFSP.rm(root, { recursive: true, force: true })),
   );
 });
 
@@ -80,7 +81,7 @@ describe("saveClipboardImageToFile", () => {
   });
 
   it("reads clipboard images from wl-paste on Linux", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "t1code-clipboard-"));
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-clipboard-"));
     tempRoots.push(root);
 
     const filePath = await saveClipboardImageToFile(root, {
@@ -95,11 +96,11 @@ describe("saveClipboardImageToFile", () => {
     });
 
     expect(filePath).toMatch(/\.png$/);
-    await expect(fs.readFile(filePath as string)).resolves.toEqual(Buffer.from("png-bytes"));
+    await expect(NodeFSP.readFile(filePath as string)).resolves.toEqual(Buffer.from("png-bytes"));
   });
 
   it("falls back to xclip and preserves the detected image type", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "t1code-clipboard-"));
+    const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-clipboard-"));
     tempRoots.push(root);
 
     const filePath = await saveClipboardImageToFile(root, {
@@ -114,6 +115,6 @@ describe("saveClipboardImageToFile", () => {
     });
 
     expect(filePath).toMatch(/\.jpg$/);
-    await expect(fs.readFile(filePath as string)).resolves.toEqual(Buffer.from("jpeg-bytes"));
+    await expect(NodeFSP.readFile(filePath as string)).resolves.toEqual(Buffer.from("jpeg-bytes"));
   });
 });

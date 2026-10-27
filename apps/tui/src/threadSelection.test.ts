@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   DRAFT_THREAD_ID_PREFIX,
   isDraftThreadId,
   shouldApplyWelcomeBootstrapSelection,
   shouldClearPendingCreatedThread,
-} from "./threadSelection";
+} from "./threadSelection.ts";
 
 describe("threadSelection", () => {
   it("recognizes draft thread ids", () => {

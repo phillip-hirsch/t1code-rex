@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from "node:child_process";
-
-type SpawnImpl = typeof spawn;
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeChildProcess from "node:child_process";
+type SpawnImpl = typeof NodeChildProcess.spawn;
 
 export interface OpenExternalDependencies {
   readonly env?: NodeJS.ProcessEnv;
@@ -13,6 +13,7 @@ export function resolveOpenExternalCommands(
   dependencies: OpenExternalDependencies = {},
 ): ReadonlyArray<readonly [string, ...string[]]> {
   const env = dependencies.env ?? process.env;
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
   const platform = dependencies.platform ?? process.platform;
   if (platform === "darwin") {
     return [["open", url]];
@@ -45,7 +46,7 @@ function spawnDetachedCommand(
     const child = spawnImpl(command[0], command.slice(1), {
       detached: true,
       stdio: "ignore",
-    }) as ChildProcess;
+    }) as NodeChildProcess.ChildProcess;
     child.once("error", reject);
     child.once("spawn", () => {
       child.unref();
@@ -61,11 +62,12 @@ export async function openExternalUrl(
   const commands = resolveOpenExternalCommands(url, dependencies);
   if (commands.length === 0) {
     throw new Error(
+      // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
       `Opening external URLs is not supported on ${dependencies.platform ?? process.platform}.`,
     );
   }
 
-  const spawnImpl = dependencies.spawnImpl ?? spawn;
+  const spawnImpl = dependencies.spawnImpl ?? NodeChildProcess.spawn;
   let lastError: Error | null = null;
   for (const command of commands) {
     try {

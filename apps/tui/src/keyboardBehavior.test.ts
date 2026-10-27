@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { KEYBINDING_GUIDE_SECTIONS, isCtrlC, shouldClearComposerOnCtrlC } from "./keyboardBehavior";
+import {
+  KEYBINDING_GUIDE_SECTIONS,
+  isCtrlC,
+  shouldClearComposerOnCtrlC,
+} from "./keyboardBehavior.ts";
 
 describe("keyboardBehavior", () => {
   it("detects ctrl-c", () => {

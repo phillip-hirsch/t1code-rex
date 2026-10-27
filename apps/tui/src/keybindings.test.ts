@@ -1,11 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { type KeybindingShortcut, type ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import {
   modelPickerJumpIndexFromCommand,
   resolveTuiShortcutCommand,
   threadJumpIndexFromCommand,
   threadTraversalDirectionFromCommand,
-} from "./keybindings";
+} from "./keybindings.ts";
 
 function modShortcut(
   key: string,

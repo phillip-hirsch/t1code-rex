@@ -1,7 +1,8 @@
-import path from "node:path";
-import { describe, expect, it } from "vitest";
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodePath from "node:path";
+import { describe, expect, it } from "vite-plus/test";
 
-import { expandUserPath, normalizeWorkspaceRoot } from "./workspacePaths";
+import { expandUserPath, normalizeWorkspaceRoot } from "./workspacePaths.ts";
 
 describe("workspace path helpers", () => {
   it("expands tilde from the user's home, not the TUI app home", () => {
@@ -9,19 +10,19 @@ describe("workspace path helpers", () => {
 
     expect(expandUserPath("~", userHomeDir)).toBe("/Users/maria");
     expect(expandUserPath("~/.local/src/t3code", userHomeDir)).toBe(
-      path.join("/Users/maria", ".local/src/t3code"),
+      NodePath.join("/Users/maria", ".local/src/t3code"),
     );
   });
 
   it("normalizes tilde workspace roots from the user's home", () => {
     expect(normalizeWorkspaceRoot(" ~/.local/src/t3code ", "/Users/maria")).toBe(
-      path.resolve("/Users/maria/.local/src/t3code"),
+      NodePath.resolve("/Users/maria/.local/src/t3code"),
     );
   });
 
   it("leaves non-tilde absolute paths unchanged after normalization", () => {
     expect(normalizeWorkspaceRoot("/tmp/project", "/Users/maria")).toBe(
-      path.resolve("/tmp/project"),
+      NodePath.resolve("/tmp/project"),
     );
   });
 });

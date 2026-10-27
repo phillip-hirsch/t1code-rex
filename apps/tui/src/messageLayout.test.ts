@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { resolveUserMessageBubbleWidth } from "./messageLayout";
+import { resolveUserMessageBubbleWidth } from "./messageLayout.ts";
 
 describe("resolveUserMessageBubbleWidth", () => {
   it("uses a constrained width in wide layouts too", () => {

@@ -1,4 +1,4 @@
-import { performance } from "node:perf_hooks";
+import * as NodePerfHooks from "node:perf_hooks";
 import type { AppTheme } from "@t3tools/client-core";
 import {
   TERMINAL_MATCH_THEME_ID,
@@ -6,7 +6,7 @@ import {
   type TerminalColors,
   type TuiThemeId,
   type TuiThemeMode,
-} from "./theme";
+} from "./theme.ts";
 
 export interface ThemeAwareRenderer {
   readonly themeMode?: unknown;
@@ -46,7 +46,7 @@ export async function resolveTerminalPalette(
     return { colors: null, durationMs: 0 };
   }
 
-  const startedAt = performance.now();
+  const startedAt = NodePerfHooks.performance.now();
   if (options.clearCache) {
     renderer.clearPaletteCache?.();
   }
@@ -55,9 +55,9 @@ export async function resolveTerminalPalette(
     const colors = await renderer.getPalette({ size: 16 });
     return {
       colors: hasUsableTerminalColors(colors) ? colors : null,
-      durationMs: performance.now() - startedAt,
+      durationMs: NodePerfHooks.performance.now() - startedAt,
     };
   } catch {
-    return { colors: null, durationMs: performance.now() - startedAt };
+    return { colors: null, durationMs: NodePerfHooks.performance.now() - startedAt };
   }
 }

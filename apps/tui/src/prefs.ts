@@ -1,16 +1,15 @@
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
 import type { AppSettings } from "@t3tools/client-core";
 import {
   type ProjectEntry,
   type ProviderInstanceId,
-  type ProviderKind,
-  type ProviderModelOptions,
   type ProviderOptionSelection,
   type RuntimeMode,
 } from "@t3tools/contracts";
-import fs from "node:fs/promises";
-import path from "node:path";
-import type { TuiPaths } from "./config";
-import type { TuiThemeId } from "./theme";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import type { TuiPaths } from "./config.ts";
+import type { TuiThemeId } from "./theme.ts";
 
 export interface PersistedComposerImageAttachment {
   readonly type: "image";
@@ -61,10 +60,8 @@ export interface TuiPrefs {
     | "connections"
     | "diagnostics"
     | "archive";
-  readonly draftProvider?: ProviderKind;
   readonly draftProviderInstanceId?: ProviderInstanceId;
   readonly draftModel?: string;
-  readonly draftModelOptions?: ProviderModelOptions;
   readonly draftProviderOptionSelections?: readonly ProviderOptionSelection[];
   readonly draftRuntimeMode?: RuntimeMode;
   readonly draftInteractionMode?: "default" | "plan";
@@ -75,7 +72,7 @@ export interface TuiPrefs {
 
 export async function readPrefs(paths: TuiPaths): Promise<TuiPrefs> {
   try {
-    const raw = await fs.readFile(paths.prefsPath, "utf8");
+    const raw = await NodeFSP.readFile(paths.prefsPath, "utf8");
     const parsed = JSON.parse(raw) as TuiPrefs;
     return parsed ?? {};
   } catch {
@@ -84,6 +81,6 @@ export async function readPrefs(paths: TuiPaths): Promise<TuiPrefs> {
 }
 
 export async function writePrefs(paths: TuiPaths, prefs: TuiPrefs): Promise<void> {
-  await fs.mkdir(path.dirname(paths.prefsPath), { recursive: true });
-  await fs.writeFile(paths.prefsPath, JSON.stringify(prefs, null, 2));
+  await NodeFSP.mkdir(NodePath.dirname(paths.prefsPath), { recursive: true });
+  await NodeFSP.writeFile(paths.prefsPath, JSON.stringify(prefs, null, 2));
 }

@@ -1,6 +1,6 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-
+// @effect-diagnostics globalDate:off nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 export interface T1Logger {
   log: (event: string, details?: Record<string, unknown>) => void;
 }
@@ -21,9 +21,8 @@ export function createT1Logger(logPath: string): T1Logger {
   return {
     log(event, details) {
       const line = `${new Date().toISOString()} ${event}${serializeDetails(details)}\n`;
-      void fs
-        .mkdir(path.dirname(logPath), { recursive: true })
-        .then(() => fs.appendFile(logPath, line, "utf8"))
+      void NodeFSP.mkdir(NodePath.dirname(logPath), { recursive: true })
+        .then(() => NodeFSP.appendFile(logPath, line, "utf8"))
         .catch(() => {});
     },
   };

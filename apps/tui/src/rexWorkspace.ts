@@ -1,5 +1,5 @@
-import { execFile } from "node:child_process";
-
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeChildProcess from "node:child_process";
 /**
  * Thin client for the Rex terminal multiplexer CLI. T1Code uses it to open
  * threads, terminals, and diffs as Rex tabs and panes when it runs inside Rex.
@@ -121,7 +121,7 @@ export function parseWindowIds(output: string): ReadonlySet<string> {
 
 export const execRex: RexRunner = (bin, args) =>
   new Promise((resolve, reject) => {
-    execFile(bin, [...args], { timeout: 15_000 }, (error, stdout, stderr) => {
+    NodeChildProcess.execFile(bin, [...args], { timeout: 15_000 }, (error, stdout, stderr) => {
       if (error) {
         // Keep argv out of the message: it is shown in the status bar.
         const command = args[0] === "window" ? `window ${args[1]}` : args[0];

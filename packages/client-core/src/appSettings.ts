@@ -1,17 +1,10 @@
 import { Effect, Schema } from "effect";
 import {
-  DEFAULT_GIT_TEXT_GENERATION_MODEL,
+  DEFAULT_TEXT_GENERATION_MODEL,
   ProviderInstanceId,
   TrimmedNonEmptyString,
-  type ProviderKind,
-  type ProviderStartOptions,
 } from "@t3tools/contracts";
-import {
-  getDefaultModel,
-  getModelOptions,
-  normalizeModelSlug,
-  resolveSelectableModel,
-} from "@t3tools/shared/model";
+import { normalizeCustomModelSlug } from "@t3tools/shared/model";
 
 export const APP_SETTINGS_STORAGE_KEY = "t3code:app-settings:v1";
 const MAX_CUSTOM_MODEL_COUNT = 32;
@@ -48,23 +41,6 @@ export const SidebarThreadPreviewCount = Schema.Int.check(
 );
 export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 export const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
-
-type CustomModelSettingsKey = "customCodexModels" | "customClaudeModels";
-
-export type ProviderCustomModelConfig = {
-  provider: ProviderKind;
-  settingsKey: CustomModelSettingsKey;
-  defaultSettingsKey: CustomModelSettingsKey;
-  title: string;
-  description: string;
-  placeholder: string;
-  example: string;
-};
-
-const BUILT_IN_MODEL_SLUGS_BY_PROVIDER: Record<ProviderKind, ReadonlySet<string>> = {
-  codex: new Set(getModelOptions("codex").map((option) => option.slug)),
-  claudeAgent: new Set(getModelOptions("claudeAgent").map((option) => option.slug)),
-};
 
 const withDefaults =
   <
@@ -123,53 +99,15 @@ export const AppSettingsSchema = Schema.Struct({
 });
 export type AppSettings = typeof AppSettingsSchema.Type;
 
-export interface AppModelOption {
-  slug: string;
-  name: string;
-  isCustom: boolean;
-}
-
 export const DEFAULT_APP_SETTINGS = AppSettingsSchema.make({});
 
-const PROVIDER_CUSTOM_MODEL_CONFIG: Record<ProviderKind, ProviderCustomModelConfig> = {
-  codex: {
-    provider: "codex",
-    settingsKey: "customCodexModels",
-    defaultSettingsKey: "customCodexModels",
-    title: "Codex",
-    description: "Save additional Codex model slugs for the picker and `/model` command.",
-    placeholder: "your-codex-model-slug",
-    example: "gpt-6.7-codex-ultra-preview",
-  },
-  claudeAgent: {
-    provider: "claudeAgent",
-    settingsKey: "customClaudeModels",
-    defaultSettingsKey: "customClaudeModels",
-    title: "Claude",
-    description: "Save additional Claude model slugs for the picker and `/model` command.",
-    placeholder: "your-claude-model-slug",
-    example: "claude-sonnet-5-0",
-  },
-};
-
-export const MODEL_PROVIDER_SETTINGS = Object.values(PROVIDER_CUSTOM_MODEL_CONFIG);
-
-export function normalizeCustomModelSlugs(
-  models: Iterable<string | null | undefined>,
-  provider: ProviderKind = "codex",
-): string[] {
+export function normalizeCustomModelSlugs(models: Iterable<string | null | undefined>): string[] {
   const normalizedModels: string[] = [];
   const seen = new Set<string>();
-  const builtInModelSlugs = BUILT_IN_MODEL_SLUGS_BY_PROVIDER[provider];
 
   for (const candidate of models) {
-    const normalized = normalizeModelSlug(candidate, provider);
-    if (
-      !normalized ||
-      normalized.length > MAX_CUSTOM_MODEL_LENGTH ||
-      builtInModelSlugs.has(normalized) ||
-      seen.has(normalized)
-    ) {
+    const normalized = normalizeCustomModelSlug(candidate);
+    if (!normalized || normalized.length > MAX_CUSTOM_MODEL_LENGTH || seen.has(normalized)) {
       continue;
     }
 
@@ -186,8 +124,8 @@ export function normalizeCustomModelSlugs(
 export function normalizeAppSettings(settings: AppSettings): AppSettings {
   return {
     ...settings,
-    customCodexModels: normalizeCustomModelSlugs(settings.customCodexModels, "codex"),
-    customClaudeModels: normalizeCustomModelSlugs(settings.customClaudeModels, "claudeAgent"),
+    customCodexModels: normalizeCustomModelSlugs(settings.customCodexModels),
+    customClaudeModels: normalizeCustomModelSlugs(settings.customClaudeModels),
     sidebarThreadPreviewCount: Math.min(
       MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
       Math.max(MIN_SIDEBAR_THREAD_PREVIEW_COUNT, settings.sidebarThreadPreviewCount),
@@ -198,127 +136,6 @@ export function normalizeAppSettings(settings: AppSettings): AppSettings {
   };
 }
 
-export function getCustomModelsForProvider(
-  settings: Pick<AppSettings, CustomModelSettingsKey>,
-  provider: ProviderKind,
-): readonly string[] {
-  return settings[PROVIDER_CUSTOM_MODEL_CONFIG[provider].settingsKey];
-}
-
-export function getDefaultCustomModelsForProvider(
-  defaults: Pick<AppSettings, CustomModelSettingsKey>,
-  provider: ProviderKind,
-): readonly string[] {
-  return defaults[PROVIDER_CUSTOM_MODEL_CONFIG[provider].defaultSettingsKey];
-}
-
-export function patchCustomModels(
-  provider: ProviderKind,
-  models: string[],
-): Partial<Pick<AppSettings, CustomModelSettingsKey>> {
-  return {
-    [PROVIDER_CUSTOM_MODEL_CONFIG[provider].settingsKey]: models,
-  };
-}
-
-export function getCustomModelsByProvider(
-  settings: Pick<AppSettings, CustomModelSettingsKey>,
-): Record<ProviderKind, readonly string[]> {
-  return {
-    codex: getCustomModelsForProvider(settings, "codex"),
-    claudeAgent: getCustomModelsForProvider(settings, "claudeAgent"),
-  };
-}
-
-export function getAppModelOptions(
-  provider: ProviderKind,
-  customModels: readonly string[],
-  selectedModel?: string | null,
-): AppModelOption[] {
-  const options: AppModelOption[] = getModelOptions(provider).map(({ slug, name }) => ({
-    slug,
-    name,
-    isCustom: false,
-  }));
-  const seen = new Set(options.map((option) => option.slug));
-  const trimmedSelectedModel = selectedModel?.trim().toLowerCase();
-
-  for (const slug of normalizeCustomModelSlugs(customModels, provider)) {
-    if (seen.has(slug)) {
-      continue;
-    }
-
-    seen.add(slug);
-    options.push({
-      slug,
-      name: slug,
-      isCustom: true,
-    });
-  }
-
-  const normalizedSelectedModel = normalizeModelSlug(selectedModel, provider);
-  const selectedModelMatchesExistingName =
-    typeof trimmedSelectedModel === "string" &&
-    options.some((option) => option.name.toLowerCase() === trimmedSelectedModel);
-  if (
-    normalizedSelectedModel &&
-    !seen.has(normalizedSelectedModel) &&
-    !selectedModelMatchesExistingName
-  ) {
-    options.push({
-      slug: normalizedSelectedModel,
-      name: normalizedSelectedModel,
-      isCustom: true,
-    });
-  }
-
-  return options;
-}
-
-export function resolveAppModelSelection(
-  provider: ProviderKind,
-  customModels: Record<ProviderKind, readonly string[]>,
-  selectedModel: string | null | undefined,
-): string {
-  const customModelsForProvider = customModels[provider];
-  const options = getAppModelOptions(provider, customModelsForProvider, selectedModel);
-  return resolveSelectableModel(provider, selectedModel, options) ?? getDefaultModel(provider);
-}
-
-export function getCustomModelOptionsByProvider(
-  settings: Pick<AppSettings, CustomModelSettingsKey>,
-): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
-  const customModelsByProvider = getCustomModelsByProvider(settings);
-  return {
-    codex: getAppModelOptions("codex", customModelsByProvider.codex),
-    claudeAgent: getAppModelOptions("claudeAgent", customModelsByProvider.claudeAgent),
-  };
-}
-
-export function getProviderStartOptions(
-  settings: Pick<AppSettings, "claudeBinaryPath" | "codexBinaryPath" | "codexHomePath">,
-): ProviderStartOptions | undefined {
-  const providerOptions: ProviderStartOptions = {
-    ...(settings.codexBinaryPath || settings.codexHomePath
-      ? {
-          codex: {
-            ...(settings.codexBinaryPath ? { binaryPath: settings.codexBinaryPath } : {}),
-            ...(settings.codexHomePath ? { homePath: settings.codexHomePath } : {}),
-          },
-        }
-      : {}),
-    ...(settings.claudeBinaryPath
-      ? {
-          claudeAgent: {
-            binaryPath: settings.claudeBinaryPath,
-          },
-        }
-      : {}),
-  };
-
-  return Object.keys(providerOptions).length > 0 ? providerOptions : undefined;
-}
-
 export function resolveGitTextGenerationModel(settings: Pick<AppSettings, "textGenerationModel">) {
-  return settings.textGenerationModel ?? DEFAULT_GIT_TEXT_GENERATION_MODEL;
+  return settings.textGenerationModel ?? DEFAULT_TEXT_GENERATION_MODEL;
 }

@@ -1,6 +1,6 @@
-import * as fs from "node:fs/promises";
-import path from "node:path";
-
+// @effect-diagnostics globalFetch:off nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
 type RendererLike = {
   capabilities?: {
     kitty_graphics?: boolean;
@@ -61,7 +61,7 @@ function moveCursor(row: number, column: number): string {
 }
 
 function resolveAttachmentExtension(attachment: TerminalImageAttachment): string {
-  const ext = path.extname(attachment.name).toLowerCase();
+  const ext = NodePath.extname(attachment.name).toLowerCase();
   if (ext.length > 0) {
     return ext;
   }
@@ -226,7 +226,7 @@ async function renderKittyImagePreviewAsync(
     return;
   }
 
-  const imageBytes = await fs.readFile(input.filePath);
+  const imageBytes = await NodeFSP.readFile(input.filePath);
   const imageSize = readImageSize(imageBytes);
   const chunks = chunkBase64Payload(imageBytes.toString("base64"));
 
@@ -280,12 +280,12 @@ export async function cacheRemoteAttachmentToFile(input: {
   baseUrl: string;
   cacheDir: string;
 }): Promise<string> {
-  await fs.mkdir(input.cacheDir, { recursive: true });
+  await NodeFSP.mkdir(input.cacheDir, { recursive: true });
   const fileName = `${sanitizeFileStem(input.attachment.id)}${resolveAttachmentExtension(input.attachment)}`;
-  const filePath = path.join(input.cacheDir, fileName);
+  const filePath = NodePath.join(input.cacheDir, fileName);
 
   try {
-    await fs.stat(filePath);
+    await NodeFSP.stat(filePath);
     return filePath;
   } catch {}
 
@@ -297,6 +297,6 @@ export async function cacheRemoteAttachmentToFile(input: {
   }
 
   const bytes = Buffer.from(await response.arrayBuffer());
-  await fs.writeFile(filePath, bytes);
+  await NodeFSP.writeFile(filePath, bytes);
   return filePath;
 }

@@ -1,21 +1,20 @@
-import fs from "node:fs/promises";
-import { createRequire } from "node:module";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const packageDir = path.resolve(scriptDir, "..");
-const distDir = path.join(packageDir, "dist");
-const entryPath = path.join(packageDir, "src", "index.tsx");
-const outputPath = path.join(distDir, "index.mjs");
-const require = createRequire(import.meta.url);
-const openTuiCoreDir = path.dirname(
+import * as NodeFSP from "node:fs/promises";
+import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+const scriptDir = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const packageDir = NodePath.resolve(scriptDir, "..");
+const distDir = NodePath.join(packageDir, "dist");
+const entryPath = NodePath.join(packageDir, "src", "index.tsx");
+const outputPath = NodePath.join(distDir, "index.mjs");
+const require = NodeModule.createRequire(import.meta.url);
+const openTuiCoreDir = NodePath.dirname(
   require.resolve("@opentui/core/package.json", { paths: [packageDir] }),
 );
 const openTuiWorkerEntries = ["parser.worker.js", "parser.worker.js.map"];
 
-await fs.rm(distDir, { force: true, recursive: true });
-await fs.mkdir(distDir, { recursive: true });
+await NodeFSP.rm(distDir, { force: true, recursive: true });
+await NodeFSP.mkdir(distDir, { recursive: true });
 
 const build = Bun.spawnSync(
   [
@@ -45,23 +44,23 @@ if (build.exitCode !== 0) {
   process.exit(build.exitCode ?? 1);
 }
 
-const output = await fs.readFile(outputPath, "utf8");
+const output = await NodeFSP.readFile(outputPath, "utf8");
 const shebang = "#!/usr/bin/env bun\n";
 const nativeSpecifier = "@opentui/core-${process.platform}-${process.arch}/index.ts";
 const normalizedNativeSpecifier = "@opentui/core-${process.platform}-${process.arch}";
 const normalizedOutput = output.replaceAll(nativeSpecifier, normalizedNativeSpecifier);
 
 if (!normalizedOutput.startsWith(shebang)) {
-  await fs.writeFile(outputPath, `${shebang}${normalizedOutput}`, "utf8");
+  await NodeFSP.writeFile(outputPath, `${shebang}${normalizedOutput}`, "utf8");
 } else if (normalizedOutput !== output) {
-  await fs.writeFile(outputPath, normalizedOutput, "utf8");
+  await NodeFSP.writeFile(outputPath, normalizedOutput, "utf8");
 }
 
 for (const entry of openTuiWorkerEntries) {
-  const sourcePath = path.join(openTuiCoreDir, entry);
-  const targetPath = path.join(distDir, entry);
+  const sourcePath = NodePath.join(openTuiCoreDir, entry);
+  const targetPath = NodePath.join(distDir, entry);
   try {
-    await fs.copyFile(sourcePath, targetPath);
+    await NodeFSP.copyFile(sourcePath, targetPath);
   } catch (error) {
     if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) {
       throw error;

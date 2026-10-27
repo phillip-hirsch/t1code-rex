@@ -1,15 +1,16 @@
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+// @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
+import * as NodeFSP from "node:fs/promises";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { resolveComposerSubmission, resolveImageAttachmentFromPath } from "./composerSubmit";
+import { resolveComposerSubmission, resolveImageAttachmentFromPath } from "./composerSubmit.ts";
 
 const tempRoots: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    tempRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
+    tempRoots.splice(0).map((root) => NodeFSP.rm(root, { recursive: true, force: true })),
   );
 });
 
@@ -17,10 +18,10 @@ async function makeTempImage(
   fileName: string,
   bytes = Buffer.from("png-bytes"),
 ): Promise<{ root: string; filePath: string }> {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), "t1code-composer-submit-"));
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t1code-composer-submit-"));
   tempRoots.push(root);
-  const filePath = path.join(root, fileName);
-  await fs.writeFile(filePath, bytes);
+  const filePath = NodePath.join(root, fileName);
+  await NodeFSP.writeFile(filePath, bytes);
   return { root, filePath };
 }
 

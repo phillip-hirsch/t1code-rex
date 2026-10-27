@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { resolveComposerPrimaryAction } from "./composerAction";
+import { resolveComposerPrimaryAction } from "./composerAction.ts";
 
 describe("resolveComposerPrimaryAction", () => {
   it("keeps send as the primary action while a thread is running if the composer has content", () => {

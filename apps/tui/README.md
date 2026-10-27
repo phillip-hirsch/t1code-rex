@@ -20,16 +20,28 @@ Linux notes:
 ## What You Get
 
 - Native-feeling terminal UI built on OpenTUI
-- Bundled server and web client for local use
+- Bundled T3 Code server (orchestration v2) for local use
 - Codex-first workflow tuned for terminal usage
+
+## Server and data
+
+T1Code starts upstream's T3 Code server in `desktop` mode on `127.0.0.1` and keeps its data under `~/.t1` (`T1CODE_HOME`), so it never shares a data directory with a T3 Code install in `~/.t3`. The server needs Node 24 or newer on your `PATH`; set `T1CODE_NODE_BIN` to use another binary.
+
+To join a server that is already running instead of starting one:
+
+```bash
+T1CODE_TUI_ATTACH_ONLY=1 T1CODE_HOST=127.0.0.1 T1CODE_PORT=3773 T1CODE_AUTH_TOKEN="$(t3 auth session issue --token-only --base-dir ~/.t1)" t1code
+```
+
+`T1CODE_AUTH_TOKEN` is a bearer token, never a server bootstrap secret.
 
 ## Rex
 
-When T1Code runs inside a Rex session (`REX_SESSION` is set), the command palette gets a Rex section and the thread menu gets **Open in Rex Tab**:
+When T1Code runs inside a Rex session (`REX_SESSION` is set), the command palette (`⌘K`, or `Ctrl+K`) gets a Rex section:
 
 - **Open thread in Rex tab** starts a second T1Code in a new Rex tab, focused on that thread. Running it again focuses the existing tab.
-- **Open terminal in Rex split** opens a shell below T1Code in the thread's worktree or project folder.
-- **Open diff in Rex tab** runs `git diff HEAD` for the thread's worktree or project folder.
+
+Terminal splits and diff tabs return with the orchestration v2 port (see `docs/rex-parity-plan.md`).
 
 Thread tabs connect to the server of the window that opened them, so they need that window to stay open. They read your prefs but don't save them. Set `T1CODE_REX_BIN` if `rex` isn't on your `PATH`.
 

@@ -1,13 +1,12 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import * as NodeFSP from "node:fs/promises";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+const scriptDir = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const packageDir = NodePath.resolve(scriptDir, "..");
+const packageJsonPath = NodePath.join(packageDir, "package.json");
+const backupPath = NodePath.join(packageDir, ".package.json.publish.bak");
 
-const scriptDir = path.dirname(fileURLToPath(import.meta.url));
-const packageDir = path.resolve(scriptDir, "..");
-const packageJsonPath = path.join(packageDir, "package.json");
-const backupPath = path.join(packageDir, ".package.json.publish.bak");
-
-const packageJson = JSON.parse(await fs.readFile(packageJsonPath, "utf8"));
+const packageJson = JSON.parse(await NodeFSP.readFile(packageJsonPath, "utf8"));
 
 const publishedPackageJson = {
   name: packageJson.name,
@@ -26,5 +25,9 @@ const publishedPackageJson = {
   engines: packageJson.engines,
 };
 
-await fs.copyFile(packageJsonPath, backupPath);
-await fs.writeFile(packageJsonPath, `${JSON.stringify(publishedPackageJson, null, 2)}\n`, "utf8");
+await NodeFSP.copyFile(packageJsonPath, backupPath);
+await NodeFSP.writeFile(
+  packageJsonPath,
+  `${JSON.stringify(publishedPackageJson, null, 2)}\n`,
+  "utf8",
+);

@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   parseApprovalResponseCommand,
   parseStandaloneComposerModeCommand,
-} from "./composerCommands";
+} from "./composerCommands.ts";
 
 describe("parseStandaloneComposerModeCommand", () => {
   it("parses standalone /plan commands", () => {

@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { TUI_SIDEBAR_WIDTH, resolveTuiResponsiveLayout } from "./responsiveLayout";
+import { TUI_SIDEBAR_WIDTH, resolveTuiResponsiveLayout } from "./responsiveLayout.ts";
 
 describe("resolveTuiResponsiveLayout", () => {
   it("keeps the full layout in wide terminals", () => {

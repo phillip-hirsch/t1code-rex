@@ -1,10 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   extractSlashCommandQuery,
   matchSlashCommands,
   parseSlashCommandInput,
-} from "./slashCommands";
+} from "./slashCommands.ts";
 
 describe("slashCommands", () => {
   it("extracts a top-level slash query while typing the command name", () => {

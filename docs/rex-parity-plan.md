@@ -25,7 +25,10 @@ Base branch `orchestration-v2`, base PR into `main`. Started 2026-10-26.
 Approach: re-fork on upstream rather than port orchestration v2 into the old server. The fork's own server changes were almost all older copies of upstream work. Its only TUI-specific server feature, `--mode tui`, behaves like upstream's `--mode desktop`.
 
 1. **Upstream merge (sub-PR).** A real merge of `pingdotgg/t3code` `main` at `5127de8c`. Everything outside `apps/tui`, `packages/client-core`, and a few root files matches upstream. Merge it with a merge commit, never a squash, so later syncs start from this merge base.
-2. **Port `packages/client-core` and `apps/tui` onto the upstream server** in sub-PRs, one feature area at a time. The TUI doesn't build against the new server until this lands, so the base PR stays unmerged until the TUI works end to end.
+2. **Port `packages/client-core` and `apps/tui` onto the upstream server** in sub-PRs, one feature area at a time, following the port order in `docs/orchestration-v2-port/upstream-v2-api.md` §8. The base PR stays unmerged until the TUI works end to end.
+   - **Foundation (done):** the TUI builds, launches upstream's server in `desktop` mode with the bootstrap secret on stdin, exchanges it for a bearer, and connects through `@t3tools/client-runtime` (`apps/tui/src/serverLauncher.ts`, `apps/tui/src/connection/`). The UI shows the server, environment and providers; sidebar, thread view, composer, approvals, terminals, diffs and git are placeholders. Rex thread tabs attach with the base URLs plus a bearer in the one-shot launch file.
+   - The v1 UI (17k lines) was removed with the foundation. Port features from `git show 1564bbe49:apps/tui/src/ui.tsx` and the modules deleted in that PR, against v2 state from `@t3tools/client-runtime/state/*`.
+   - Remaining order: shell (sidebar), thread view, composer and run control, approvals, thread management, terminals and diffs, v2-only features, then delete `packages/client-core`.
 
 Values this phase depends on:
 

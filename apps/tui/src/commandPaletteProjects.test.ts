@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { isCommandPaletteProjectPathQuery } from "./commandPaletteProjects";
+import { describe, expect, it } from "vite-plus/test";
+import { isCommandPaletteProjectPathQuery } from "./commandPaletteProjects.ts";
 
 describe("isCommandPaletteProjectPathQuery", () => {
   it("detects explicit project path inputs", () => {

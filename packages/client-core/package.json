@@ -12,14 +12,6 @@
       "import": "./src/ids.ts",
       "types": "./src/ids.ts"
     },
-    "./contextWindow": {
-      "import": "./src/contextWindow.ts",
-      "types": "./src/contextWindow.ts"
-    },
-    "./nativeApi": {
-      "import": "./src/nativeApi.ts",
-      "types": "./src/nativeApi.ts"
-    },
     "./pendingUserInput": {
       "import": "./src/pendingUserInput.ts",
       "types": "./src/pendingUserInput.ts"
@@ -27,24 +19,11 @@
     "./proposedPlan": {
       "import": "./src/proposedPlan.ts",
       "types": "./src/proposedPlan.ts"
-    },
-    "./sessionLogic": {
-      "import": "./src/sessionLogic.ts",
-      "types": "./src/sessionLogic.ts"
-    },
-    "./types": {
-      "import": "./src/types.ts",
-      "types": "./src/types.ts"
-    },
-    "./wsTransport": {
-      "import": "./src/wsTransport.ts",
-      "types": "./src/wsTransport.ts"
     }
   },
   "scripts": {
-    "build": "tsdown",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests"
+    "test": "vp test run"
   },
   "dependencies": {
     "@t3tools/contracts": "workspace:*",
@@ -53,8 +32,6 @@
   },
   "devDependencies": {
     "@types/node": "catalog:",
-    "tsdown": "^0.20.3",
-    "typescript": "catalog:",
-    "vitest": "^4.0.0"
+    "typescript": "catalog:"
   }
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   collapseProject,
@@ -6,7 +6,7 @@ import {
   pruneExpandedProjects,
   resolveProjectPrimaryAction,
   resolveProjectExpansionOnRowPress,
-} from "./sidebarProjects";
+} from "./sidebarProjects.ts";
 
 describe("sidebarProjects", () => {
   it("expands a collapsed active project when pressed again", () => {

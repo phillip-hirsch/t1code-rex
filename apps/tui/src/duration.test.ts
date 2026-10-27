@@ -1,7 +1,7 @@
 import * as Duration from "effect/Duration";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { durationToSeconds } from "./duration";
+import { durationToSeconds } from "./duration.ts";
 
 describe("durationToSeconds", () => {
   it("accepts live Effect durations", () => {

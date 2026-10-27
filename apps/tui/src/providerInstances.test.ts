@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 import { Schema } from "effect";
 import {
   ProviderDriverKind,
@@ -10,11 +10,10 @@ import {
   deriveProviderInstanceEntries,
   getProviderInstanceModelOptions,
   getProviderInstanceModels,
-  legacyProviderKindForDriver,
   normalizeProviderAccentColor,
   resolveSelectableProviderInstance,
   sortProviderInstanceEntries,
-} from "./providerInstances";
+} from "./providerInstances.ts";
 
 const decodeProviderDriverKind = Schema.decodeUnknownSync(ProviderDriverKind);
 const decodeProviderInstanceId = Schema.decodeUnknownSync(ProviderInstanceId);
@@ -198,13 +197,5 @@ describe("providerInstances", () => {
     expect(normalizeProviderAccentColor(" #A0b1C2 ")).toBe("#A0b1C2");
     expect(normalizeProviderAccentColor("#fff")).toBeUndefined();
     expect(normalizeProviderAccentColor("blue")).toBeUndefined();
-  });
-
-  it("maps only legacy TUI picker drivers back to provider kinds", () => {
-    expect(legacyProviderKindForDriver(decodeProviderDriverKind("codex"))).toBe("codex");
-    expect(legacyProviderKindForDriver(decodeProviderDriverKind("claudeAgent"))).toBe(
-      "claudeAgent",
-    );
-    expect(legacyProviderKindForDriver(decodeProviderDriverKind("cursor"))).toBeUndefined();
   });
 });

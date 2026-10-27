@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+// @effect-diagnostics globalTimers:off -- The TUI runs on Bun outside the Effect runtime.
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildSplitArgs,
@@ -11,7 +12,7 @@ import {
   resolveRexContext,
   rexTabLabel,
   type RexContext,
-} from "./rexWorkspace";
+} from "./rexWorkspace.ts";
 
 const context: RexContext = { bin: "rex", sessionId: "session:1", blockId: "block:tui" };
 
@@ -148,7 +149,7 @@ describe("createRexWindowRegistry concurrency", () => {
     let opened = 0;
     const open = async () => {
       opened += 1;
-      await new Promise((resolve) => setTimeout(resolve, 5));
+      await Promise.resolve();
       const windowId = `window:${opened}`;
       windows.add(windowId);
       return { windowId, blockId: `block:${opened}` };

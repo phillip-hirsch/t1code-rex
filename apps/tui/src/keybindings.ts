@@ -114,6 +114,7 @@ export function resolveTuiShortcutCommand(
   keybindings: ResolvedKeybindingsConfig,
   options?: TuiShortcutMatchOptions,
 ): KeybindingCommand | null {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
   const platform = options?.platform ?? process.platform;
   const context = resolveContext(options);
 
