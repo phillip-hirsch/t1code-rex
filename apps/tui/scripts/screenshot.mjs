@@ -102,9 +102,10 @@ function color256(n) {
   return `rgb(${g},${g},${g})`;
 }
 
-// Terminal cell width of a grapheme: wide East Asian characters and emoji take two cells.
+// Terminal cell width of a grapheme: wide East Asian characters and emoji-presentation
+// characters take two cells; text-default symbols such as 🖥 take one, as in tmux.
 const WIDE =
-  /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{1F300}-\u{1FAFF}\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}|\uFE0F/u;
+  /[\u1100-\u115F\u2E80-\u303E\u3041-\u33FF\u3400-\u4DBF\u4E00-\u9FFF\uA000-\uA4CF\uAC00-\uD7A3\uF900-\uFAFF\uFE30-\uFE4F\uFF00-\uFF60\uFFE0-\uFFE6\u{20000}-\u{3FFFD}]|\p{Emoji_Presentation}|\uFE0F/u;
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 const escapeHtml = (text) =>
@@ -137,7 +138,7 @@ function renderLine(line) {
     let cells = "";
     for (const { segment } of segmenter.segment(text)) {
       const width = (WIDE.test(segment) ? 2 : 1) * CHAR_PX;
-      cells += `<i style="display:inline-block;width:${width}px;font-style:inherit">${escapeHtml(segment)}</i>`;
+      cells += `<i style="display:inline-block;width:${width}px;font-style:inherit;text-decoration:inherit">${escapeHtml(segment)}</i>`;
     }
     html += `<span style="${css.join(";")}">${cells}</span>`;
   };
