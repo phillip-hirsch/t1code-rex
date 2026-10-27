@@ -156,9 +156,9 @@ function withMissingNewline(
 }
 
 export function parseUnifiedDiff(text: string): ParsedDiff {
-  // Only the patch's own final newline goes: a body line's trailing whitespace is content.
+  // Only the patch's own final "\n" goes: a body line's trailing whitespace and "\r" are content.
   const truncated = TRUNCATED_MARKER.test(text);
-  const body = truncated ? text.replace(TRUNCATED_MARKER, "") : text.replace(/\r?\n$/, "");
+  const body = truncated ? text.replace(TRUNCATED_MARKER, "") : text.replace(/\n$/, "");
   if (body.trim().length === 0) {
     return truncated ? { ...EMPTY_PARSED_DIFF, truncated } : EMPTY_PARSED_DIFF;
   }

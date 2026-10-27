@@ -229,6 +229,15 @@ describe("layoutDiffFile", () => {
     ]);
   });
 
+  it("keeps the last body line's carriage return when noting line endings", () => {
+    const notesFor = (body: string) => {
+      const file = parseUnifiedDiff(`--- a/x.txt\n+++ b/x.txt\n@@ -1,1 +1,1 @@\n${body}`).files[0];
+      return file && layoutDiffFile(file, DIFF_FILE_LINE_BUDGET).chunks[0]?.notes;
+    };
+    expect(notesFor("-old\n+old\r\n")).toEqual(["↵ Line endings changed (LF → CRLF) on line 1"]);
+    expect(notesFor("-old\r\n+old \r\n")).toEqual(["· Trailing whitespace changed on line 1"]);
+  });
+
   it("caps a huge file, cutting the hunk that crosses the limit with matching counts", () => {
     const file = bigFile([300, 300, 300]);
     const layout = layoutDiffFile(file, 400);
