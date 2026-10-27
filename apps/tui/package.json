@@ -29,6 +29,7 @@
     "check:requests": "bun scripts/check-request-panel.tsx",
     "check:management": "bun scripts/check-management.tsx",
     "check:terminal": "bun scripts/check-terminal.tsx",
+    "check:diff": "bun scripts/check-diff.tsx",
     "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {

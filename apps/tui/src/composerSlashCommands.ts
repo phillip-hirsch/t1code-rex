@@ -71,6 +71,12 @@ export const COMPOSER_SLASH_COMMANDS: ReadonlyArray<ComposerSlashCommand> = [
     template: "/clone ",
   },
   {
+    command: "diff",
+    usage: "/diff",
+    description: "Show or hide the thread's diff",
+    template: "/diff",
+  },
+  {
     command: "recover",
     usage: "/recover",
     description: "Put messages whose thread and project are gone here",
@@ -114,6 +120,7 @@ export type ComposerSlashAction =
   | { readonly type: "resume" }
   | { readonly type: "discard" }
   | { readonly type: "recover" }
+  | { readonly type: "toggle-diff" }
   | { readonly type: "clone"; readonly args: string }
   | { readonly type: "error"; readonly message: string };
 
@@ -143,6 +150,8 @@ export function resolveComposerSlashAction(text: string): ComposerSlashAction | 
       return { type: "discard" };
     case "recover":
       return { type: "recover" };
+    case "diff":
+      return { type: "toggle-diff" };
     case "clone":
       return parsed.args.length === 0
         ? { type: "error", message: "Type owner/repo or a URL after /clone" }

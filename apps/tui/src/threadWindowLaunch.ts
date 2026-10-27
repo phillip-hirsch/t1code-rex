@@ -23,6 +23,8 @@ export interface ThreadWindowLaunch {
   readonly server: ThreadWindowServer;
   readonly projectId: string;
   readonly threadId: string;
+  /** "diff" opens the window on the thread's diff instead of its transcript. */
+  readonly view?: "diff";
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -46,7 +48,7 @@ export function parseThreadWindowLaunch(raw: string): ThreadWindowLaunch | null 
     return null;
   }
   if (typeof parsed !== "object" || parsed === null) return null;
-  const { server, projectId, threadId } = parsed as Record<string, unknown>;
+  const { server, projectId, threadId, view } = parsed as Record<string, unknown>;
   if (typeof server !== "object" || server === null) return null;
   const { httpBaseUrl, wsBaseUrl, bearerToken } = server as Record<string, unknown>;
   if (
@@ -54,11 +56,17 @@ export function parseThreadWindowLaunch(raw: string): ThreadWindowLaunch | null 
     !isUrlWithProtocol(wsBaseUrl, ["ws:", "wss:"]) ||
     !isNonEmptyString(bearerToken) ||
     !isNonEmptyString(projectId) ||
-    !isNonEmptyString(threadId)
+    !isNonEmptyString(threadId) ||
+    (view !== undefined && view !== "diff")
   ) {
     return null;
   }
-  return { server: { httpBaseUrl, wsBaseUrl, bearerToken }, projectId, threadId };
+  return {
+    server: { httpBaseUrl, wsBaseUrl, bearerToken },
+    projectId,
+    threadId,
+    ...(view === "diff" ? { view } : {}),
+  };
 }
 
 export async function writeThreadWindowLaunch(

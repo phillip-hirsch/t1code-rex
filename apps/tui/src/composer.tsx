@@ -131,6 +131,8 @@ export interface ComposerProps {
   readonly onStatus: (message: string) => void;
   /** `/clone`: returns the error to show, or null once the clone started. */
   readonly onClone: (args: string) => Promise<string | null>;
+  /** `/diff`, where the window has a diff panel. */
+  readonly onToggleDiff?: () => void;
   readonly mentionSearch: ComposerMentionSearch;
   readonly ref?: Ref<ComposerHandle>;
 }
@@ -361,6 +363,10 @@ export function Composer(props: ComposerProps) {
             );
             return;
           }
+          case "toggle-diff":
+            if (props.onToggleDiff) props.onToggleDiff();
+            else props.onStatus("No diff here");
+            return;
           case "clone":
             props.onStatus("Starting clone…");
             void props.onClone(action.args).then((error) => {

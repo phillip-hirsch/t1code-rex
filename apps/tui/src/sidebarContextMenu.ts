@@ -5,6 +5,7 @@
 
 export type ThreadMenuActionId =
   | "open-rex-tab"
+  | "open-rex-diff"
   | "rename"
   | "pin"
   | "unpin"
@@ -53,7 +54,12 @@ export function buildThreadMenuItems(input: {
   readonly running: boolean;
 }): ReadonlyArray<MenuItem<ThreadMenuActionId>> {
   return [
-    ...(input.rexTabs ? [{ id: "open-rex-tab" as const, label: "Open in Rex Tab" }] : []),
+    ...(input.rexTabs
+      ? [
+          { id: "open-rex-tab" as const, label: "Open in Rex Tab" },
+          { id: "open-rex-diff" as const, label: "Open Diff in Rex Tab" },
+        ]
+      : []),
     { id: "rename", label: "Rename thread" },
     ...(input.capabilities.pinning
       ? [

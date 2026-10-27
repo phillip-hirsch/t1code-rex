@@ -54,6 +54,8 @@ export type TimelineRow =
       readonly text: string;
       readonly accent: WorkAccent;
       readonly status: WorkStatus;
+      /** A checkpoint's run, whose diff the row opens; null for other work. */
+      readonly diffRunId: string | null;
     })
   | (RowBase & {
       readonly kind: "plan";
@@ -212,17 +214,23 @@ function workParts(item: TurnItem): WorkParts | null {
         heading: itemTitle(item) ?? "Subagent",
         preview: firstLine(item.progress ?? item.prompt),
       };
-    case "checkpoint":
+    case "checkpoint": {
       // A checkpoint with no changed files says nothing worth a row.
       if (item.files.length === 0) return null;
+      let additions = 0;
+      let deletions = 0;
+      for (const file of item.files) {
+        additions += file.additions;
+        deletions += file.deletions;
+      }
+      const files =
+        item.files.length === 1 ? (item.files[0]?.path ?? "1 file") : `${item.files.length} files`;
       return {
-        entryKind: "info",
-        heading: "Checkpoint",
-        preview:
-          item.files.length === 1
-            ? (item.files[0]?.path ?? null)
-            : `${item.files.length} changed files`,
+        entryKind: "change",
+        heading: "Changed",
+        preview: `${files} (+${additions} -${deletions})`,
       };
+    }
     case "reasoning": {
       const thought = item.text ? liveThoughtLine(item.text) : "";
       return { entryKind: "thinking", heading: "Thinking", preview: thought || null };
@@ -394,6 +402,7 @@ export function presentTurnItem(row: OrchestrationV2ProjectedTurnItem): Timeline
     text: joinWork(parts.heading, parts.preview),
     accent: workAccent(parts.entryKind, status),
     status,
+    diffRunId: item.type === "checkpoint" ? item.runId : null,
   };
 }
 
