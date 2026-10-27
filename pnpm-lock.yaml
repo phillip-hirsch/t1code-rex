@@ -990,11 +990,11 @@ importers:
   apps/tui:
     dependencies:
       '@opentui/core':
-        specifier: ^0.2.7
-        version: 0.2.16(@tsc-rs/typescript@0.8.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))
+        specifier: 0.2.7
+        version: 0.2.7(@tsc-rs/typescript@0.8.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))
       '@opentui/react':
-        specifier: ^0.2.7
-        version: 0.2.16(@tsc-rs/typescript@0.8.0)(react-devtools-core@7.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react@19.3.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))(ws@8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6))
+        specifier: 0.2.7
+        version: 0.2.7(@tsc-rs/typescript@0.8.0)(react-devtools-core@7.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react@19.3.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))(ws@8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6))
       effect:
         specifier: 4.0.5
         version: 4.0.5
@@ -5051,19 +5051,9 @@ packages:
   '@opencode/schema@2.0.28':
     resolution: {integrity: sha512-NHl42ngFN6uLCjtmtooYlEGEayng9ZFc+30DAqQuPcvKpMWsO23OqximHlukxtErp209C4f9LW+OJH/6k60+yw==}
 
-  '@opentui/core-darwin-arm64@0.2.16':
-    resolution: {integrity: sha512-aFb2Yp+oqDu3h6VCWi7xpQ9yjpKSQcROzGGfHgqC6Nd3U+uiLfPJBkmiI87iK0opCggCFj5TkKI004050DmGjg==}
-    cpu: [arm64]
-    os: [darwin]
-
   '@opentui/core-darwin-arm64@0.2.7':
     resolution: {integrity: sha512-CAy6cL3byz2Xf6gFiJHBpcnsp/2ADEWLLOUokVypOyPLcy8GY3sPzlA4pkAjVGQMYQhDj+Y3+SXz4uTLt4AETg==}
     cpu: [arm64]
-    os: [darwin]
-
-  '@opentui/core-darwin-x64@0.2.16':
-    resolution: {integrity: sha512-KimiHE0j7EsTB5P8doW0lr1eH5iZKLPKWQO+tmy1VcdYr/TzqhdHSvGuJXrZvfTFi9/rV57Eq0d7964Ri9O0vQ==}
-    cpu: [x64]
     os: [darwin]
 
   '@opentui/core-darwin-x64@0.2.7':
@@ -5071,19 +5061,9 @@ packages:
     cpu: [x64]
     os: [darwin]
 
-  '@opentui/core-linux-arm64@0.2.16':
-    resolution: {integrity: sha512-4fCwRCfTtUgS/5QcSEkSuBjgQymSOUWXgrXG2ycrf3Swi0QhKDA/pVjwLrUJ6eF+/8mQyQSEV72T8MxMO3M2qg==}
-    cpu: [arm64]
-    os: [linux]
-
   '@opentui/core-linux-arm64@0.2.7':
     resolution: {integrity: sha512-iYWGTztbdG9yYSB5Alxuo0dWAmkWQR0+/paNWUyPOocjigmKgMmACDtHgYqa7sxkIcWgmXljt/f8rgXDG4wdMg==}
     cpu: [arm64]
-    os: [linux]
-
-  '@opentui/core-linux-x64@0.2.16':
-    resolution: {integrity: sha512-KgQBGjiucw4e7gM+R8qOzHWBFhjCY1IfCrGjW3Wzxv2hKUlL+mPhelaeJwnEqtNxMUdVTYjlwlu3IHxslXMJWQ==}
-    cpu: [x64]
     os: [linux]
 
   '@opentui/core-linux-x64@0.2.7':
@@ -5091,19 +5071,9 @@ packages:
     cpu: [x64]
     os: [linux]
 
-  '@opentui/core-win32-arm64@0.2.16':
-    resolution: {integrity: sha512-C6WqEI3VkXatXraMgSFXZjEXq0pzURGjRpFAJZYmuVDmpqE57o7E80Np2UkdZ6m5kpJDt4mRyu3krc/P825iNQ==}
-    cpu: [arm64]
-    os: [win32]
-
   '@opentui/core-win32-arm64@0.2.7':
     resolution: {integrity: sha512-XLPJWdT8QOukrYDkpIng6+uNUlF66ByXcQlC3qA9JbrUTBetZhgXs8Q2jEjRfc+Ty3uh1iRSA6PgJGbbOK/f4Q==}
     cpu: [arm64]
-    os: [win32]
-
-  '@opentui/core-win32-x64@0.2.16':
-    resolution: {integrity: sha512-kCX3CMTns6DMCFDNTDV4sjmBKyA/iEvzaVhl/jYi4JRIVT2zcy1lo+lhXT5mPgYHmJZu8Uye6j3Zi3c7Z2Me5A==}
-    cpu: [x64]
     os: [win32]
 
   '@opentui/core-win32-x64@0.2.7':
@@ -5111,13 +5081,13 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opentui/core@0.2.16':
-    resolution: {integrity: sha512-4vWN15Zc3nsXJlOiHhhpqkBXD+wrNFKxCPtiTiillZYDRre+XsZogVTOOGUDwaBIC23OSxq7imezLmmtShVBEA==}
+  '@opentui/core@0.2.7':
+    resolution: {integrity: sha512-cnN6JcaGC7SeQzobBy/CHzqUAQFtypazuw1CjQBo7WwoOiLMGubt9W5FXeF0zIrSxH2Ed6NLWhPYRg7SD4629Q==}
     peerDependencies:
       web-tree-sitter: 0.25.10
 
-  '@opentui/react@0.2.16':
-    resolution: {integrity: sha512-6SX8AaG5fY42XG9VF0XhGzOcoxy3KxKup+zhKQBcI+JTZcoMI0nq2t1A/5wrqMSYOThQB//D5VsHmkh/IqOIOQ==}
+  '@opentui/react@0.2.7':
+    resolution: {integrity: sha512-1p0TsYEgwVfJc0G0URHp9PF16JOA9aVU5PfbzH2Kx1+py3i79x47mnkUMJ9ugYxAaXLrRqbFetnq5v5L6UfI0Q==}
     peerDependencies:
       react: '>=19.2.0'
       react-devtools-core: ^7.0.1
@@ -15709,43 +15679,25 @@ snapshots:
       '@standard-schema/spec': 1.1.0
       effect: 4.0.5
 
-  '@opentui/core-darwin-arm64@0.2.16':
-    optional: true
-
   '@opentui/core-darwin-arm64@0.2.7':
-    optional: true
-
-  '@opentui/core-darwin-x64@0.2.16':
     optional: true
 
   '@opentui/core-darwin-x64@0.2.7':
     optional: true
 
-  '@opentui/core-linux-arm64@0.2.16':
-    optional: true
-
   '@opentui/core-linux-arm64@0.2.7':
-    optional: true
-
-  '@opentui/core-linux-x64@0.2.16':
     optional: true
 
   '@opentui/core-linux-x64@0.2.7':
     optional: true
 
-  '@opentui/core-win32-arm64@0.2.16':
-    optional: true
-
   '@opentui/core-win32-arm64@0.2.7':
-    optional: true
-
-  '@opentui/core-win32-x64@0.2.16':
     optional: true
 
   '@opentui/core-win32-x64@0.2.7':
     optional: true
 
-  '@opentui/core@0.2.16(@tsc-rs/typescript@0.8.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))':
+  '@opentui/core@0.2.7(@tsc-rs/typescript@0.8.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))':
     dependencies:
       bun-ffi-structs: 0.2.2(@tsc-rs/typescript@0.8.0)
       diff: 9.0.0
@@ -15755,18 +15707,18 @@ snapshots:
       web-tree-sitter: 0.25.10(@types/emscripten@1.41.5)
       yoga-layout: 3.2.1
     optionalDependencies:
-      '@opentui/core-darwin-arm64': 0.2.16
-      '@opentui/core-darwin-x64': 0.2.16
-      '@opentui/core-linux-arm64': 0.2.16
-      '@opentui/core-linux-x64': 0.2.16
-      '@opentui/core-win32-arm64': 0.2.16
-      '@opentui/core-win32-x64': 0.2.16
+      '@opentui/core-darwin-arm64': 0.2.7
+      '@opentui/core-darwin-x64': 0.2.7
+      '@opentui/core-linux-arm64': 0.2.7
+      '@opentui/core-linux-x64': 0.2.7
+      '@opentui/core-win32-arm64': 0.2.7
+      '@opentui/core-win32-x64': 0.2.7
     transitivePeerDependencies:
       - typescript
 
-  '@opentui/react@0.2.16(@tsc-rs/typescript@0.8.0)(react-devtools-core@7.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react@19.3.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))(ws@8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6))':
+  '@opentui/react@0.2.7(@tsc-rs/typescript@0.8.0)(react-devtools-core@7.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6))(react@19.3.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))(ws@8.22.0(bufferutil@4.1.0)(utf-8-validate@6.0.6))':
     dependencies:
-      '@opentui/core': 0.2.16(@tsc-rs/typescript@0.8.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))
+      '@opentui/core': 0.2.7(@tsc-rs/typescript@0.8.0)(web-tree-sitter@0.25.10(@types/emscripten@1.41.5))
       react: 19.3.0
       react-devtools-core: 7.0.1(bufferutil@4.1.0)(utf-8-validate@6.0.6)
       react-reconciler: 0.33.0(react@19.3.0)
