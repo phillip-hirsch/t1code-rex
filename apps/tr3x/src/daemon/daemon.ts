@@ -69,8 +69,8 @@ async function acquire(options: DaemonOptions): Promise<Acquired | undefined> {
         {
           baseDir: paths.home,
           signal,
-          onStderr: (chunk) => {
-            stderrTail.push(...redactSecrets(chunk).split("\n"));
+          onStderr: (line) => {
+            stderrTail.push(redactSecrets(line));
             stderrTail.splice(0, Math.max(0, stderrTail.length - STDERR_TAIL_LINES));
           },
         },

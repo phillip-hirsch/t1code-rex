@@ -26,7 +26,7 @@ class FakeChildProcess extends NodeEvents.EventEmitter {
   /** Signals the fake ignores, like a server that hangs on shutdown. */
   ignoredSignals = new Set<NodeJS.Signals>();
   stdout = new NodeStream.PassThrough();
-  stderr = new NodeEvents.EventEmitter();
+  stderr = new NodeStream.PassThrough();
   stdinChunks: string[] = [];
   stdinEnded = false;
   stdin = new NodeStream.Writable({
@@ -318,6 +318,53 @@ describe("startManagedServer", () => {
     expect(fatal).toHaveBeenCalledWith("The T3 server failed 5 times in a row (exit code 1).");
     await vi.advanceTimersByTimeAsync(60_000);
     expect(children).toHaveLength(5);
+  });
+
+  it("stops a restarted server that never gets ready, then backs off and gives up", async () => {
+    vi.useFakeTimers();
+    const { children, spawnImpl } = fakeSpawn((child, index) => {
+      // Restarted servers stay up, ignoring SIGTERM, but never answer.
+      if (index > 0) child.ignoredSignals.add("SIGTERM");
+    });
+    const server = await startManagedServer(
+      { baseDir: "/tmp/.tr3x", port: 43125, restartDelayMs: 100 },
+      {
+        spawnImpl,
+        waitUntilReady: ({ process }) =>
+          process === (children[0] as unknown) ? ready() : Promise.reject(new Error("timed out")),
+        killGraceMs: 50,
+        env: {},
+      },
+    );
+    const delays: number[] = [];
+    const fatal = vi.fn();
+    server.events.on("restart", (_attempt, delayMs) => delays.push(delayMs));
+    server.events.on("fatal", fatal);
+
+    children[0]!.exit(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(delays).toEqual([100, 200, 400, 800]);
+    expect(fatal).toHaveBeenCalledWith("The T3 server failed 5 times in a row (timed out).");
+    expect(children).toHaveLength(5);
+    for (const child of children.slice(1)) {
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(child.signalCode).toBe("SIGKILL");
+    }
+  });
+
+  it("passes stderr on by whole lines, so a secret split across chunks stays whole", async () => {
+    const { children, spawnImpl } = fakeSpawn();
+    const lines: string[] = [];
+    const server = await startManagedServer(
+      { baseDir: "/tmp/.tr3x", port: 43126, onStderr: (line) => lines.push(line) },
+      { spawnImpl, waitUntilReady: ready, env: {} },
+    );
+    const stderr = children[0]!.stderr;
+    stderr.emit("data", "first\nauth-token=abc");
+    stderr.emit("data", "def rest\r\npartial");
+    expect(lines).toEqual(["first", "auth-token=abcdef rest"]);
+    await server.stop();
+    expect(lines).toEqual(["first", "auth-token=abcdef rest", "partial"]);
   });
 
   it("resets the backoff once a restarted server has stayed up", async () => {

@@ -23,11 +23,15 @@ export interface ServerEndpoint {
 export interface ManagedServerOptions {
   readonly baseDir: string;
   readonly port?: number;
-  /** The first restart's delay. Each further rapid failure doubles it, up to 30 s. */
+  /**
+   * The first restart's delay. Each further rapid failure doubles it, until
+   * the launcher gives up: 750 ms→6 s by default, then `fatal`.
+   */
   readonly restartDelayMs?: number;
   /** Aborting before the server is ready stops it and rejects the start. */
   readonly signal?: AbortSignal;
-  readonly onStderr?: (chunk: string) => void;
+  /** Each line the server writes to stderr. */
+  readonly onStderr?: (line: string) => void;
 }
 
 export interface ManagedServer extends ServerEndpoint {
@@ -46,7 +50,6 @@ interface ManagedServerEvents {
 
 const HOST = "127.0.0.1";
 const READY_TIMEOUT_MS = 30_000;
-const MAX_RESTART_DELAY_MS = 30_000;
 /** Failures in a row, with no stable run between them, before the launcher gives up. */
 const MAX_RAPID_FAILURES = 5;
 /** A server that stayed ready this long before failing resets the failure count. */
@@ -241,6 +244,8 @@ export async function startManagedServer(
   /** When the current child became ready, if it has. */
   let readyAt: number | undefined;
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Why tr3x stopped a restarted server that never got ready. */
+  const notReadyReasons = new WeakMap<NodeChildProcess.ChildProcess, string>();
 
   const spawnChild = (): NodeChildProcess.ChildProcess => {
     fatalStartupError = null;
@@ -259,15 +264,29 @@ export async function startManagedServer(
       ended = true;
       if (child === spawned) childRunning = false;
       onStartupEnd?.(reason);
-      handleEnd(code, reason);
+      handleEnd(code, notReadyReasons.get(spawned) ?? reason);
     };
     // A failed spawn (ENOENT, EAGAIN) emits `error` and never `exit`.
     spawned.on("error", (error) => {
       if (spawned.pid === undefined) onEnd(null, error.message);
     });
-    spawned.once("exit", (code, signal) =>
-      onEnd(code, code === null ? `signal ${signal}` : `exit code ${code}`),
-    );
+    // Whole lines only, so a secret split across two chunks is redacted as one.
+    let partialLine = "";
+    const onStderrLine = (line: string) => {
+      const output = line.trimEnd();
+      if (!output) return;
+      options.onStderr?.(output);
+      if (!ready) fatalStartupError = extractFatalStartupError(output) ?? fatalStartupError;
+    };
+    const flushStderr = () => {
+      const line = partialLine;
+      partialLine = "";
+      onStderrLine(line);
+    };
+    spawned.once("exit", (code, signal) => {
+      flushStderr();
+      onEnd(code, code === null ? `signal ${signal}` : `exit code ${code}`);
+    });
 
     const envelope = buildBootstrapEnvelope({
       host: HOST,
@@ -279,11 +298,13 @@ export async function startManagedServer(
     spawned.stdin?.end(`${JSON.stringify(envelope)}\n`);
     // Drain stdout so a chatty server never blocks on a full pipe.
     spawned.stdout?.resume();
-    spawned.stderr?.on("data", (chunk) => {
-      const output = String(chunk).trimEnd();
-      options.onStderr?.(output);
-      if (!ready) fatalStartupError = extractFatalStartupError(output) ?? fatalStartupError;
+    spawned.stderr?.setEncoding("utf8");
+    spawned.stderr?.on("data", (chunk: string) => {
+      const lines = (partialLine + chunk).split("\n");
+      partialLine = lines.pop() ?? "";
+      for (const line of lines) onStderrLine(line);
     });
+    spawned.stderr?.on("end", flushStderr);
     return spawned;
   };
 
@@ -303,7 +324,7 @@ export async function startManagedServer(
       events.emit("fatal", `The T3 server failed ${failures} times in a row (${reason}).`);
       return;
     }
-    const delayMs = Math.min(restartDelayMs * 2 ** (failures - 1), MAX_RESTART_DELAY_MS);
+    const delayMs = restartDelayMs * 2 ** (failures - 1);
     events.emit("restart", failures, delayMs, reason);
     restartTimer = setTimeoutImpl(() => {
       restartTimer = null;
@@ -325,8 +346,24 @@ export async function startManagedServer(
       () => {
         if (child === restarted && childRunning) readyAt = Date.now();
       },
-      () => {},
+      // A server that stays up but never gets ready counts as a failure once it exits.
+      (error: unknown) => {
+        if (stopped || child !== restarted || !childRunning) return;
+        notReadyReasons.set(restarted, error instanceof Error ? error.message : String(error));
+        void terminate(restarted);
+      },
     );
+  };
+
+  /** SIGTERM, then SIGKILL after the grace period. Resolves once the process has exited. */
+  const terminate = async (target: NodeChildProcess.ChildProcess) => {
+    const exited = new Promise<void>((resolve) => target.once("exit", () => resolve()));
+    target.kill("SIGTERM");
+    const escalate = setTimeoutImpl(() => {
+      if (child === target && childRunning) target.kill("SIGKILL");
+    }, killGraceMs);
+    await exited;
+    clearTimeoutImpl(escalate);
   };
 
   const stop = async () => {
@@ -335,15 +372,7 @@ export async function startManagedServer(
       clearTimeoutImpl(restartTimer);
       restartTimer = null;
     }
-    const current = child;
-    if (!current || !childRunning) return;
-    const exited = new Promise<void>((resolve) => current.once("exit", () => resolve()));
-    current.kill("SIGTERM");
-    const escalate = setTimeoutImpl(() => {
-      if (childRunning) current.kill("SIGKILL");
-    }, killGraceMs);
-    await exited;
-    clearTimeoutImpl(escalate);
+    if (child && childRunning) await terminate(child);
   };
 
   // Registered before any await: an abort while the port is reserved must stop
