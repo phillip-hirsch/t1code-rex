@@ -7,6 +7,7 @@ import {
   CommandId,
   MessageId,
   type ProjectId,
+  type RuntimeRequestId,
   type ThreadId,
   type UploadChatImageAttachment,
 } from "@t3tools/contracts";
@@ -50,6 +51,19 @@ export interface ComposerSend {
   readonly dispatch: ComposerDispatch;
   readonly settings: ComposerSettings;
   readonly createdAt: string;
+  /** Approvals it declines before it goes out; see `requestRedirect.ts`. */
+  readonly declines?: ComposerDeclines;
+}
+
+/**
+ * Upstream web's redirect: a message sent while an approval is shown declines it first,
+ * then steers the run that the approval kept waiting.
+ */
+export interface ComposerDeclines {
+  /** The approvals to decline: the one the panel showed when the message was sent. */
+  readonly requestIds: ReadonlyArray<RuntimeRequestId>;
+  /** Every approval pending then; one that arrives later sends the message back. */
+  readonly knownApprovalIds: ReadonlyArray<RuntimeRequestId>;
 }
 
 /** A new send with fresh ids, stamped now. */
@@ -76,8 +90,11 @@ export type ComposerSettingsCommand =
       readonly value: ComposerSettings["interactionMode"];
     };
 
-/** One step of a send's plan: a mode change, then the message itself. */
-export type ComposerStage = ComposerSettingsCommand | { readonly kind: "start-turn" };
+/** One step of a send's plan: declines, then mode changes, then the message itself. */
+export type ComposerStage =
+  | { readonly kind: "decline-approvals"; readonly declines: ComposerDeclines }
+  | ComposerSettingsCommand
+  | { readonly kind: "start-turn" };
 
 /**
  * A message that went out unconfirmed before tr3x quit. The next launch looks for its id on

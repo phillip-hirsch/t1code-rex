@@ -1,70 +1,88 @@
-import type { RuntimeRequestId, ThreadId } from "@t3tools/contracts";
+import { CommandId, type RuntimeRequestId, type ThreadId } from "@t3tools/contracts";
 
-import type { ComposerSend } from "./composerSend.ts";
-import type { ComposerSender } from "./composerSender.ts";
-import type { ComposerStore } from "./composerStore.ts";
+import { classifySendFailure, describeSendFailure, type ComposerSend } from "./composerSend.ts";
+import type { ComposerCommandResult, DeclineApprovalsInput } from "./composerSender.ts";
+import { isOpen } from "./requestPanel.ts";
+import type { PendingRequest } from "./requestQueue.ts";
 import type { RequestResponder } from "./requestResponder.ts";
 
-export interface RedirectApproval {
-  readonly requestId: RuntimeRequestId;
-  /** Only a live approval can be declined; one the provider lost has nothing to decline. */
-  readonly live: boolean;
-}
+export const NOT_DECLINED = "Not sent: declining the approval didn't go through";
+export const ANOTHER_ARRIVED =
+  "Not sent: another approval came in. Send it again to decline that one too";
 
-export interface RedirectingSenderOptions {
-  readonly sender: ComposerSender;
-  readonly store: Pick<ComposerStore, "beginSend" | "finishSend" | "restoreSend">;
-  readonly responder: Pick<RequestResponder, "respond" | "outcome">;
-  /** The approvals the panel shows on a thread now: in view, and not answered yet. */
-  readonly shownApprovals: (threadId: ThreadId) => ReadonlyArray<RedirectApproval>;
-  /** Every approval pending on a thread, shown or held. */
-  readonly pendingApprovalIds: (threadId: ThreadId) => ReadonlyArray<RuntimeRequestId>;
-}
-
-const NOT_DECLINED =
-  "Not sent: declining the approval didn't go through yet. Send it again when you're ready.";
-const ANOTHER_ARRIVED =
-  "Not sent: another approval came in. Send it again to decline that one too.";
+const OK: ComposerCommandResult = { ok: true };
 
 /**
- * Upstream web's redirect: a message sent while approvals are shown declines them, then
- * steers the run, which an open approval would keep waiting. If a decline fails or another
- * approval arrives meanwhile, the message goes back into the composer.
+ * Upstream web's redirect, for a message sent from the composer: if the panel shows a live
+ * approval, the message declines it first, then steers the run it kept waiting. Only the
+ * approval on screen is declined; a question on screen, or nothing, leaves the send alone.
  */
-export function createRedirectingSender(options: RedirectingSenderOptions): ComposerSender {
-  const { sender, store, responder } = options;
-  const redirect = async (send: ComposerSend): Promise<void> => {
-    const threadId = send.target.threadId;
-    const approvals =
-      send.target.kind === "thread"
-        ? options.shownApprovals(threadId).filter((approval) => approval.live)
-        : [];
-    if (approvals.length === 0) return sender.send(send);
-
-    const steer: ComposerSend = { ...send, dispatch: "steer" };
-    // Shown as on its way while the declines go out.
-    store.beginSend(steer);
-    const before = new Set(options.pendingApprovalIds(threadId));
-    for (const approval of approvals) {
-      responder.respond(threadId, approval.requestId, {
-        type: "approval",
-        decision: "decline",
-      });
-    }
-    const outcomes = await Promise.all(
-      approvals.map((approval) => responder.outcome(approval.requestId)),
-    );
-    // Null: resolved and pruned meanwhile, so there's nothing left to decline.
-    if (!outcomes.every((outcome) => outcome === null || outcome.state === "sent")) {
-      store.restoreSend(steer, NOT_DECLINED);
-      return;
-    }
-    if (options.pendingApprovalIds(threadId).some((requestId) => !before.has(requestId))) {
-      store.restoreSend(steer, ANOTHER_ARRIVED);
-      return;
-    }
-    store.finishSend(steer);
-    return sender.send(steer);
+export function redirectSend(
+  send: ComposerSend,
+  view: {
+    /** The request the panel shows now, or null when none is in view. */
+    readonly active: PendingRequest | null;
+    readonly statusOf: RequestResponder["status"];
+    /** Every request pending on the thread, shown or held. */
+    readonly queue: ReadonlyArray<PendingRequest>;
+  },
+): ComposerSend {
+  const { active } = view;
+  if (
+    send.target.kind !== "thread" ||
+    active === null ||
+    active.kind !== "approval" ||
+    active.approval.responseCapability !== "live" ||
+    !isOpen(view.statusOf(active.requestId))
+  ) {
+    return send;
+  }
+  return {
+    ...send,
+    dispatch: "steer",
+    declines: {
+      requestIds: [active.requestId],
+      knownApprovalIds: view.queue.flatMap((request) =>
+        request.kind === "approval" ? [request.requestId] : [],
+      ),
+    },
   };
-  return { ...sender, send: redirect };
+}
+
+export interface RedirectDeclinerOptions {
+  readonly responder: Pick<RequestResponder, "declineOnce">;
+  /** Approvals pending on a thread now; null when this window can't tell. */
+  readonly pendingApprovalIds: (threadId: ThreadId) => ReadonlyArray<RuntimeRequestId> | null;
+}
+
+const failed = (message: string): ComposerCommandResult => ({
+  ok: false,
+  error: new Error(message),
+  interrupted: false,
+});
+
+/**
+ * Runs a message's decline stage inside its sender job, so the queue's order, Stop, discard,
+ * retries and quit cover it. Each decline's id derives from the message's, so a retry can't
+ * answer twice. An approval resolved before its turn is skipped. A turned-down decline, or
+ * an approval that arrived since the message was sent, sends the message back with why.
+ */
+export function createRedirectDecliner(options: RedirectDeclinerOptions) {
+  return async (input: DeclineApprovalsInput): Promise<ComposerCommandResult> => {
+    const { threadId, declines } = input;
+    for (const requestId of declines.requestIds) {
+      const pending = options.pendingApprovalIds(threadId);
+      if (pending !== null && !pending.includes(requestId)) continue;
+      const commandId = CommandId.make(`${input.commandId}:decline:${requestId}`);
+      const result = await options.responder.declineOnce(threadId, requestId, commandId);
+      if (result === null || result.ok) continue;
+      if (classifySendFailure(result.error, result.interrupted) === "retry") return result;
+      return failed(`${NOT_DECLINED} (${describeSendFailure(result.error)})`);
+    }
+    const pending = options.pendingApprovalIds(threadId);
+    if (pending?.some((requestId) => !declines.knownApprovalIds.includes(requestId))) {
+      return failed(ANOTHER_ARRIVED);
+    }
+    return OK;
+  };
 }

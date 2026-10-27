@@ -14,7 +14,7 @@ import {
 import { Composer, type ComposerHandle, type ComposerProps } from "./composer.tsx";
 import type { ComposerSend } from "./composerSend.ts";
 import type { ComposerSender } from "./composerSender.ts";
-import { isOpen } from "./requestPanel.ts";
+import { pickActiveRequest } from "./requestPanel.ts";
 import type { RequestPanelStore } from "./requestPanelStore.ts";
 import { RequestPanel, type RequestPanelHandle } from "./requestPanelView.tsx";
 import {
@@ -25,7 +25,7 @@ import {
   type RequestHoldState,
 } from "./requestHold.ts";
 import type { PendingRequest } from "./requestQueue.ts";
-import { createRedirectingSender } from "./requestRedirect.ts";
+import { redirectSend } from "./requestRedirect.ts";
 import type { RequestResponder } from "./requestResponder.ts";
 
 /** Which of the dock's two parts has the keyboard. */
@@ -139,43 +139,29 @@ export function ComposerDock(props: ComposerDockProps) {
     live.current = { queue, shownQueue };
   });
   const { sender } = props;
-  const store = composer.store;
+  const panelStore = requests?.store ?? null;
   const responder = requests?.responder ?? null;
   const holdDispatch = hold.dispatch;
   const send = useCallback(
     (outgoing: ComposerSend): Promise<void> => {
-      const redirecting =
-        responder === null
-          ? sender
-          : createRedirectingSender({
-              sender,
-              store,
-              responder,
-              shownApprovals: (id) =>
-                id !== threadId
-                  ? []
-                  : live.current.shownQueue.flatMap((request) =>
-                      request.kind === "approval" && isOpen(responder.status(request.requestId))
-                        ? [
-                            {
-                              requestId: request.requestId,
-                              live: request.approval.responseCapability === "live",
-                            },
-                          ]
-                        : [],
-                    ),
-              pendingApprovalIds: (id) =>
-                id !== threadId
-                  ? []
-                  : live.current.queue.flatMap((request) =>
-                      request.kind === "approval" ? [request.requestId] : [],
-                    ),
+      // Declines the approval on screen, if any, as a stage of this message's sender job.
+      const routed =
+        responder === null || panelStore === null
+          ? outgoing
+          : redirectSend(outgoing, {
+              active: pickActiveRequest(
+                live.current.shownQueue,
+                panelStore.active(threadId),
+                responder.status,
+              ),
+              statusOf: responder.status,
+              queue: live.current.queue,
             });
-      const sent = redirecting.send(outgoing);
+      const sent = sender.send(routed);
       holdDispatch({ type: "send" });
       return sent;
     },
-    [holdDispatch, responder, sender, store, threadId],
+    [holdDispatch, panelStore, responder, sender, threadId],
   );
   const dockSender = useMemo((): ComposerSender => ({ ...sender, send }), [sender, send]);
 

@@ -324,9 +324,11 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
   switch (action.type) {
     case "step-request":
     case "none":
+      return action;
+    // Holding Ctrl+C must not stop the run and then quit: each takes a fresh press.
     case "stop":
     case "exit":
-      return action;
+      return NONE;
     case "hint":
       return action.form === undefined ? action : { type: "hint", message: REPEAT_HINT };
     default:

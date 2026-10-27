@@ -10,6 +10,8 @@ export interface ComposerKey {
   readonly shift?: boolean;
   readonly option?: boolean;
   readonly super?: boolean;
+  /** A held key's repeat (kitty keyboard protocol). */
+  readonly repeated?: boolean;
 }
 
 export interface ComposerKeyState {
@@ -31,6 +33,7 @@ export type ComposerKeyAction =
   | { readonly type: "stop" }
   | { readonly type: "clear" }
   | { readonly type: "exit" }
+  | { readonly type: "ignore" }
   | { readonly type: "paste-image" }
   | { readonly type: "arm-remove-attachment" }
   | { readonly type: "remove-attachment" }
@@ -46,6 +49,8 @@ export function resolveComposerKey(
   state: ComposerKeyState,
 ): ComposerKeyAction | null {
   const { name } = key;
+  // Holding Ctrl+C or Esc must not clear, then stop, then quit: each takes a fresh press.
+  if (key.repeated && ((key.ctrl && name === "c") || name === "escape")) return { type: "ignore" };
   if (key.ctrl && name === "c") {
     if (state.hasText || state.attachmentCount > 0) return { type: "clear" };
     if (state.running && !state.stopRequested) return { type: "stop" };

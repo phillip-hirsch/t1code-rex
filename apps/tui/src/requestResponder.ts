@@ -61,6 +61,8 @@ interface Job {
   inFlight: Promise<void> | null;
 }
 
+const DECLINE: RequestResponse = { type: "approval", decision: "decline" };
+
 /**
  * Sends approval decisions, answers and dismissals. One response per request at a time;
  * each keeps its command id across retries, so a reply lost with the connection can't
@@ -158,15 +160,69 @@ export function createRequestResponder(options: RequestResponderOptions) {
       track(job);
       return true;
     },
-    status(requestId: RuntimeRequestId): ResponseStatus | null {
-      return jobs.get(requestId)?.status ?? null;
-    },
     /**
-     * Where a request's response stands once the attempt out now has its reply: "sent",
-     * "failed", or "waiting" for a retry. Null once it resolved and was pruned.
+     * One decline for a queued message, which retries with the same id. A lost connection
+     * leaves nothing here, so a dropped message leaves no stale state. Null when there's
+     * nothing to decline: answered another way, or resolved meanwhile.
      */
-    async outcome(requestId: RuntimeRequestId): Promise<ResponseStatus | null> {
-      await jobs.get(requestId)?.inFlight;
+    async declineOnce(
+      threadId: ThreadId,
+      requestId: RuntimeRequestId,
+      commandId: CommandId,
+    ): Promise<ComposerCommandResult | null> {
+      if (disposed) return null;
+      const existing = jobs.get(requestId);
+      if (existing !== undefined && existing.status.state !== "failed") {
+        // Its own decline from an earlier attempt still out: this one goes again.
+        if (existing.commandId !== commandId || existing.status.state === "sent") return null;
+      }
+      existing?.cancelRetry?.();
+      const job: Job = {
+        threadId,
+        requestId,
+        commandId,
+        response: DECLINE,
+        attempt: 0,
+        status: { state: "sending", response: DECLINE },
+        cancelRetry: null,
+        inFlight: null,
+      };
+      jobs.set(requestId, job);
+      notify();
+      const reply = dispatch(job).catch((error: unknown): ComposerCommandResult => ({
+        ok: false,
+        error,
+        interrupted: false,
+      }));
+      const inFlight = reply.then(() => undefined);
+      job.inFlight = inFlight;
+      running.add(inFlight);
+      const result = await reply;
+      running.delete(inFlight);
+      job.inFlight = null;
+      // Pruned meanwhile: it resolved, so there's nothing left to decline.
+      if (!jobs.has(requestId)) return null;
+      // Replaced by a newer attempt, or the responder is gone: this reply decides nothing.
+      if (disposed || jobs.get(requestId) !== job) return result;
+      if (result.ok) {
+        setStatus(job, { state: "sent", response: DECLINE });
+        return result;
+      }
+      const action = classifySendFailure(result.error, result.interrupted);
+      options.onFailure?.(requestId, result.error, action);
+      if (action === "restore") {
+        setStatus(job, {
+          state: "failed",
+          response: DECLINE,
+          error: describeSendFailure(result.error),
+        });
+      } else {
+        jobs.delete(requestId);
+        notify();
+      }
+      return result;
+    },
+    status(requestId: RuntimeRequestId): ResponseStatus | null {
       return jobs.get(requestId)?.status ?? null;
     },
     /** Clears a turned-down response's error, e.g. once the user saw it and moved on. */

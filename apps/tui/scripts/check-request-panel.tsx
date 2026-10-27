@@ -13,7 +13,8 @@ import { act, createRef, useImperativeHandle, useRef, useState } from "react";
 
 import { ComposerDock, type ComposerDockHandle, type DockFocus } from "../src/composerDock.tsx";
 import { DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
-import { createComposerSender } from "../src/composerSender.ts";
+import { QUIT_NOTICE } from "../src/composerSender.ts";
+import { createComposerSender, type ComposerCommandResult } from "../src/composerSender.ts";
 import type { ComposerSettings } from "../src/composerSettings.ts";
 import { createComposerStore } from "../src/composerStore.ts";
 import { PANEL_QUIET_MS } from "../src/requestPanel.ts";
@@ -23,6 +24,7 @@ import {
   deriveRequestQueue,
   type PendingRequest,
 } from "../src/requestQueue.ts";
+import { createRedirectDecliner } from "../src/requestRedirect.ts";
 import { createRequestResponder } from "../src/requestResponder.ts";
 import {
   approvalItem,
@@ -106,17 +108,27 @@ function Shell(props: {
 
 async function mount(
   initialQueue: ReadonlyArray<PendingRequest>,
-  options: { running?: boolean; stopRequested?: boolean; stopSentRunId?: string | null } = {},
+  options: {
+    running?: boolean;
+    stopRequested?: boolean;
+    stopSentRunId?: string | null;
+    /** Replies to approval responses, in order; ok once they run out. */
+    approvalReplies?: Array<Promise<ComposerCommandResult> | ComposerCommandResult>;
+  } = {},
 ) {
+  const approvalReplies = [...(options.approvalReplies ?? [])];
+  /** What the thread has pending now, as ui.tsx reads it from the live projection. */
+  let liveQueue = initialQueue;
   const calls: Call[] = [];
   const turns: StartThreadTurnInput[] = [];
   const outcomes: string[] = [];
   const keys: KeyEvent[] = [];
   const hints: string[] = [];
+  const statuses: string[] = [];
   const responder = createRequestResponder({
     respondToApproval: (input) => {
       calls.push({ kind: "approval", input: { ...input } });
-      return Promise.resolve({ ok: true });
+      return Promise.resolve(approvalReplies.shift() ?? { ok: true });
     },
     respondToUserInput: (input) => {
       calls.push({ kind: "answers", input: { ...input } });
@@ -135,13 +147,29 @@ async function mount(
     setRuntimeMode: () => Promise.resolve({ ok: true }),
     setInteractionMode: () => Promise.resolve({ ok: true }),
     threadSettings: () => settings,
-    resumeQueue: () => Promise.resolve({ ok: true }),
+    resumeQueue: () => {
+      calls.push({ kind: "queue.resume", input: {} });
+      return Promise.resolve({ ok: true });
+    },
+    // As ui.tsx: a message's declines run as a stage of its sender job.
+    declineApprovals: createRedirectDecliner({
+      responder,
+      pendingApprovalIds: () =>
+        liveQueue.flatMap((request) => (request.kind === "approval" ? [request.requestId] : [])),
+    }),
     schedule: () => () => undefined,
   });
   const panelStore = createRequestPanelStore();
   const handle = createRef<Controls>();
   const controls = {
-    setQueue: (queue: ReadonlyArray<PendingRequest>) => handle.current?.setQueue(queue),
+    // A request resolving drops it from the queue and prunes it, as onThreadRequestsResolved.
+    setQueue: (queue: ReadonlyArray<PendingRequest>) => {
+      liveQueue = queue;
+      const pending = queue.map((request) => request.requestId);
+      responder.prune(threadId, pending);
+      panelStore.prune(threadId, pending);
+      handle.current?.setQueue(queue);
+    },
     get focus() {
       return handle.current?.focus ?? null;
     },
@@ -165,13 +193,19 @@ async function mount(
             running: options.running ?? true,
             stopRequested: options.stopRequested ?? false,
             clipboardDir: "/tmp",
-            onStop: () => outcomes.push("stop"),
+            // As ui.tsx's stopRun: unsent messages wait until resumed.
+            onStop: () => {
+              outcomes.push("stop");
+              sender.hold(threadId);
+            },
             onExit: () => outcomes.push("exit"),
             onNewThread: () => undefined,
             onOpenModelPicker: () => undefined,
             onSetInteractionMode: () => undefined,
             onSetRuntimeMode: () => undefined,
-            onStatus: () => undefined,
+            onStatus: (status) => {
+              statuses.push(status);
+            },
           }}
           sender={sender}
           requests={{
@@ -198,9 +232,12 @@ async function mount(
     await act(async () => fn());
     await settle(setup.renderOnce);
   };
-  /** Raw kitty key events: `CSI code ; 1 : type u`, type 1 a press, 2 a repeat. */
-  const kitty = (code: number, type: 1 | 2) =>
-    setup.renderer.stdin.emit("data", Buffer.from(`\x1b[${code};1:${type}u`));
+  /**
+   * Raw kitty key events: `CSI code ; mods : type u`, type 1 a press, 2 a repeat; mods 1 is
+   * none, 5 is Ctrl.
+   */
+  const kitty = (code: number, type: 1 | 2, mods: 1 | 5 = 1) =>
+    setup.renderer.stdin.emit("data", Buffer.from(`\x1b[${code};${mods}:${type}u`));
   const close = async () => {
     await act(async () => {
       responder.dispose();
@@ -211,9 +248,12 @@ async function mount(
   return {
     setup,
     store,
+    sender,
+    responder,
     calls,
     turns,
     outcomes,
+    statuses,
     keys,
     hints,
     controls,
@@ -491,6 +531,203 @@ async function checkStop(): Promise<void> {
   await stopping.close();
 }
 
+type Dock = Awaited<ReturnType<typeof mount>>;
+
+/** A reply the check sends when it chooses, to force an interleaving. */
+function deferredReply() {
+  let resolve!: (result: ComposerCommandResult) => void;
+  const promise = new Promise<ComposerCommandResult>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+const sentTexts = (turns: ReadonlyArray<StartThreadTurnInput>) =>
+  turns.map((turn) => `${turn.message.text} (${turn.dispatchMode})`).join(", ");
+
+async function typeAndSend(dock: Dock, text: string): Promise<void> {
+  await act(() => dock.setup.mockInput.typeText(text, 5));
+  await dock.press(() => dock.setup.mockInput.pressEnter());
+}
+
+/** The approval's decline gets its reply, and the thread drops the approval. */
+async function declineLands(dock: Dock, reply: ReturnType<typeof deferredReply>): Promise<void> {
+  await act(async () => reply.resolve({ ok: true }));
+  await act(async () => dock.controls.setQueue(NO_PENDING_REQUESTS));
+  await settle(dock.setup.renderOnce);
+}
+
+/** Round 3, N5: two messages while an approval is shown: one decline, then both, in order. */
+async function checkRedirectOrder(): Promise<void> {
+  const reply = deferredReply();
+  const dock = await mount(deriveRequestQueue(source(approval())), {
+    approvalReplies: [reply.promise],
+  });
+  await wait(50);
+  await typeAndSend(dock, "message A");
+  await typeAndSend(dock, "message B");
+  check("R2: the shown approval's decline goes out", decisions(dock.calls), "decline");
+  check("R2: no message passes it", sentTexts(dock.turns), "");
+  check("R2: both count as unsent", dock.sender.pendingCount(), 2);
+  await declineLands(dock, reply);
+  check(
+    "R2: then both go, in order",
+    sentTexts(dock.turns),
+    "message A (steer), message B (steer)",
+  );
+  check("R2: having declined once", decisions(dock.calls), "decline");
+  await dock.close();
+}
+
+/** Round 3, N5: Stop during the decline holds the message until resumed. */
+async function checkStopDuringDecline(): Promise<void> {
+  const reply = deferredReply();
+  const dock = await mount(deriveRequestQueue(source(approval())), {
+    approvalReplies: [reply.promise],
+  });
+  await wait(50);
+  await typeAndSend(dock, "use a temp file");
+  await dock.press(() => dock.setup.mockInput.pressCtrlC());
+  check("R3: Ctrl+C stops the run", dock.outcomes.join(","), "stop");
+  await declineLands(dock, reply);
+  check("R3: the message is held, not sent", sentTexts(dock.turns), "");
+  check("R3: nothing resumes the server's queue", decisions(dock.calls), "decline");
+  check("R3: the composer shows it held", dock.store.snapshot(threadId).sends[0]?.status, "held");
+  await typeAndSend(dock, "/resume");
+  check(
+    "R3: /resume releases the server's queue first",
+    decisions(dock.calls),
+    "decline,queue.resume",
+  );
+  check("R3: then sends it", sentTexts(dock.turns), "use a temp file (steer)");
+  await dock.close();
+}
+
+/** Round 3, N5: quitting during the decline puts the message back in the composer. */
+async function checkQuitDuringDecline(): Promise<void> {
+  const reply = deferredReply();
+  const dock = await mount(deriveRequestQueue(source(approval())), {
+    approvalReplies: [reply.promise],
+  });
+  await wait(50);
+  await typeAndSend(dock, "keep this text");
+  check("R4: quit sees one unsent message", dock.sender.pendingCount(), 1);
+  await act(async () => dock.sender.handOff());
+  check("R4: it's back in the composer", dock.store.getDraft(threadId).text, "keep this text");
+  check("R4: saying why", dock.store.snapshot(threadId).notice, QUIT_NOTICE);
+  await declineLands(dock, reply);
+  check("R4: and it never went out", sentTexts(dock.turns), "");
+  await dock.close();
+}
+
+/** Round 3, N5: /discard during the decline hands the message back. */
+async function checkDiscardDuringDecline(): Promise<void> {
+  const reply = deferredReply();
+  const dock = await mount(deriveRequestQueue(source(approval())), {
+    approvalReplies: [reply.promise],
+  });
+  await wait(50);
+  await typeAndSend(dock, "drop me");
+  await typeAndSend(dock, "/discard");
+  check("R5: /discard finds it", dock.statuses.at(-1), "1 unsent message back in the composer");
+  check("R5: it's back in the composer", dock.store.getDraft(threadId).text, "drop me");
+  await declineLands(dock, reply);
+  check("R5: and it never went out", sentTexts(dock.turns), "");
+  await dock.close();
+}
+
+/** Round 3, N5: a turned-down decline keeps the text and says why, here and in the panel. */
+async function checkDeclineRejected(): Promise<void> {
+  const dock = await mount(deriveRequestQueue(source(approval())), {
+    approvalReplies: [
+      {
+        ok: false,
+        error: new Error("Runtime request approve-ls is resolved."),
+        interrupted: false,
+      },
+    ],
+  });
+  await wait(50);
+  await typeAndSend(dock, "try this instead");
+  check("R6: nothing was sent", sentTexts(dock.turns), "");
+  check("R6: the text is back", dock.store.getDraft(threadId).text, "try this instead");
+  check(
+    "R6: with why",
+    dock.store.snapshot(threadId).notice,
+    "Not sent: declining the approval didn't go through (Runtime request approve-ls is resolved.)",
+  );
+  check("R6: the panel says it too", dock.frame().includes("Not sent: Runtime request"), true);
+  await dock.close();
+}
+
+/** Round 3, N6: with a question on screen, a send declines no approval behind it. */
+async function checkSendDeclinesOnlyShown(): Promise<void> {
+  const later = approval("approve-ls", { second: 1 });
+  const dock = await mount(
+    deriveRequestQueue(
+      source({
+        runtimeRequests: [runtimeRequest("pick-color", "user_input"), ...later.runtimeRequests],
+        nodes: later.nodes,
+        turnItems: [
+          questionItem("pick-color", [question("color", ["Red", "Blue"])]),
+          ...later.turnItems,
+        ],
+      }),
+    ),
+  );
+  await wait(50);
+  check("N6: the question is on screen", dock.frame().includes("Question"), true);
+  check("N6: the approval isn't", dock.frame().includes("$ ls > listing.txt"), false);
+  await typeAndSend(dock, "hello");
+  await settle(dock.setup.renderOnce);
+  check("N6: nothing was declined", decisions(dock.calls), "");
+  check(
+    "N6: the message went as usual",
+    sentTexts(dock.turns),
+    `hello (${DEFAULT_FOLLOW_UP_BEHAVIOR})`,
+  );
+  await dock.close();
+}
+
+/** Round 3, N4: a held Ctrl+C's repeats never stop the run or quit, in either part. */
+async function checkHeldCtrlC(): Promise<void> {
+  const C = 99;
+  const CTRL = 5;
+  const composer = await mount(NO_PENDING_REQUESTS, { running: true });
+  await act(() => composer.setup.mockInput.typeText("a draft", 5));
+  await composer.press(() => {
+    composer.kitty(C, 1, CTRL);
+    for (let index = 0; index < 5; index += 1) composer.kitty(C, 2, CTRL);
+  });
+  check(
+    "N4: OpenTUI parsed held Ctrl+C",
+    composer.keys.filter((key) => key.ctrl && key.name === "c" && key.repeated).length,
+    5,
+  );
+  check("N4: in the composer, Ctrl+C clears the draft", composer.store.getDraft(threadId).text, "");
+  check("N4: and its repeats don't stop the run", composer.outcomes.join(","), "");
+  await composer.press(() => {
+    composer.kitty(C, 1, CTRL);
+    for (let index = 0; index < 5; index += 1) composer.kitty(C, 2, CTRL);
+  });
+  check("N4: a fresh Ctrl+C stops, once", composer.outcomes.join(","), "stop");
+  await composer.close();
+
+  const panel = await mount(deriveRequestQueue(source(approval())), { running: true });
+  await panel.press(() => panel.setup.mockInput.pressTab());
+  check("N4: the panel has focus", panel.controls.focus, "requests");
+  await panel.press(() => {
+    panel.kitty(C, 1, CTRL);
+    for (let index = 0; index < 5; index += 1) panel.kitty(C, 2, CTRL);
+  });
+  check(
+    "N4: in the panel, held Ctrl+C stops once and doesn't quit",
+    panel.outcomes.join(","),
+    "stop",
+  );
+  await panel.close();
+}
+
 await checkTypingThenRequest();
 await checkSendDeclines();
 await checkEarlyTab();
@@ -499,5 +736,12 @@ await checkStopped();
 await checkUnanswerable();
 await checkQuestions();
 await checkStop();
+await checkRedirectOrder();
+await checkStopDuringDecline();
+await checkQuitDuringDecline();
+await checkDiscardDuringDecline();
+await checkDeclineRejected();
+await checkSendDeclinesOnlyShown();
+await checkHeldCtrlC();
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

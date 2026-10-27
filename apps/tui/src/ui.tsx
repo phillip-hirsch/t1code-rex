@@ -101,6 +101,7 @@ import { ModelPickerView } from "./modelPickerView.tsx";
 import { NewThreadView } from "./newThreadView.tsx";
 import { createRequestPanelStore } from "./requestPanelStore.ts";
 import { NO_PENDING_REQUESTS, type PendingRequest } from "./requestQueue.ts";
+import { createRedirectDecliner } from "./requestRedirect.ts";
 import { createRequestResponder } from "./requestResponder.ts";
 
 const APP_VERSION = packageJson.version ?? "0.0.0";
@@ -362,28 +363,6 @@ function Shell(props: AppProps) {
     const thread = sidebar.threadsById.get(threadId);
     return thread ? threadSettings(thread) : null;
   });
-  const [sender] = useState(() =>
-    createComposerSender({
-      store: composerStore,
-      startTurn: connection.startTurn,
-      setRuntimeMode: connection.setRuntimeMode,
-      setInteractionMode: connection.setInteractionMode,
-      threadSettings: settingsOfThread,
-      schedule: (run, delayMs) => {
-        const timer = setTimeout(run, delayMs);
-        return () => clearTimeout(timer);
-      },
-      resumeQueue: connection.resumeQueue,
-      onFailure: (job, error, action) =>
-        logger.log(job.kind === "send" ? "composer.send.failed" : "composer.resume.failed", {
-          threadId: job.threadId,
-          commandId: job.commandId,
-          action,
-          error: action === "stuck" ? "no reply yet" : describeSendFailure(error),
-        }),
-    }),
-  );
-  useEffect(() => () => sender.dispose(), [sender]);
   // Approvals and questions: what each thread's panel shows, and the answers on their way.
   const [requestPanelStore] = useState(createRequestPanelStore);
   const [responder] = useState(() =>
@@ -404,6 +383,40 @@ function Shell(props: AppProps) {
     }),
   );
   useEffect(() => () => responder.dispose(), [responder]);
+  // Only the thread in view has its pending approvals loaded; elsewhere they're unknown.
+  const pendingApprovalIdsOf = useEventCallback((threadId: ThreadId) =>
+    selection.threadId === threadId
+      ? connection.registry
+          .get(connection.thread(threadId).requestQueueAtom)
+          .flatMap((request) => (request.kind === "approval" ? [request.requestId] : []))
+      : null,
+  );
+  const [sender] = useState(() =>
+    createComposerSender({
+      store: composerStore,
+      startTurn: connection.startTurn,
+      setRuntimeMode: connection.setRuntimeMode,
+      setInteractionMode: connection.setInteractionMode,
+      threadSettings: settingsOfThread,
+      schedule: (run, delayMs) => {
+        const timer = setTimeout(run, delayMs);
+        return () => clearTimeout(timer);
+      },
+      resumeQueue: connection.resumeQueue,
+      declineApprovals: createRedirectDecliner({
+        responder,
+        pendingApprovalIds: pendingApprovalIdsOf,
+      }),
+      onFailure: (job, error, action) =>
+        logger.log(job.kind === "send" ? "composer.send.failed" : "composer.resume.failed", {
+          threadId: job.threadId,
+          commandId: job.commandId,
+          action,
+          error: action === "stuck" ? "no reply yet" : describeSendFailure(error),
+        }),
+    }),
+  );
+  useEffect(() => () => sender.dispose(), [sender]);
   // A request can resolve anywhere: here, another window or client, an interrupt, the run ending.
   useEffect(
     () =>
@@ -980,7 +993,8 @@ function Shell(props: AppProps) {
     }
     if (dockFocused && dockRef.current?.handleKey(key)) return true;
     if (key.ctrl && key.name === "c") {
-      requestExit();
+      // A held Ctrl+C's repeats never quit; quitting takes a fresh press.
+      if (!key.repeated) requestExit();
       return true;
     }
     if (key.name === "tab" && !key.shift) {

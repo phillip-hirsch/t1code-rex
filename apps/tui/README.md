@@ -60,7 +60,7 @@ When an agent asks for approval or asks a question, a panel shows it above the c
 - **Tab** or a click moves focus to the panel; **Esc** or **Tab** goes back. Focus also goes back when the request changes. If the request appeared less than 0.75 s before, the panel waits for Enter first.
 - Approvals: `y`/`1` approve once, `s`/`2` approve for this session, `n` decline, `c` decline and stop the run. Enter never approves. Questions: `↑↓` move, `1-9` or Space pick, `⏎` next or submit, `Ctrl+X` dismisses when the question allows it. `[` and `]` step between requests. Ctrl+C stops the run.
 - Holding a key never answers: a held key's repeats only move the cursor.
-- As in upstream's web app, sending a message while an approval is shown declines it and steers the run with your message. A request that arrives while you're typing stays out of view until you pause for 1.5 s, send or leave the composer, so that send leaves it alone.
+- As in upstream's web app, sending a message while an approval is on screen declines that approval, then steers the run with your message. The decline waits its turn behind earlier messages, and Stop, `/discard` and quitting cover it like any unsent message. A question on screen is left alone. A request that arrives while you're typing stays out of view until you pause for 1.5 s, send or leave the composer, so that send leaves it alone.
 - After a stop, a pending approval can only be declined, to clear it.
 
 ## Rex

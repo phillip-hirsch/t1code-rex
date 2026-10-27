@@ -320,6 +320,17 @@ describe("resolvePanelKey: approvals", () => {
     expect(resolvePanelKey(key("tab", { repeated: true }), context)).toEqual({ type: "none" });
   });
 
+  // Round 3, N4: holding Ctrl+C must not stop the run and then quit.
+  it("ignores a held Ctrl+C's repeats for stop and quit", () => {
+    const ctrlC = (repeated: boolean) => key("c", { ctrl: true, repeated });
+    const running = { ...context, running: true, stopRequested: false };
+    expect(resolvePanelKey(ctrlC(false), running)).toEqual({ type: "stop" });
+    expect(resolvePanelKey(ctrlC(true), running)).toEqual({ type: "none" });
+    const stopping = { ...context, running: true, stopRequested: true };
+    expect(resolvePanelKey(ctrlC(true), stopping)).toEqual({ type: "none" });
+    expect(resolvePanelKey(ctrlC(false), stopping)).toEqual({ type: "exit" });
+  });
+
   it("holding Enter engages once, then decides nothing", () => {
     let now = 0;
     const guard = createEngagementGuard(() => now);
