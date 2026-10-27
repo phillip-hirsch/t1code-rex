@@ -21,7 +21,7 @@ Paths starting with `v2:` are in `origin/orchestration-v2` (upstream T3 Code `51
  └──────────│────────────────────────────┘                  │ rex CLI: window new/close,
             │ client-runtime (Effect RPC over WS)            │ events --all --json
             │                                  ┌─────────────▼──────────────┐
-            │                                  │ tr3x daemon (Bun)          │
+            │                                  │ tr3x daemon (Node)         │
             │                                  │  shell stream → tab map    │
             │                                  │  issues per-tab bearer     │
             │                                  │  Unix socket for Lua/CLI   │
@@ -152,7 +152,7 @@ Target: about **4–5k non-test lines** for the view, against 25k for the abando
 
 - One T3 server per user, because the server is multi-project and one server owns each base dir. A second server exits with code 78 [V `upstream-v2-api.md` §5.1, `desktopBootstrap.ts:6`].
 - The daemon starts it in desktop mode with the bootstrap over stdin, or attaches to it through `server-runtime.json`. `serverLauncher.ts` already does both [V].
-- One Rex **session per T3 project** (session label = project title) and one **tab per open thread**. The daemon is a single Bun process; any `tr3x` command starts it if it isn't running, the way `rex --autostart` starts the Rex server.
+- One Rex **session per T3 project** (session label = project title) and one **tab per open thread**. The daemon is a single Node process; any `tr3x` command starts it if it isn't running, the way `rex --autostart` starts the Rex server.
 - Its control socket is `$XDG_STATE_HOME/tr3x/daemon.sock`, mode 0600.
 
 **Thread → tab** (the daemon owns every tab change):
@@ -210,7 +210,7 @@ Target: about **4–5k non-test lines** for the view, against 25k for the abando
 ```
 apps/server              upstream, untouched
 apps/web, desktop, …     upstream, untouched, not built in tr3x CI
-apps/tr3x                Bun package, bin "tr3x"
+apps/tr3x                Node package, bin "tr3x"
   src/daemon/            shell stream → Rex map, server launcher, bearer issuing, control socket
   src/rex/               rex CLI client, events stream, labels (from rexWorkspace.ts)
   src/view/              agent view (OpenTUI + client-runtime + @effect/atom-react)
@@ -224,7 +224,7 @@ packages/contracts, client-runtime, shared, provider-*   upstream
 
 1. **`chore: merge upstream T3 Code with orchestration v2 into main`**
    - Scope: fast-forward to `1256e7938`, then merge `t3up/main`. Keep this fork's CI change (`c360c6ddf`, no npm publish).
-   - Acceptance: `bun install`, `bun fmt`, `bun lint`, `bun typecheck`, and `bun run test` pass. `node apps/server/src/bin.ts --mode desktop --bootstrap-fd 0` serves `/.well-known/t3/environment` with `orchestrationProtocolVersion: 2`.
+   - Acceptance: `vp i`, the filtered typecheck, `vp lint`, `vp fmt --check` and the package tests pass. `node apps/server/src/bin.ts --mode desktop --bootstrap-fd 0` serves `/.well-known/t3/environment` with `orchestrationProtocolVersion: 2`.
 2. **`chore: remove the v1 TUI and client-core, add the tr3x package skeleton`**
    - Scope: delete `apps/tui` and `packages/client-core`. Add `apps/tr3x` with `serverLauncher`, the `connection/` platform layer, and `tr3x daemon` (start or attach, health) plus `tr3x doctor`.
    - Acceptance: checks pass. `tr3x daemon` starts a server in the tr3x base dir, a second run attaches instead of failing with 78, and `tr3x doctor` reports the providers.
@@ -267,3 +267,4 @@ The user answered questions 1–4. Questions 5–8 take the suggested defaults u
 6. **Merge cadence:** merge `t3up/main` when needed, not on a schedule.
 7. **Rex setup:** one `require("tr3x")` line in `init.lua`.
 8. **Notifications:** the daemon's macOS notifications are opt-in until Rex ships its own.
+9. **Runtime:** the `tr3x` CLI runs on Node, the same runtime as upstream's server, not Bun (PR #26). PR 3 checks whether OpenTUI works on Node 26.4+ with `--experimental-ffi`. If it doesn't, only `tr3x view` falls back to Bun.
