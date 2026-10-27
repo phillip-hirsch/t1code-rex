@@ -11,6 +11,7 @@ const packageJson = JSON.parse(await NodeFSP.readFile(packageJsonPath, "utf8"));
 const publishedPackageJson = {
   name: packageJson.name,
   version: packageJson.version,
+  private: packageJson.private,
   description: packageJson.description,
   homepage: packageJson.homepage,
   bugs: packageJson.bugs,

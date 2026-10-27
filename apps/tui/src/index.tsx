@@ -197,7 +197,7 @@ if (process.env.TR3X_HEADLESS === "1") {
     } catch {}
     if (error) {
       process.stderr.write(
-        `t1 tui shutdown after error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
+        `tr3x shutdown after error: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`,
       );
       process.exitCode = code || 1;
     } else {

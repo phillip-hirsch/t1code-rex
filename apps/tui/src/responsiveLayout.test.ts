@@ -43,7 +43,7 @@ describe("resolveTuiResponsiveLayout", () => {
         showSidebar: false,
         showWindowDots: false,
         showSidebarAlphaBadge: false,
-        sidebarTitle: "T1",
+        sidebarTitle: "tr3x",
         showHeaderProjectBadge: false,
         showComposerModeLabels: true,
         showComposerModelLabel: true,

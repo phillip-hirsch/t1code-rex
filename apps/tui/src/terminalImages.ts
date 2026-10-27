@@ -97,7 +97,7 @@ export function resolveTerminalImageSupport(
       supported: false,
       mode: "none",
       reason:
-        "Sixel is detected, but T1 image preview is only implemented for kitty graphics right now.",
+        "Sixel is detected, but tr3x image preview is only implemented for kitty graphics right now.",
       pixelWidth,
       pixelHeight,
     };

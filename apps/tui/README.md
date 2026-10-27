@@ -30,10 +30,12 @@ Linux notes:
 
 tr3x starts upstream's T3 Code server in `desktop` mode on `127.0.0.1` and keeps its data under `~/.tr3x` (`TR3X_HOME`), so it never shares a data directory with a T3 Code install in `~/.t3`. The server needs Node 24 or newer on your `PATH`; set `TR3X_NODE_BIN` to use another binary.
 
-To join a server that is already running instead of starting one:
+To join a server that is already running instead of starting one, run this from the repo root:
 
 ```bash
-TR3X_TUI_ATTACH_ONLY=1 TR3X_HOST=127.0.0.1 TR3X_PORT=3773 TR3X_AUTH_TOKEN="$(t3 auth session issue --token-only --base-dir ~/.tr3x)" tr3x
+TR3X_TUI_ATTACH_ONLY=1 TR3X_HOST=127.0.0.1 TR3X_PORT=3773 \
+  TR3X_AUTH_TOKEN="$(node apps/server/src/bin.ts auth session issue --token-only --base-dir ~/.tr3x)" \
+  bun apps/tui/src/index.tsx
 ```
 
 `TR3X_AUTH_TOKEN` is a bearer token, never a server bootstrap secret.
