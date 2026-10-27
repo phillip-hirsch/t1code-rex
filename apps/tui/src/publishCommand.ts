@@ -7,6 +7,7 @@ import {
   type SourceControlPublishRepositoryInput,
   type SourceControlPublishRepositoryResult,
   type SourceControlRepositoryVisibility,
+  type VcsRef,
   type VcsStatusResult,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
@@ -163,9 +164,43 @@ export function publishReadiness(
   return { ready: true, hint: null };
 }
 
-/** The provider to publish to when none was named: the first ready one, by label, as web picks. */
+/**
+ * Hosts whose create call takes the visibility asked for: the server sends it, and the host
+ * makes the repository that way or fails. Checked in each provider's `createRepository`.
+ */
+const KEEPS_VISIBILITY: ReadonlySet<string> = new Set([
+  "github",
+  "gitlab",
+  "bitbucket",
+  "forgejo",
+  "gitcafe",
+]);
+
+/**
+ * Why tr3x won't publish to this host, or null when it will: the confirmation names a
+ * visibility, so a host that may not keep it is never offered one.
+ */
+export function publishBlockedReason(
+  kind: string,
+  visibility: SourceControlRepositoryVisibility,
+): string | null {
+  if (KEEPS_VISIBILITY.has(kind)) return null;
+  const label = sourceControlClients.get(kind).label;
+  // `az repos create` has no visibility flag: the project decides who sees the repository.
+  const why =
+    kind === "azure-devops"
+      ? `${label} sets visibility per project`
+      : `${label} may not keep the visibility asked for`;
+  return `${why}; tr3x can't confirm this repository will be ${visibility}. Publish it from ${label}.`;
+}
+
+/**
+ * The provider to publish to when none was named: the first ready one, by label, as web
+ * picks, passing over hosts tr3x won't publish to while another is ready.
+ */
 export function defaultPublishProvider(
   discovery: SourceControlDiscoveryResult,
+  visibility: SourceControlRepositoryVisibility = "private",
 ): SourceControlProviderDiscoveryItem | null {
   const ready = discovery.sourceControlProviders
     .filter((item) => publishReadiness(item, item.kind).ready)
@@ -174,7 +209,25 @@ export function defaultPublishProvider(
         .get(left.kind)
         .pickerLabel.localeCompare(sourceControlClients.get(right.kind).pickerLabel),
     );
-  return ready[0] ?? null;
+  return (
+    ready.find((item) => publishBlockedReason(item.kind, visibility) === null) ?? ready[0] ?? null
+  );
+}
+
+/**
+ * A remote the checkout already has, as far as the server lets us see: v2 has no RPC that
+ * lists remotes, so this reads `origin`, the branch's upstream, the remote the server named
+ * a host from, and any fetched remote branch. Null when none of those shows one.
+ */
+export function existingRemote(
+  status: VcsStatusResult,
+  remoteRefs: ReadonlyArray<VcsRef>,
+): string | null {
+  if (status.hasPrimaryRemote) return "origin";
+  const remoteRef = remoteRefs.find((ref) => ref.isRemote === true);
+  if (remoteRef !== undefined) return remoteRef.remoteName ?? remoteRef.name.split("/")[0] ?? "";
+  if (status.hasUpstream || status.sourceControlProvider !== undefined) return "";
+  return null;
 }
 
 /** A publish checked and ready to confirm. */
@@ -202,6 +255,8 @@ export function resolvePublish(input: {
   readonly args: PublishArgs;
   readonly cwd: string;
   readonly status: VcsStatusResult;
+  /** The checkout's remote branches, from `vcs.listRefs`. */
+  readonly remoteRefs: ReadonlyArray<VcsRef>;
   readonly discovery: SourceControlDiscoveryResult;
 }): PublishResolution {
   const { args, status, discovery } = input;
@@ -211,15 +266,19 @@ export function resolvePublish(input: {
       message: "This folder isn't a git repository yet. Pick “git init” in the branch picker (b).",
     };
   }
-  if (status.hasPrimaryRemote) {
+  const remote = existingRemote(status, input.remoteRefs);
+  if (remote !== null) {
     return {
       kind: "error",
-      message: "This repository already has a remote. Push from the git menu (c) instead.",
+      message: `This repository already has a remote${remote === "" ? "" : ` ("${remote}")`}. Push from the git menu (c) instead.`,
     };
   }
   let provider: SourceControlProviderDiscoveryItem;
   if (args.provider !== null) {
     const named = args.provider;
+    // Before readiness: no point setting up a host tr3x won't publish to.
+    const blocked = publishBlockedReason(named, args.visibility);
+    if (blocked !== null) return { kind: "error", message: blocked };
     const found = discovery.sourceControlProviders.find((item) => item.kind === named);
     const readiness = publishReadiness(found, named);
     if (found === undefined || !readiness.ready) {
@@ -227,7 +286,7 @@ export function resolvePublish(input: {
     }
     provider = found;
   } else {
-    const first = defaultPublishProvider(discovery);
+    const first = defaultPublishProvider(discovery, args.visibility);
     if (first === null) {
       return {
         kind: "error",
@@ -237,6 +296,8 @@ export function resolvePublish(input: {
     }
     provider = first;
   }
+  const blocked = publishBlockedReason(provider.kind, args.visibility);
+  if (blocked !== null) return { kind: "error", message: blocked };
   const definition = sourceControlClients.get(provider.kind);
   const account = Option.getOrNull(provider.auth.account);
   if (args.repository === null) {

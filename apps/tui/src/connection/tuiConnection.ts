@@ -316,6 +316,10 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     label: "tr3x:source-control:lookup-repository",
     tag: WS_METHODS.sourceControlLookupRepository,
   });
+  const listRefs = createEnvironmentRpcCommand(runtime, {
+    label: "tr3x:vcs:list-remote-refs",
+    tag: WS_METHODS.vcsListRefs,
+  });
   const filesystem = createFilesystemEnvironmentAtoms(runtime);
   const shellCommands = createShellEnvironmentAtoms(runtime);
   const orchestration = createOrchestrationEnvironmentAtoms(runtime);
@@ -478,6 +482,9 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     /** Reads a hosted repository; success means the name is taken. Creates nothing. */
     lookupRepository: (input: SourceControlRepositoryLookupInput) =>
       runAction(lookupRepository, input),
+    /** A checkout's fetched remote branches, read fresh; one is enough to show a remote. */
+    listRemoteRefs: (cwd: string) =>
+      runAction(listRefs, { cwd, refKind: "remote" as const, refresh: true, limit: 1 }),
     /** Creates the hosted repository, adds it as a remote and pushes; the toolbar shows it running. */
     publishRepository: (input: SourceControlPublishRepositoryInput) =>
       trackVcs(

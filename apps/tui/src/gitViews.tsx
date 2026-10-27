@@ -30,9 +30,16 @@ import {
 import type { TuiConnection, VcsRefsAtom } from "./connection/tuiConnection.ts";
 import { buildGitMenuItems, isArmed, type ArmedConfirmation, type GitMenuItem } from "./gitMenu.ts";
 import { describePublishConfirmation, type PublishPlan } from "./publishCommand.ts";
+import { PANEL_QUIET_MS } from "./requestPanel.ts";
 import { printableText } from "./sidebarKeys.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 import { describeWorktreeSetup } from "./worktreeSetupView.ts";
+
+/**
+ * How long a publish confirmation must be on screen, with no keys, before ⏎ sends it: the
+ * approvals dock's guard, so an Enter typed for whatever was there before can't publish.
+ */
+export const PUBLISH_ARM_MS = PANEL_QUIET_MS;
 
 /** What the git views read; the TUI's connection, or fixed atoms in checks. */
 export type GitSource = Pick<
@@ -176,8 +183,11 @@ export interface GitOverlayHandle {
 export type GitOverlayMode =
   | { readonly kind: "menu" }
   | { readonly kind: "branches"; readonly initialQuery: string }
-  /** A checked `/publish` waiting for ⏎: nothing is created until then. */
-  | { readonly kind: "publish"; readonly plan: PublishPlan };
+  /**
+   * A checked `/publish` waiting for ⏎: nothing is created until then. It's for `threadId`
+   * and the plan's checkout, and dropped once either isn't in view.
+   */
+  | { readonly kind: "publish"; readonly plan: PublishPlan; readonly threadId: ThreadId };
 
 export interface GitOverlayProps {
   readonly source: GitSource;
@@ -264,6 +274,27 @@ export function GitOverlay(props: GitOverlayProps) {
   const selected = Math.min(index, Math.max(0, count - 1));
   const windowStart = Math.max(0, selected - OVERLAY_ROWS_MAX + 1);
 
+  // The confirmation takes ⏎ only once it has been on screen for PUBLISH_ARM_MS with no keys:
+  // it mounts when shown, and every key before then starts a new wait.
+  const pendingPlan = mode.kind === "publish" ? mode.plan : null;
+  const [arming, setArming] = useState<{ readonly plan: PublishPlan | null }>({
+    plan: pendingPlan,
+  });
+  if (arming.plan !== pendingPlan) setArming({ plan: pendingPlan });
+  const [armedBy, setArmedBy] = useState<object | null>(null);
+  useEffect(() => {
+    if (arming.plan === null) return;
+    const timer = setTimeout(() => setArmedBy(arming), PUBLISH_ARM_MS);
+    return () => clearTimeout(timer);
+  }, [arming]);
+  const publishArmed = pendingPlan !== null && arming.plan === pendingPlan && armedBy === arming;
+  const restartArm = () => setArming({ plan: pendingPlan });
+  const confirmPublish = () => {
+    if (pendingPlan === null) return;
+    if (publishArmed) props.onConfirmPublish(pendingPlan);
+    else restartArm();
+  };
+
   const pick = (at: number) => {
     if (mode.kind === "menu") {
       const item = menuItems[at];
@@ -280,7 +311,8 @@ export function GitOverlay(props: GitOverlayProps) {
     handleKey: (key: KeyEvent) => {
       if (key.name === "escape" || (key.ctrl && key.name === "c")) props.onClose();
       else if (mode.kind === "publish") {
-        if (isEnter(key.name) && !key.repeated) props.onConfirmPublish(mode.plan);
+        if (isEnter(key.name) && !key.repeated) confirmPublish();
+        else if (!publishArmed) restartArm();
       } else if (key.name === "up" || (mode.kind === "menu" && key.name === "k"))
         setIndex(Math.max(0, selected - 1));
       else if (key.name === "down" || (mode.kind === "menu" && key.name === "j"))
@@ -307,8 +339,9 @@ export function GitOverlay(props: GitOverlayProps) {
       <PublishConfirmation
         plan={mode.plan}
         left={props.left}
+        armed={publishArmed}
         theme={theme}
-        onConfirm={() => props.onConfirmPublish(mode.plan)}
+        onConfirm={confirmPublish}
         onCancel={props.onClose}
       />
     );
@@ -449,6 +482,8 @@ export function GitOverlay(props: GitOverlayProps) {
 function PublishConfirmation(props: {
   readonly plan: PublishPlan;
   readonly left: number;
+  /** Shown long enough to take ⏎; until then the key reads dimmed. */
+  readonly armed: boolean;
   readonly theme: TuiTheme;
   readonly onConfirm: () => void;
   readonly onCancel: () => void;
@@ -508,7 +543,7 @@ function PublishConfirmation(props: {
         <text
           wrapMode="none"
           content="⏎ publish"
-          style={{ fg: palette.text }}
+          style={{ fg: props.armed ? palette.text : palette.subtle }}
           onMouseDown={(event) => {
             event.preventDefault();
             event.stopPropagation();

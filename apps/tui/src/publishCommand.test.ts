@@ -2,7 +2,7 @@ import {
   SourceControlRepositoryError,
   type SourceControlPublishRepositoryResult,
 } from "@t3tools/contracts";
-import { SourceControlProviderKind } from "@t3tools/contracts";
+import { SourceControlProviderKind, type VcsRef } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { vcsStatus } from "./gitTestFixtures.ts";
@@ -12,6 +12,7 @@ import {
   describePublishFailure,
   describePublishResult,
   parsePublishArgs,
+  publishBlockedReason,
   publishReadiness,
   repositoryPathError,
   resolvePublish,
@@ -149,11 +150,48 @@ describe("defaultPublishProvider", () => {
   it("is null when nothing is ready", () => {
     expect(defaultPublishProvider(discoveryResult([]))).toBeNull();
   });
+
+  it("passes over a host that may not keep the visibility while another is ready", () => {
+    const result = discoveryResult([
+      providerDiscovery("azure-devops", "Azure DevOps"),
+      providerDiscovery("gitlab", "GitLab"),
+    ]);
+    expect(defaultPublishProvider(result)?.kind).toBe("gitlab");
+  });
+});
+
+describe("publishBlockedReason", () => {
+  // Per each provider's createRepository on the server: the visibility is sent to the host
+  // (GitHub and Forgejo `private`, GitLab and GitCafe `visibility`, Bitbucket `is_private`);
+  // `az repos create` has no visibility flag.
+  it.each(["github", "gitlab", "bitbucket", "forgejo", "gitcafe"])(
+    "publishes to %s, which keeps the visibility asked for",
+    (kind) => {
+      expect(publishBlockedReason(kind, "private")).toBeNull();
+      expect(publishBlockedReason(kind, "public")).toBeNull();
+    },
+  );
+
+  it("blocks Azure DevOps, where the project sets visibility", () => {
+    expect(publishBlockedReason("azure-devops", "private")).toBe(
+      "Azure DevOps sets visibility per project; tr3x can't confirm this repository will be private. Publish it from Azure DevOps.",
+    );
+  });
+
+  it("blocks a host it doesn't know", () => {
+    expect(publishBlockedReason("someday", "private")).toContain(
+      "tr3x can't confirm this repository will be private",
+    );
+  });
 });
 
 describe("resolvePublish", () => {
-  const resolve = (text: string, status = NO_REMOTE, discovery = discoveryResult()) =>
-    resolvePublish({ args: args(text), cwd: "/repo", status, discovery });
+  const resolve = (
+    text: string,
+    status = NO_REMOTE,
+    discovery = discoveryResult(),
+    remoteRefs: ReadonlyArray<VcsRef> = [],
+  ) => resolvePublish({ args: args(text), cwd: "/repo", status, remoteRefs, discovery });
 
   it("plans a publish to the first ready provider", () => {
     expect(resolve("sandbox/demo")).toEqual({
@@ -201,8 +239,47 @@ describe("resolvePublish", () => {
   });
 
   it("is only for a repository without a remote", () => {
-    expect(resolve("sandbox/demo", vcsStatus({ hasPrimaryRemote: true })).kind).toBe("error");
+    expect(resolve("sandbox/demo", vcsStatus({ hasPrimaryRemote: true }))).toEqual({
+      kind: "error",
+      message:
+        'This repository already has a remote ("origin"). Push from the git menu (c) instead.',
+    });
     expect(resolve("sandbox/demo", vcsStatus({ isRepo: false })).kind).toBe("error");
+  });
+
+  it("sees a remote that isn't origin", () => {
+    const upstream: VcsRef = {
+      name: "upstream/main",
+      isRemote: true,
+      remoteName: "upstream",
+      current: false,
+      isDefault: false,
+      worktreePath: null,
+    };
+    expect(resolve("sandbox/demo remote=hub", NO_REMOTE, discoveryResult(), [upstream])).toEqual({
+      kind: "error",
+      message:
+        'This repository already has a remote ("upstream"). Push from the git menu (c) instead.',
+    });
+    // An upstream or a host the server read off a remote shows one too, though unnamed.
+    expect(resolve("sandbox/demo", { ...NO_REMOTE, hasUpstream: true })).toEqual({
+      kind: "error",
+      message: "This repository already has a remote. Push from the git menu (c) instead.",
+    });
+  });
+
+  it("won't plan a publish to Azure DevOps, named or not", () => {
+    const azure = discoveryResult([providerDiscovery("azure-devops", "Azure DevOps")]);
+    const blocked = {
+      kind: "error",
+      message:
+        "Azure DevOps sets visibility per project; tr3x can't confirm this repository will be private. Publish it from Azure DevOps.",
+    };
+    expect(resolve("org/demo", NO_REMOTE, azure)).toEqual(blocked);
+    expect(resolve("org/demo azure", NO_REMOTE, azure)).toEqual(blocked);
+    expect(resolve("az", NO_REMOTE, azure)).toEqual(blocked);
+    // Named, it's blocked before readiness: no point setting it up first.
+    expect(resolve("org/demo provider=azure-devops")).toEqual(blocked);
   });
 
   it("checks the path against the chosen host", () => {
@@ -231,6 +308,7 @@ describe("describePublishConfirmation", () => {
       args: args(text),
       cwd: "/repo",
       status: { ...NO_REMOTE, refName: branch },
+      remoteRefs: [],
       discovery: discoveryResult(),
     });
     if (resolved.kind !== "plan") throw new Error(resolved.kind);

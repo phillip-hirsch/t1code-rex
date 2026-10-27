@@ -73,6 +73,7 @@ type GitCommands = Pick<
   | "vcsActionStateAtom"
   | "discoverSourceControl"
   | "lookupRepository"
+  | "listRemoteRefs"
   | "publishRepository"
 >;
 
@@ -145,11 +146,25 @@ export function useGitControls(options: GitControlsOptions) {
   const cwd = worktreePath ?? projectCwd;
   const pickingWorktreeBase = target?.kind === "draft" && envMode === "worktree";
   const failure = lastFailure !== null && lastFailure.cwd === cwd ? lastFailure : null;
-  // The checkout as of the latest render, for async work that must not land on another one.
-  const cwdRef = useRef(cwd);
+  const threadId = target?.threadId ?? null;
+  // The thread, checkout and overlay as of the latest render, for async work and key presses
+  // that must not land on another one.
+  const live = useRef({ threadId, cwd, overlay });
   useLayoutEffect(() => {
-    cwdRef.current = cwd;
+    live.current = { threadId, cwd, overlay };
   });
+  const isLive = (forThread: ThreadId, forCwd: string) =>
+    live.current.threadId === forThread && live.current.cwd === forCwd;
+  // A confirmation is for the thread and checkout it was checked on; moving away drops it,
+  // so coming back never shows it again.
+  const stalePublish =
+    overlay?.kind === "publish" &&
+    (overlay.threadId !== threadId || overlay.plan.input.cwd !== cwd);
+  if (stalePublish) {
+    setOverlay(null);
+    setStatus("Publish cancelled: the thread changed; nothing was created");
+  }
+  const shownOverlay = stalePublish ? null : overlay;
 
   const close = () => {
     setOverlay(null);
@@ -419,12 +434,14 @@ export function useGitControls(options: GitControlsOptions) {
       fail("Wait for the current git action to finish");
       return;
     }
+    const forThread = target.threadId;
     setStatus("Checking source control providers…");
-    const [discovery, status] = await Promise.all([
+    const [discovery, status, remoteRefs] = await Promise.all([
       connection.discoverSourceControl(),
       connection.refreshVcsStatus(cwd, true),
+      connection.listRemoteRefs(cwd),
     ]);
-    if (cwdRef.current !== cwd) {
+    if (!isLive(forThread, cwd)) {
       setStatus("Publish stopped: the thread changed while checking");
       return;
     }
@@ -436,10 +453,15 @@ export function useGitControls(options: GitControlsOptions) {
       fail(`Couldn't read git status: ${errorText(status.error)}`);
       return;
     }
+    if (!remoteRefs.ok) {
+      fail(`Couldn't list this repository's remotes: ${errorText(remoteRefs.error)}`);
+      return;
+    }
     const resolved = resolvePublish({
       args: parsed.value,
       cwd,
       status: status.value,
+      remoteRefs: remoteRefs.value.refs,
       discovery: discovery.value,
     });
     if (resolved.kind === "error") {
@@ -459,7 +481,7 @@ export function useGitControls(options: GitControlsOptions) {
       repository: plan.input.repository,
       cwd,
     });
-    if (cwdRef.current !== cwd) {
+    if (!isLive(forThread, cwd)) {
       setStatus("Publish stopped: the thread changed while checking");
       return;
     }
@@ -469,11 +491,26 @@ export function useGitControls(options: GitControlsOptions) {
     }
     setStatus(`Confirm publishing ${plan.location}`);
     setArmed(null);
-    setOverlay({ kind: "publish", plan });
+    setOverlay({ kind: "publish", plan, threadId: forThread });
   };
 
-  /** The confirmed publish: creates the repository, adds the remote and pushes. */
+  /**
+   * The confirmed publish: creates the repository, adds the remote and pushes. Only the
+   * confirmation that's open now, for the thread and checkout in view, is sent.
+   */
   const confirmPublish = async (plan: PublishPlan) => {
+    const pending = live.current.overlay;
+    const current =
+      pending?.kind === "publish" &&
+      pending.plan === plan &&
+      isLive(pending.threadId, plan.input.cwd);
+    // Taken now, so a second ⏎ before the next render can't send it again.
+    live.current = { ...live.current, overlay: null };
+    if (!current) {
+      close();
+      setStatus("Publish stopped: the thread changed; nothing was created");
+      return;
+    }
     close();
     setLastFailure(null);
     options.onFocusComposer();
@@ -534,7 +571,7 @@ export function useGitControls(options: GitControlsOptions) {
     threadBranch,
     pickingWorktreeBase,
     draft: target?.kind === "draft",
-    overlay,
+    overlay: shownOverlay,
     armed,
     failure,
     setupFailed,
@@ -544,7 +581,7 @@ export function useGitControls(options: GitControlsOptions) {
     toggleWorktree,
     launchWorktree,
     closeOverlay: () => {
-      if (overlay?.kind === "publish") setStatus("Publish cancelled; nothing was created");
+      if (shownOverlay?.kind === "publish") setStatus("Publish cancelled; nothing was created");
       close();
     },
     pressToolbar,
@@ -565,7 +602,7 @@ export function useGitControls(options: GitControlsOptions) {
       target?.kind === "thread" && target.threadId === threadId ? sendBlock : null,
     /** Keys while an overlay is open; it takes them all. */
     handleKey: (key: KeyEvent): boolean => {
-      if (overlay === null) return false;
+      if (shownOverlay === null) return false;
       overlayRef.current?.handleKey(key);
       return true;
     },

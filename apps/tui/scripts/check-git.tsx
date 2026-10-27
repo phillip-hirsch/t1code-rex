@@ -284,6 +284,16 @@ function createGit() {
       calls.push(`lookupRepository ${input.repository}`);
       return { ok: false as const, error: new Error("not found"), interrupted: false };
     },
+    listRemoteRefs: async (cwd: string) => {
+      calls.push(`listRemoteRefs ${cwd}`);
+      return ok({
+        refs: [],
+        isRepo: true,
+        hasPrimaryRemote: false,
+        nextCursor: null,
+        totalCount: 0,
+      });
+    },
     publishRepository: async (input: { repository: string }) => {
       calls.push(`publishRepository ${input.repository}`);
       return { ok: false as const, error: new Error("not in check-git"), interrupted: false };

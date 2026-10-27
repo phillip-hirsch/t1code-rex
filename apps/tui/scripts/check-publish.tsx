@@ -17,6 +17,7 @@ import {
   type SourceControlPublishRepositoryResult,
   type SourceControlRepositoryInfo,
   type SourceControlRepositoryLookupInput,
+  type VcsRef,
   type VcsStatusResult,
   type WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
@@ -34,9 +35,15 @@ import type {
 } from "../src/connection/tuiConnection.ts";
 import { useGitControls, type GitControls, type GitTarget } from "../src/gitController.ts";
 import { vcsStatus } from "../src/gitTestFixtures.ts";
-import { BranchToolbar, GitOverlay, type GitOverlayHandle } from "../src/gitViews.tsx";
+import {
+  BranchToolbar,
+  GitOverlay,
+  PUBLISH_ARM_MS,
+  type GitOverlayHandle,
+} from "../src/gitViews.tsx";
+import { topOverlay } from "../src/overlayStack.ts";
 import { presentedThread, projectShell } from "../src/shellTestFixtures.ts";
-import { discoveryResult } from "../src/sourceControlTestFixtures.ts";
+import { discoveryResult, providerDiscovery } from "../src/sourceControlTestFixtures.ts";
 import { SourceControlView, type SourceControlViewHandle } from "../src/sourceControlViews.tsx";
 import { useSyncKeyboard } from "../src/syncKeyboard.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
@@ -98,6 +105,9 @@ function createServer() {
   /** What a fresh scan and status read answer, and which repositories already exist. */
   let scan: TuiActionResult<SourceControlDiscoveryResult> = ok(discoveryResult());
   let status: VcsStatusResult = NO_REMOTE;
+  let remoteRefs: ReadonlyArray<VcsRef> = [];
+  /** Scans wait for `answerChecks` unless this is off; then they answer straight away. */
+  let holdChecks = true;
   const existing = new Set(["sandbox/taken"]);
   let pending: {
     input: SourceControlPublishRepositoryInput;
@@ -121,7 +131,18 @@ function createServer() {
       calls.push("discover");
       // Held until the check lets it go, so it can move threads mid-check.
       return new Promise<TuiActionResult<SourceControlDiscoveryResult>>((resolve) => {
-        checks.push(() => resolve(scan));
+        if (holdChecks) checks.push(() => resolve(scan));
+        else resolve(scan);
+      });
+    },
+    listRemoteRefs: async (cwd: string) => {
+      calls.push(`remotes ${cwd}`);
+      return ok({
+        refs: remoteRefs,
+        isRepo: true,
+        hasPrimaryRemote: false,
+        nextCursor: null,
+        totalCount: remoteRefs.length,
       });
     },
     lookupRepository: async (input: SourceControlRepositoryLookupInput) => {
@@ -179,6 +200,12 @@ function createServer() {
     setStatus: (next: VcsStatusResult) => {
       status = next;
     },
+    setRemoteRefs: (next: ReadonlyArray<VcsRef>) => {
+      remoteRefs = next;
+    },
+    setHoldChecks: (hold: boolean) => {
+      holdChecks = hold;
+    },
     /** What the status stream shows now. */
     showStatus: (next: VcsStatusResult) => registry.set(statusAtom, AsyncResult.success(next)),
     showDiscovery: (result: AsyncResult.AsyncResult<SourceControlDiscoveryResult, unknown>) =>
@@ -212,7 +239,11 @@ const harness: {
   setSourceControlOpen: () => undefined,
 };
 
-/** The shell's wiring: Source Control first when open, then the git overlay, then c opens the menu. */
+/**
+ * The shell's wiring: the overlay on top (`topOverlay`, as the Shell picks it) is the one
+ * drawn and the one that takes keys; with none open, c opens the menu and ⏎ sends a
+ * `/publish` typed in the composer, as the composer hands it over.
+ */
 function Harness() {
   const [threadId, setThreadId] = useState<ThreadId>(THREAD_ID);
   const [status, setStatus] = useState("");
@@ -241,13 +272,23 @@ function Harness() {
     harness.setThread = setThreadId;
     harness.setSourceControlOpen = setSourceControlOpen;
   });
+  const top = topOverlay({
+    "source-control": sourceControlOpen,
+    git: controller.overlay !== null,
+  });
   useSyncKeyboard((key: KeyEvent) => {
-    if (sourceControlOpen) {
+    if (top === "source-control") {
       viewRef.current?.handleKey(key);
       return;
     }
-    if (controller.handleKey(key)) return;
+    if (top === "git" && controller.handleKey(key)) return;
     if (key.name === "c") controller.openMenu();
+    else if (key.name === "return") {
+      const text = store.getDraft(threadId).text.trim();
+      if (!text.startsWith("/publish")) return;
+      store.clearDraft(threadId);
+      controller.publish(text.slice("/publish".length), text);
+    }
   });
   if (controller.cwd === null || controller.projectCwd === null) return null;
   const notice = store.snapshot(threadId).notice;
@@ -268,7 +309,7 @@ function Harness() {
         theme={DEFAULT_TUI_THEME}
         onPress={controller.pressToolbar}
       />
-      {controller.overlay !== null ? (
+      {top === "git" && controller.overlay !== null ? (
         <GitOverlay
           ref={overlayRef}
           source={server.source}
@@ -337,6 +378,12 @@ const publish = async (args: string) => {
   return server.calls.slice(before);
 };
 const draftText = () => store.getDraft(THREAD_ID).text;
+/** Waits out the confirmation's guard, so ⏎ is taken. */
+const waitArm = async () => {
+  await act(() => new Promise((resolve) => setTimeout(resolve, PUBLISH_ARM_MS + 100)));
+  await render();
+};
+const published = () => server.calls.filter((call) => call.startsWith("publish"));
 const clearComposer = () => act(() => store.clearDraft(THREAD_ID));
 await render();
 
@@ -412,7 +459,7 @@ check(
   harness.footer.startsWith("GitHub isn't signed in:"),
   true,
 );
-check("P2: nothing looked up or created", calls.join(","), "discover");
+check("P2: nothing looked up or created", calls.join(","), "discover,remotes /repo");
 clearComposer();
 
 calls = await publish("group/app gitlab");
@@ -469,9 +516,51 @@ calls = await publish("sandbox/demo");
 check(
   "P8: has a remote",
   harness.footer,
-  "This repository already has a remote. Push from the git menu (c) instead.",
+  'This repository already has a remote ("origin"). Push from the git menu (c) instead.',
 );
 server.setStatus(NO_REMOTE);
+clearComposer();
+
+// P8b: a remote that isn't origin counts too, even with remote=<another name>.
+server.setRemoteRefs([
+  {
+    name: "upstream/main",
+    isRemote: true,
+    remoteName: "upstream",
+    current: false,
+    isDefault: false,
+    worktreePath: null,
+  },
+]);
+calls = await publish("sandbox/demo remote=hub");
+check(
+  "P8b: upstream seen",
+  harness.footer,
+  'This repository already has a remote ("upstream"). Push from the git menu (c) instead.',
+);
+check(
+  "P8b: nothing looked up or created",
+  calls.some((call) => call.startsWith("lookup") || call.startsWith("publish")),
+  false,
+);
+server.setRemoteRefs([]);
+clearComposer();
+
+// P8c: Azure DevOps lets the project decide visibility, so it's never offered a "private".
+server.setScan(ok(discoveryResult([providerDiscovery("azure-devops", "Azure DevOps")])));
+calls = await publish("org/demo");
+check(
+  "P8c: Azure DevOps blocked",
+  harness.footer,
+  "Azure DevOps sets visibility per project; tr3x can't confirm this repository will be private. Publish it from Azure DevOps.",
+);
+check("P8c: no confirmation", frame().includes("Publish to Azure DevOps?"), false);
+check(
+  "P8c: nothing looked up or created",
+  calls.some((call) => call.startsWith("lookup") || call.startsWith("publish")),
+  false,
+);
+server.setScan(ok(discoveryResult()));
 clearComposer();
 
 // P9: the confirmation names the repository, its visibility, remote and branch; esc creates nothing.
@@ -506,6 +595,7 @@ check(
   frame().includes("Creates a PUBLIC Bitbucket repository anyone can see:"),
   true,
 );
+await waitArm();
 await press("enter");
 check(
   "P10: sent as confirmed",
@@ -561,6 +651,7 @@ clearComposer();
 // P14: a publish that lands: the result names repository, branch and remote, and the toolbar
 // picks up the new remote and upstream.
 calls = await publish("sandbox/demo");
+await waitArm();
 await press("enter");
 check("P14: toolbar before: no remote", frame().includes("no remote"), true);
 server.setStatus(vcsStatus({ refName: "main" }));
@@ -598,12 +689,97 @@ await act(async () => server.answerChecks());
 await render();
 check("P15: dropped", harness.footer, "Publish stopped: the thread changed while checking");
 check("P15: no confirmation", frame().includes("Publish to Bitbucket?"), false);
-check("P15: nothing looked up or created", server.calls.slice(before).join(","), "discover");
+check(
+  "P15: nothing looked up or created",
+  server.calls.slice(before).join(","),
+  "discover,remotes /repo",
+);
+
+// P16: checks that finish under the Source Control view leave the confirmation waiting, undrawn;
+// ⏎ goes to the view on top. Once shown, ⏎ is taken only after PUBLISH_ARM_MS.
+const sentBeforeHidden = published().length;
+act(() => harness.setThread(THREAD_ID));
+await render();
+act(() => controls().publish("sandbox/hidden public", "/publish sandbox/hidden public"));
+await render();
+act(() => harness.setSourceControlOpen(true));
+await render();
+await act(async () => server.answerChecks());
+await render();
+check(
+  "P16: confirmation not drawn under the view",
+  frame().includes("Publish to Bitbucket?"),
+  false,
+);
+await press("enter");
+await waitArm();
+await press("enter");
+check("P16: ⏎ under the view publishes nothing", published().length, sentBeforeHidden);
+await press("escape");
+check("P16: shown once the view closes", frame().includes("Publish to Bitbucket?"), true);
+await press("enter");
+check("P16: ⏎ as it appears publishes nothing", published().length, sentBeforeHidden);
+check(
+  "P16: still open after that ⏎",
+  frame().includes("Creates a PUBLIC Bitbucket repository"),
+  true,
+);
+await waitArm();
+await press("enter");
+check(
+  "P16: ⏎ once shown long enough publishes",
+  published().at(-1),
+  "publish bitbucket sandbox/hidden public ssh origin",
+);
+await act(async () => server.takePublish()?.settle(failed(new Error("not this time"))));
+await render();
+
+// P17: `/publish …` and ⏎⏎ in one chunk: the first sends the command, the second can't confirm.
+server.setHoldChecks(false);
+const sentBefore = published().length;
+act(() => store.setDraftText(THREAD_ID, "/publish sandbox/burst public"));
+await render();
+await act(async () => {
+  setup.renderer.stdin.emit("data", Buffer.from("\r\r"));
+});
+await render();
+check("P17: confirmation open", frame().includes("bitbucket.org/sandbox/burst"), true);
+await act(async () => {
+  setup.renderer.stdin.emit("data", Buffer.from("\r"));
+});
+await render();
+check("P17: no ⏎ in flight publishes", published().length, sentBefore);
+await press("escape");
+server.setHoldChecks(true);
+// Without the guard a publish went out here; let it fail so P18 runs on its own.
+await act(async () => server.takePublish()?.settle(failed(new Error("not this time"))));
+await render();
+
+// P18: switching threads drops an open confirmation for good, and a plan kept from before is
+// refused: nothing is sent for /repo while /other is in view.
+calls = await publish("sandbox/stale");
+const stale = controls().overlay;
+check("P18: confirmation open", stale?.kind, "publish");
+act(() => harness.setThread(OTHER_THREAD_ID));
+await render();
+check("P18: dropped on switch", frame().includes("Publish to Bitbucket?"), false);
+check(
+  "P18: and says so",
+  harness.footer,
+  "Publish cancelled: the thread changed; nothing was created",
+);
+if (stale?.kind === "publish") act(() => controls().confirmPublish(stale.plan));
+await render();
+check("P18: a kept plan isn't sent", published().length, sentBefore);
+check("P18: refused", harness.footer, "Publish stopped: the thread changed; nothing was created");
+act(() => harness.setThread(THREAD_ID));
+await render();
+check("P18: not back on return", frame().includes("Publish to Bitbucket?"), false);
 
 setup.renderer.destroy();
 if (failures > 0) {
   console.error(`${failures} publish check(s) failed`);
   process.exit(1);
 }
-console.log("all publish checks passed: SC1–SC3, P1–P15");
+console.log("all publish checks passed: SC1–SC3, P1–P18");
 process.exit(0);

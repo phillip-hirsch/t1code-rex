@@ -130,6 +130,7 @@ import {
   type ModelPickerState,
 } from "./modelPicker.ts";
 import { ModelPickerView } from "./modelPickerView.tsx";
+import { topOverlay } from "./overlayStack.ts";
 import { NewThreadView } from "./newThreadView.tsx";
 import { useSyncKeyboard, useSyncPaste } from "./syncKeyboard.ts";
 import { createRequestPanelStore } from "./requestPanelStore.ts";
@@ -1465,10 +1466,23 @@ function Shell(props: AppProps) {
     if (target !== null) openContextMenu(target, null);
   };
 
+  // The overlay on top is the one drawn and the one that takes the keys; the git overlay
+  // under another waits, undrawn, so a confirmation that isn't in view can't be confirmed.
+  const top = topOverlay({
+    dialog: management.dialogOpen,
+    "source-control": sourceControlOpen,
+    archived: archivedSelected !== null,
+    "model-picker": modelPicker !== null,
+    palette: paletteOpen,
+    git: git.overlay !== null,
+    "context-menu": contextMenu !== null,
+  });
+  const gitOverlay = top === "git" ? git.overlay : null;
+
   /** Every key comes here before the focused textarea; true means it was used up. */
   const handleKey = (key: KeyEvent): boolean => {
     const picker = modelPickerRef.current;
-    if (picker !== null) {
+    if (top === "model-picker" && picker !== null) {
       if (key.ctrl && key.name === "c") {
         setModelPicker(null);
         return true;
@@ -1480,9 +1494,9 @@ function Shell(props: AppProps) {
       return true;
     }
     // A dialog owns the keyboard: its text box gets the keys it doesn't use.
-    if (management.dialogOpen) return management.handleDialogKey(key);
-    if (git.handleKey(key)) return true;
-    if (archivedSelected !== null) {
+    if (top === "dialog") return management.handleDialogKey(key);
+    if (top === "git" && git.handleKey(key)) return true;
+    if (top === "archived" && archivedSelected !== null) {
       const row = archivedRow;
       if (key.name === "escape" || (key.ctrl && key.name === "c")) setArchivedSelection(null);
       else if (key.name === "up" || key.name === "down") {
@@ -1494,7 +1508,7 @@ function Shell(props: AppProps) {
       }
       return true;
     }
-    if (sourceControlOpen) {
+    if (top === "source-control") {
       sourceControlRef.current?.handleKey(key);
       return true;
     }
@@ -1683,10 +1697,10 @@ function Shell(props: AppProps) {
     ? modelPickerPurpose === "commit"
       ? "Commit message model  ←→ provider  ↑↓ move  ⏎ pick  esc close"
       : "←→ provider  ↑↓ move  ⏎ pick  esc close"
-    : git.overlay !== null
-      ? git.overlay.kind === "branches"
+    : gitOverlay !== null
+      ? gitOverlay.kind === "branches"
         ? "type to filter  ↑↓ move  ⏎ pick  esc close"
-        : git.overlay.kind === "publish"
+        : gitOverlay.kind === "publish"
           ? "⏎ publish  esc cancel"
           : "↑↓ move  ⏎ run  esc close"
       : terminalFocused
@@ -2055,12 +2069,12 @@ function Shell(props: AppProps) {
           onPick={pickFromModelPicker}
         />
       ) : null}
-      {git.overlay !== null && git.cwd !== null && git.projectCwd !== null ? (
+      {gitOverlay !== null && git.cwd !== null && git.projectCwd !== null ? (
         <GitOverlay
           ref={gitOverlayRef}
           source={connection}
           cwd={git.cwd}
-          mode={git.overlay}
+          mode={gitOverlay}
           projectCwd={git.projectCwd}
           envMode={git.envMode}
           worktreePath={git.worktreePath}
