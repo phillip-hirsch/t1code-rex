@@ -48,7 +48,11 @@ import type { SidebarThread } from "../src/sidebarModel.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
 import { routeThreadPaneKey } from "../src/threadPaneKeys.ts";
 import { resolveScrollKey } from "../src/threadScroll.ts";
-import { WORKTREE_FAILED_NOTICE, type WorktreeLaunch } from "../src/worktreeLaunch.ts";
+import {
+  WORKTREE_FAILED_NOTICE,
+  WORKTREE_STOPPED_NOTICE,
+  type WorktreeLaunch,
+} from "../src/worktreeLaunch.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -197,6 +201,7 @@ function createGit() {
         runId: input.runId,
         status: "preparing",
         baseRef: "main",
+        retryable: false,
       });
       return ok({ sequence: 1 });
     },
@@ -634,6 +639,7 @@ act(() =>
     runId: RunId.make("run-launch"),
     status: "preparing",
     baseRef: "main",
+    retryable: false,
   }),
 );
 await render();
@@ -699,7 +705,9 @@ act(() => git.setStatus("/repo", vcsStatus()));
 // setup and can cancel it: the server says its run is preparing a worktree.
 act(() => setScene(reopenedScene));
 act(() => git.setSetup(REOPENED, worktreeSetup({ threadId: REOPENED })));
-act(() => git.setLaunch(REOPENED, { runId: RUN, status: "preparing", baseRef: "main" }));
+act(() =>
+  git.setLaunch(REOPENED, { runId: RUN, status: "preparing", baseRef: "main", retryable: false }),
+);
 await render();
 check("S7: the setup card shows", frame().includes("Setting up worktree"), true);
 check("S7: the toolbar says Worktree", frame().includes("󰙅 Worktree  󰘬 From main"), true);
@@ -713,8 +721,12 @@ await render();
 check("S7: and cancel reaches the server", lastCall(), `cancelSetup ${REOPENED}`);
 
 // S1: the setup failed (or was cancelled) and its worktree is gone: sends are blocked until
-// the user retries or chooses the project checkout.
-act(() => git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main" }));
+// a retry makes it. The server can't move the thread to the project checkout, so the TUI
+// doesn't offer to either (round 2, S3).
+act(() =>
+  git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main", retryable: true }),
+);
+act(() => store.setNotice(REOPENED, WORKTREE_FAILED_NOTICE));
 await render();
 check(
   "S1: the toolbar keeps the failure in view",
@@ -729,9 +741,9 @@ check(
 await press("c");
 check("S1: the menu leads with retry", frame().includes("Retry worktree setup"), true);
 check(
-  "S1: and offers the checkout",
-  frame().includes("Work in the project checkout instead"),
-  true,
+  "S3: and no longer offers the project checkout",
+  frame().includes("Work in the project checkout"),
+  false,
 );
 await press("RETURN");
 check(
@@ -739,23 +751,31 @@ check(
   lastCall(),
   `retryPreparation ${REOPENED} ${RUN}`,
 );
+check("S1: and clears the composer's notice", store.snapshot(REOPENED).notice, null);
 check(
   "S1: sends wait while it retries",
   harness.controls?.sendBlockedReason(REOPENED) !== null,
   true,
 );
-act(() => git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main" }));
-act(() => store.setNotice(REOPENED, WORKTREE_FAILED_NOTICE));
-await render();
-await press("c", "down", "RETURN");
-check("S1: and clears the composer's notice", store.snapshot(REOPENED).notice, null);
-check(
-  "S1: working locally says so",
-  harness.footer,
-  "This thread now works in the project checkout",
+// A preparation that was stopped can't be retried; only a new thread gets past it.
+act(() =>
+  git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main", retryable: false }),
 );
-check("S1: sends go out again", harness.controls?.sendBlockedReason(REOPENED), null);
-check("S1: and the toolbar says Local", frame().includes("󰉋 Local  󰘬 feature"), true);
+await render();
+check(
+  "S1: a stopped setup blocks sends too",
+  harness.controls?.sendBlockedReason(REOPENED),
+  WORKTREE_STOPPED_NOTICE,
+);
+const beforeStoppedRetry = git.calls.length;
+act(() => harness.controls?.retrySetup());
+await render();
+check("S1: and isn't retried", git.calls.length, beforeStoppedRetry);
+check(
+  "S1: it says what to do",
+  harness.footer,
+  "This worktree setup can't be retried; start a new thread",
+);
 act(() => git.setLaunch(REOPENED, null));
 
 // S4: a default-branch push armed in one checkout doesn't run in another one.

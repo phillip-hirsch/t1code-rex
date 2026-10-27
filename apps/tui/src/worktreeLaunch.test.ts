@@ -10,6 +10,8 @@ import {
   deriveWorktreeLaunch,
   WORKTREE_FAILED_NOTICE,
   WORKTREE_PREPARING_NOTICE,
+  WORKTREE_STOPPED_NOTICE,
+  worktreeBlockOf,
   worktreeSendBlock,
 } from "./worktreeLaunch.ts";
 
@@ -37,28 +39,34 @@ function preparationFailure(runId: string): Item {
   } as Item;
 }
 
+const noWorktree = { worktreePath: null };
+
 describe("deriveWorktreeLaunch", () => {
   it("is preparing while the latest run makes its worktree", () => {
     expect(
-      deriveWorktreeLaunch({ runs: [run("r1", 1, { status: "preparing" })], turnItems: [] }),
-    ).toEqual({ runId: "r1", status: "preparing", baseRef: "main" });
+      deriveWorktreeLaunch({
+        thread: noWorktree,
+        runs: [run("r1", 1, { status: "preparing" })],
+        turnItems: [],
+      }),
+    ).toEqual({ runId: "r1", status: "preparing", baseRef: "main", retryable: false });
   });
 
-  it("is failed when that preparation failed or was cancelled, even with a message queued behind", () => {
+  it("is failed, and retryable, when that preparation failed, with a message queued behind", () => {
     expect(
       deriveWorktreeLaunch({
+        thread: noWorktree,
         runs: [run("r1", 1, { status: "failed" }), run("r2", 2, { status: "queued" })],
         turnItems: [preparationFailure("r1")],
       }),
-    ).toEqual({ runId: "r1", status: "failed", baseRef: "main" });
+    ).toEqual({ runId: "r1", status: "failed", baseRef: "main", retryable: true });
   });
 
-  it("ignores runs that failed after the agent started, and later runs that moved on", () => {
-    expect(
-      deriveWorktreeLaunch({ runs: [run("r1", 1, { status: "failed" })], turnItems: [] }),
-    ).toBeNull();
+  it("stays failed after a later run, as the server keeps holding queued messages", () => {
+    // A run that started in the project checkout anyway (an older client) doesn't resolve it.
     expect(
       deriveWorktreeLaunch({
+        thread: noWorktree,
         runs: [
           run("r1", 1, {
             status: "failed",
@@ -68,28 +76,62 @@ describe("deriveWorktreeLaunch", () => {
         ],
         turnItems: [preparationFailure("r1")],
       }),
+    ).toMatchObject({ runId: "r1", status: "failed" });
+  });
+
+  it("counts a stopped preparation, which can't be retried", () => {
+    expect(
+      deriveWorktreeLaunch({
+        thread: noWorktree,
+        runs: [run("r1", 1, { status: "interrupted" })],
+        turnItems: [],
+      }),
+    ).toEqual({ runId: "r1", status: "failed", baseRef: "main", retryable: false });
+  });
+
+  it("is resolved once the thread has a worktree, or never asked for one", () => {
+    expect(
+      deriveWorktreeLaunch({
+        thread: { worktreePath: "/wt" },
+        runs: [run("r1", 1, { status: "failed" })],
+        turnItems: [preparationFailure("r1")],
+      }),
+    ).toBeNull();
+    expect(
+      deriveWorktreeLaunch({
+        thread: noWorktree,
+        runs: [run("r1", 1, { status: "failed", workspacePreparation: undefined })],
+        turnItems: [],
+      }),
     ).toBeNull();
   });
 });
 
 describe("worktreeSendBlock", () => {
-  const failed = { runId: RunId.make("r1"), status: "failed", baseRef: "main" } as const;
-  it("blocks sends until the worktree exists or the user works locally", () => {
-    expect(worktreeSendBlock({ worktreePath: null, launch: failed, workingLocally: false })).toBe(
-      WORKTREE_FAILED_NOTICE,
+  const failed = {
+    runId: RunId.make("r1"),
+    status: "failed",
+    baseRef: "main",
+    retryable: true,
+  } as const;
+  it("blocks sends until the worktree exists, and names the way on", () => {
+    expect(worktreeSendBlock({ worktreePath: null, launch: failed })).toBe(WORKTREE_FAILED_NOTICE);
+    expect(worktreeSendBlock({ worktreePath: null, launch: { ...failed, retryable: false } })).toBe(
+      WORKTREE_STOPPED_NOTICE,
     );
+    expect(worktreeSendBlock({ worktreePath: "/wt", launch: failed })).toBeNull();
     expect(
-      worktreeSendBlock({ worktreePath: null, launch: failed, workingLocally: true }),
-    ).toBeNull();
-    expect(
-      worktreeSendBlock({ worktreePath: "/wt", launch: failed, workingLocally: false }),
-    ).toBeNull();
-    expect(
-      worktreeSendBlock({
-        worktreePath: null,
-        launch: { ...failed, status: "preparing" },
-        workingLocally: true,
-      }),
+      worktreeSendBlock({ worktreePath: null, launch: { ...failed, status: "preparing" } }),
     ).toBe(WORKTREE_PREPARING_NOTICE);
+  });
+
+  it("reads a projection the same way", () => {
+    expect(
+      worktreeBlockOf({
+        thread: noWorktree,
+        runs: [run("r1", 1, { status: "failed" })],
+        turnItems: [preparationFailure("r1")],
+      }),
+    ).toBe(WORKTREE_FAILED_NOTICE);
   });
 });

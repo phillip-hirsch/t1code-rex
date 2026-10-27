@@ -30,6 +30,7 @@
     "check:management": "bun scripts/check-management.tsx",
     "check:diff": "bun scripts/check-diff.tsx",
     "check:git": "bun scripts/check-git.tsx",
+    "check:worktree-guard": "bun scripts/check-worktree-guard.ts",
     "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {

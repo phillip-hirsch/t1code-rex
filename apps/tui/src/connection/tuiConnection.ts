@@ -91,13 +91,14 @@ import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
-import type { ComposerCommandResult } from "../composerSender.ts";
+import type { ComposerCommandResult, WorkspaceGuard } from "../composerSender.ts";
 import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurns } from "../diffTurns.ts";
 import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
 import { branchRefsInput, mergeRefPages, type BranchRefPages } from "../branchPicker.ts";
 import {
   deriveWorktreeLaunch,
   sameWorktreeLaunch,
+  worktreeBlockOf,
   type WorktreeLaunch,
 } from "../worktreeLaunch.ts";
 import type { TuiServerSession } from "../serverLauncher.ts";
@@ -454,6 +455,24 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     /** Whether the thread is launching into a worktree, or that launch failed; from its runs. */
     worktreeLaunchAtom: (threadId: ThreadId): Atom.Atom<WorktreeLaunch | null> =>
       worktreeLaunchAtom(threadId),
+    /**
+     * Keeps the thread's runs loaded until disposed, selected or not, and says why nothing
+     * may start on it now: its worktree isn't there. Undefined until its runs are live.
+     */
+    guardWorkspace: (threadId: ThreadId): WorkspaceGuard => {
+      const state = threadDetails.stateAtom({ environmentId, threadId });
+      const dispose = registry.mount(state);
+      return {
+        blockedReason: () => {
+          const current = registry.get(state);
+          // The server turns the send down itself.
+          if (current.status === "deleted") return null;
+          if (current.status !== "live") return undefined;
+          return Option.match(current.data, { onNone: () => undefined, onSome: worktreeBlockOf });
+        },
+        dispose,
+      };
+    },
     /** Runs a failed worktree preparation again, for the message that started it. */
     retryWorkspacePreparation: (input: RetryWorkspacePreparationInput) =>
       runAction(threadCommands.retryWorkspacePreparation, input),

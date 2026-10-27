@@ -123,22 +123,21 @@ describe("buildGitMenuItems", () => {
     expect(armConfirmation(commit, "/repo", "main")).toBeNull();
   });
 
-  it("leads with retry and work-locally when a worktree setup failed", () => {
+  it("leads with retry, and only retry, when a worktree setup failed", () => {
     const items = buildGitMenuItems({
       status: vcsStatus(),
       busy: false,
       commitModelLabel: "x",
       setupFailed: true,
     });
-    expect(items.slice(0, 2).map(row)).toEqual([
-      { id: "setup-retry", label: "Retry worktree setup", command: "retry-setup", disabled: false },
-      {
-        id: "setup-local",
-        label: "Work in the project checkout instead",
-        command: "work-locally",
-        disabled: false,
-      },
-    ]);
+    expect(items[0] === undefined ? null : row(items[0])).toEqual({
+      id: "setup-retry",
+      label: "Retry worktree setup",
+      command: "retry-setup",
+      disabled: false,
+    });
+    // The server can't move such a thread to the project checkout, so nothing offers to.
+    expect(items.filter((item) => item.id.startsWith("setup-"))).toHaveLength(1);
   });
 
   it("disables every action while one runs", () => {

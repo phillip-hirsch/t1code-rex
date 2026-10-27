@@ -85,7 +85,8 @@ describe("/git, /branch and /worktree", () => {
     });
     expect(resolveComposerSlashAction("/worktree")).toEqual({ type: "toggle-worktree" });
     expect(resolveComposerSlashAction("/worktree retry")).toEqual({ type: "retry-worktree" });
-    expect(resolveComposerSlashAction("/worktree local")).toEqual({ type: "work-locally" });
+    // Gone: the server can't resolve a failed worktree setup to the project checkout.
+    expect(resolveComposerSlashAction("/worktree local")).toMatchObject({ type: "error" });
     expect(resolveComposerSlashAction("/worktree x")).toMatchObject({ type: "error" });
   });
 });

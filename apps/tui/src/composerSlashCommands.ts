@@ -90,8 +90,8 @@ export const COMPOSER_SLASH_COMMANDS: ReadonlyArray<ComposerSlashCommand> = [
   },
   {
     command: "worktree",
-    usage: "/worktree [retry|local]",
-    description: "Start in a new worktree or locally; retry a failed setup, or work locally",
+    usage: "/worktree [retry]",
+    description: "Start in a new worktree or locally; retry a failed setup",
     template: "/worktree",
   },
   {
@@ -144,7 +144,6 @@ export type ComposerSlashAction =
   | { readonly type: "branch-picker"; readonly query: string }
   | { readonly type: "toggle-worktree" }
   | { readonly type: "retry-worktree" }
-  | { readonly type: "work-locally" }
   | { readonly type: "error"; readonly message: string };
 
 /** What a slash command does; null when the text isn't one of ours and should be sent. */
@@ -189,10 +188,8 @@ export function resolveComposerSlashAction(text: string): ComposerSlashAction | 
           return { type: "toggle-worktree" };
         case "retry":
           return { type: "retry-worktree" };
-        case "local":
-          return { type: "work-locally" };
         default:
-          return { type: "error", message: "Type /worktree, /worktree retry or /worktree local" };
+          return { type: "error", message: "Type /worktree or /worktree retry" };
       }
     case "steer":
     case "queue":

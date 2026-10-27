@@ -127,8 +127,8 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
         note: "While the thread is focused; also /branch.",
       },
       {
-        shortcut: "/worktree retry · /worktree local",
-        action: "Retry a failed worktree setup, or work in the project checkout",
+        shortcut: "/worktree retry",
+        action: "Retry a failed worktree setup",
       },
     ],
   },

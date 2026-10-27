@@ -19,7 +19,6 @@ export type GitMenuCommand =
   | { readonly kind: "action"; readonly action: GitStackedAction }
   | { readonly kind: "pull" }
   | { readonly kind: "retry-setup" }
-  | { readonly kind: "work-locally" }
   | { readonly kind: "open-pr"; readonly url: string }
   | { readonly kind: "commit-model" }
   | { readonly kind: "refresh" };
@@ -40,7 +39,10 @@ export interface GitMenuInput {
   readonly busy: boolean;
   /** The commit-message model's label. */
   readonly commitModelLabel: string;
-  /** The thread's new worktree couldn't be made: offer to retry, or to work locally. */
+  /**
+   * The thread's new worktree couldn't be made: offer to retry. The server has no way to
+   * move such a thread to the project checkout; a new thread is the way there.
+   */
   readonly setupFailed?: boolean;
 }
 
@@ -97,20 +99,12 @@ export function buildGitMenuItems(input: GitMenuInput): ReadonlyArray<GitMenuIte
   const { status, busy } = input;
   const items: GitMenuItem[] = [];
   if (input.setupFailed === true) {
-    items.push(
-      {
-        id: "setup-retry",
-        icon: "󰑐",
-        label: "Retry worktree setup",
-        command: { kind: "retry-setup" },
-      },
-      {
-        id: "setup-local",
-        icon: "󰉋",
-        label: "Work in the project checkout instead",
-        command: { kind: "work-locally" },
-      },
-    );
+    items.push({
+      id: "setup-retry",
+      icon: "󰑐",
+      label: "Retry worktree setup",
+      command: { kind: "retry-setup" },
+    });
   }
   const hasRemote = status?.hasPrimaryRemote ?? false;
   const quick = resolveQuickAction(status, busy, status?.isDefaultRef ?? false, hasRemote);

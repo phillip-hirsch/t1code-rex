@@ -112,7 +112,6 @@ export interface ComposerGitCommands {
   readonly openBranchPicker: (query: string) => void;
   readonly toggleWorktree: () => void;
   readonly retrySetup: () => void;
-  readonly workLocally: () => void;
   /** The new worktree a draft's first send makes; undefined launches it locally. */
   readonly launchWorktree: () => LaunchWorktree | undefined;
   /** Why a message to this thread can't go out now: its worktree isn't there. */
@@ -235,7 +234,14 @@ export function Composer(props: ComposerProps) {
           ? "resume"
           : "send";
 
-  const resumeHeld = () => {
+  /** How many held messages go out; null when the thread's worktree isn't there. */
+  const resumeHeld = (): number | null => {
+    // The runs the server holds would start in the project checkout; the sender checks too.
+    const blocked = props.git?.sendBlockedReason(threadId) ?? null;
+    if (blocked !== null) {
+      store.setNotice(threadId, blocked);
+      return null;
+    }
     const pending = sender.resume(threadId);
     if (pending > 0) props.onStatus(`Sending ${pending} held message${pending === 1 ? "" : "s"}`);
     return pending;
@@ -396,10 +402,6 @@ export function Composer(props: ComposerProps) {
             return;
           case "retry-worktree":
             if (props.git) props.git.retrySetup();
-            else props.onStatus("No git here");
-            return;
-          case "work-locally":
-            if (props.git) props.git.workLocally();
             else props.onStatus("No git here");
             return;
           case "clone":
@@ -1047,7 +1049,7 @@ export function QueuedMessages(props: {
         <box key={entry.run.id} style={{ flexDirection: "row", height: 1 }}>
           <text
             wrapMode="none"
-            content={index === 0 && queue?.isHeld ? "󰏤 Queued, held after Stop: " : "󰒲 Queued: "}
+            content={index === 0 && queue?.isHeld ? "󰏤 Queued, held: " : "󰒲 Queued: "}
             style={{ fg: palette.subtle, flexShrink: 0 }}
           />
           <text

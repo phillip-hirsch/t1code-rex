@@ -106,8 +106,6 @@ export function useGitControls(options: GitControlsOptions) {
   const [overlay, setOverlay] = useState<GitOverlayMode | null>(null);
   const [armed, setArmed] = useState<ArmedConfirmation | null>(null);
   const [lastFailure, setLastFailure] = useState<GitFailure | null>(null);
-  // Threads whose worktree setup failed that the user chose to run in the project checkout.
-  const [workingLocally, setWorkingLocally] = useState<ReadonlySet<string>>(() => new Set());
   const { overlayRef } = options;
 
   const draft = target?.kind === "draft" ? store.findNewThreadDraft(target.threadId) : undefined;
@@ -117,10 +115,8 @@ export function useGitControls(options: GitControlsOptions) {
   const launch = useAtomValue(
     target?.kind === "thread" ? connection.worktreeLaunchAtom(target.threadId) : NO_LAUNCH,
   );
-  const local = target !== null && workingLocally.has(target.threadId);
-  const setupFailed = worktreePath === null && launch?.status === "failed" && !local;
-  const launching =
-    worktreePath === null && launch !== null && (launch.status === "preparing" || !local);
+  const setupFailed = worktreePath === null && launch?.status === "failed";
+  const launching = worktreePath === null && launch !== null;
   const envMode = launching
     ? "worktree"
     : resolveEnvMode({
@@ -133,10 +129,7 @@ export function useGitControls(options: GitControlsOptions) {
     target?.kind === "thread"
       ? (thread?.branch ?? (launching ? (launch?.baseRef ?? null) : null))
       : (draft?.baseBranch ?? null);
-  const sendBlock =
-    target?.kind === "thread"
-      ? worktreeSendBlock({ worktreePath, launch, workingLocally: local })
-      : null;
+  const sendBlock = target?.kind === "thread" ? worktreeSendBlock({ worktreePath, launch }) : null;
   const cwd = worktreePath ?? projectCwd;
   const pickingWorktreeBase = target?.kind === "draft" && envMode === "worktree";
   const failure = lastFailure !== null && lastFailure.cwd === cwd ? lastFailure : null;
@@ -204,31 +197,26 @@ export function useGitControls(options: GitControlsOptions) {
     return { projectCwd, baseBranch, startFromOrigin: options.startFromOrigin };
   };
 
-  /** Runs the failed preparation again, for the message that started it. */
+  /**
+   * Runs the failed preparation again (`prepared-run.retry`, as web's retry button). Once it
+   * makes the worktree, the server lets the messages it held follow, in order.
+   */
   const retrySetup = async () => {
-    if (target?.kind !== "thread" || launch?.status !== "failed") {
+    if (target?.kind !== "thread" || !setupFailed || launch === null) {
       setStatus("No failed worktree setup here");
       return;
     }
+    if (!launch.retryable) {
+      setStatus("This worktree setup can't be retried; start a new thread");
+      return;
+    }
     const threadId = target.threadId;
-    // A retry puts it back on the worktree, whatever it chose before.
-    setWorkingLocally((current) => new Set([...current].filter((id) => id !== threadId)));
-    // The composer's "setup failed" notice is answered.
-    store.setNotice(threadId, null);
     const result = await connection.retryWorkspacePreparation({ threadId, runId: launch.runId });
-    setStatus(failed(result, "Retrying worktree setup") ?? "Retrying worktree setup");
-  };
-
-  /** After a failed setup: the thread's next messages run in the project's checkout. */
-  const workLocally = () => {
-    if (target?.kind !== "thread" || !setupFailed) {
-      setStatus("No failed worktree setup here");
-      return;
-    }
-    const threadId = target.threadId;
-    setWorkingLocally((current) => new Set(current).add(threadId));
-    store.setNotice(threadId, null);
-    setStatus("This thread now works in the project checkout");
+    if (result.ok) {
+      // The composer's "setup failed" notice is answered.
+      store.setNotice(threadId, null);
+      setStatus("Retrying worktree setup");
+    } else setStatus(failed(result, "Retrying worktree setup") ?? "");
   };
 
   /** Points the thread at a branch and checkout, stopping its session if the checkout moves. */
@@ -368,9 +356,6 @@ export function useGitControls(options: GitControlsOptions) {
       case "retry-setup":
         await retrySetup();
         return;
-      case "work-locally":
-        workLocally();
-        return;
       case "refresh": {
         const result = await connection.refreshVcsStatus(cwd);
         setStatus(failed(result, "Refresh") ?? "Git status refreshed");
@@ -435,10 +420,9 @@ export function useGitControls(options: GitControlsOptions) {
     runMenuItem: (item: GitMenuItem) => void runMenuItem(item),
     cancelWorktreeSetup: () => void cancelWorktreeSetup(),
     retrySetup: () => void retrySetup(),
-    workLocally,
     /**
-     * Why a message to this thread can't go out now. Only the thread in view has its runs
-     * loaded; elsewhere the server holds messages queued behind a failed worktree.
+     * Why the composer of the thread in view shouldn't send or resume now, so its text stays
+     * put. The sender checks every thread with pending jobs again before each command.
      */
     sendBlockedReason: (threadId: string): string | null =>
       target?.kind === "thread" && target.threadId === threadId ? sendBlock : null,

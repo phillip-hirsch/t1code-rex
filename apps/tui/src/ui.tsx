@@ -480,6 +480,8 @@ function Shell(props: AppProps) {
         return () => clearTimeout(timer);
       },
       resumeQueue: connection.resumeQueue,
+      // Every thread with pending jobs, selected or not: nothing starts without its worktree.
+      guardWorkspace: connection.guardWorkspace,
       declineApprovals: createRedirectDecliner({
         responder,
         pendingApprovalIds: pendingApprovalIdsOf,
@@ -810,12 +812,6 @@ function Shell(props: AppProps) {
     },
     onFocusComposer: () => setFocusArea(composerTarget === null ? "thread" : "composer"),
   });
-  // A queued message asks the git controls before it goes out.
-  const sendBlockedReason = git.sendBlockedReason;
-  useEffect(
-    () => sender.setBlockedReason((send) => sendBlockedReason(send.target.threadId)),
-    [sender, sendBlockedReason],
-  );
   const commitModelLabel =
     commitModelSelection === null
       ? "server default"
@@ -1195,20 +1191,12 @@ function Shell(props: AppProps) {
     });
   }
   if (git.setupFailed) {
-    actions.push(
-      {
-        id: "git:retry-setup",
-        label: "Retry worktree setup",
-        description: "/worktree retry",
-        run: git.retrySetup,
-      },
-      {
-        id: "git:work-locally",
-        label: "Work in the project checkout instead",
-        description: "/worktree local",
-        run: git.workLocally,
-      },
-    );
+    actions.push({
+      id: "git:retry-setup",
+      label: "Retry worktree setup",
+      description: "/worktree retry",
+      run: git.retrySetup,
+    });
   }
   if (git.setupThreadId !== null) {
     actions.push({
@@ -1756,7 +1744,6 @@ function Shell(props: AppProps) {
                     openBranchPicker: git.openBranchPicker,
                     toggleWorktree: git.toggleWorktree,
                     retrySetup: git.retrySetup,
-                    workLocally: git.workLocally,
                     launchWorktree: git.launchWorktree,
                     sendBlockedReason: git.sendBlockedReason,
                   },
