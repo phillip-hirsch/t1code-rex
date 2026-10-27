@@ -215,6 +215,9 @@ export function useSidebarController(options: SidebarControllerOptions) {
   }
 
   const cursorKey = resolveCursorKey(rows, storedCursorKey, selection);
+  // When the cursor's row disappears, the cursor goes back to following the selection, so
+  // the row returning later (an unarchive) doesn't pull it away from the open thread.
+  if (storedCursorKey !== null && cursorKey !== storedCursorKey) setCursorKey(null);
   const cursorRow = rows.find((row) => row.key === cursorKey) ?? null;
 
   useEffect(() => {

@@ -31,6 +31,8 @@ function setup(input: {
   readonly prefs?: TuiPrefs;
 }) {
   const registry = AtomRegistry.make();
+  // Hoisted: a fresh object each render would never let the hook settle.
+  const initialPrefs = input.prefs ?? {};
   const source = {
     projectsAtom: Atom.make(input.projects),
     threadShellsAtom: Atom.make(input.threads),
@@ -41,7 +43,7 @@ function setup(input: {
     () =>
       useSidebarController({
         connection: source,
-        initialPrefs: input.prefs ?? {},
+        initialPrefs,
         prefsWriter: null,
         launch: null,
         cwd: "/nowhere",
@@ -140,6 +142,26 @@ describe("useSidebarController selection", () => {
     sidebar.key("down");
     expect(sidebar.hook.current.selection).toEqual({ projectId: "b", threadId: "b1" });
     expect(sidebar.hook.current.activeProject?.id).toBe("b");
+  });
+});
+
+describe("useSidebarController cursor", () => {
+  it("keeps the cursor on the open thread when the removed one returns", () => {
+    const a = presentedThread("a", "p", { updatedAt: at("2026-06-20T03:00:00.000Z") });
+    const b = presentedThread("b", "p", { updatedAt: at("2026-06-20T02:00:00.000Z") });
+    const sidebar = setup({ projects: [projectShell("p")], threads: [a, b] });
+    sidebar.press(threadRowKey("a"));
+    expect(sidebar.hook.current.cursorKey).toBe(threadRowKey("a"));
+
+    // Archiving A moves the selection and the cursor to its neighbor.
+    sidebar.setThreads([b]);
+    expect(sidebar.hook.current.selection).toEqual({ projectId: "p", threadId: "b" });
+    expect(sidebar.hook.current.cursorKey).toBe(threadRowKey("b"));
+
+    // Unarchiving A leaves both on B.
+    sidebar.setThreads([a, b]);
+    expect(sidebar.hook.current.selection).toEqual({ projectId: "p", threadId: "b" });
+    expect(sidebar.hook.current.cursorKey).toBe(threadRowKey("b"));
   });
 });
 
