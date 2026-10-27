@@ -2,7 +2,6 @@
 import * as NodeCrypto from "node:crypto";
 import { isTransportConnectionErrorMessage } from "@t3tools/client-runtime/errors";
 import { deriveThreadTitleSeed } from "@t3tools/client-runtime/operations";
-import { resolveComposerDispatchMode } from "@t3tools/client-runtime/state/composer-dispatch";
 import type { StartThreadTurnInput } from "@t3tools/client-runtime/state/threads";
 import {
   CommandId,
@@ -11,7 +10,6 @@ import {
   type ThreadId,
   type UploadChatImageAttachment,
 } from "@t3tools/contracts";
-import { modelSelectionsEqual } from "@t3tools/shared/model";
 
 import type { ComposerSettings } from "./composerSettings.ts";
 
@@ -22,24 +20,19 @@ export type ComposerTarget =
 
 export type ComposerAttachment = UploadChatImageAttachment & { readonly id: string };
 
-export type ComposerDispatch = "auto" | "queue" | "steer";
-
 /**
- * Enter starts a run, or queues behind the one in progress; Alt+Enter steers it instead.
- * The server still decides when steering isn't possible yet (it queues).
+ * How a message meets a run in progress. Enter queues behind it and Alt+Enter steers it; on
+ * an idle thread both start a run (client-runtime and the server resolve that, from the
+ * thread's live state). So the choice never depends on the TUI's cached run state, which
+ * can be stale: an explicit `/queue` must never become a dispatch that steers a live run.
  */
+export type ComposerDispatch = "queue" | "steer";
+
 export function chooseDispatch(input: {
-  readonly running: boolean;
   readonly alternate: boolean;
-  readonly requested?: "queue" | "steer";
+  readonly requested?: ComposerDispatch;
 }): ComposerDispatch {
-  if (input.requested !== undefined) return input.running ? input.requested : "auto";
-  const mode = resolveComposerDispatchMode({
-    running: input.running,
-    alternateModifier: input.alternate,
-    activeTurnDefault: "queue",
-  });
-  return mode === "restart" ? "steer" : mode;
+  return input.requested ?? (input.alternate ? "steer" : "queue");
 }
 
 /** One message on its way to the server. Its ids stay fixed, so a retry can't double-send. */
@@ -66,11 +59,7 @@ export function createComposerSend(
   };
 }
 
-/** Mode changes a send applies first, each with an id derived from the send's own. */
-export function settingsCommandsForSend(
-  send: ComposerSend,
-  thread: ComposerSettings | null,
-): ReadonlyArray<
+export type ComposerSettingsCommand =
   | {
       readonly kind: "runtime-mode";
       readonly commandId: CommandId;
@@ -80,21 +69,30 @@ export function settingsCommandsForSend(
       readonly kind: "interaction-mode";
       readonly commandId: CommandId;
       readonly value: ComposerSettings["interactionMode"];
-    }
-> {
+    };
+
+/**
+ * Mode changes a send applies first, each with an id derived from the send's own. `base` is
+ * what the thread will have when the send goes out: the thread's settings now, or those of
+ * the send queued ahead of it.
+ */
+export function settingsCommandsForSend(
+  send: ComposerSend,
+  base: ComposerSettings | null,
+): ReadonlyArray<ComposerSettingsCommand> {
   // A new thread launches with its settings; nothing to change first.
-  if (send.target.kind === "draft" || thread === null) return [];
-  const commands = [];
-  if (send.settings.runtimeMode !== thread.runtimeMode) {
+  if (send.target.kind === "draft" || base === null) return [];
+  const commands: Array<ComposerSettingsCommand> = [];
+  if (send.settings.runtimeMode !== base.runtimeMode) {
     commands.push({
-      kind: "runtime-mode" as const,
+      kind: "runtime-mode",
       commandId: CommandId.make(`${send.commandId}:runtime-mode`),
       value: send.settings.runtimeMode,
     });
   }
-  if (send.settings.interactionMode !== thread.interactionMode) {
+  if (send.settings.interactionMode !== base.interactionMode) {
     commands.push({
-      kind: "interaction-mode" as const,
+      kind: "interaction-mode",
       commandId: CommandId.make(`${send.commandId}:interaction-mode`),
       value: send.settings.interactionMode,
     });
@@ -102,15 +100,14 @@ export function settingsCommandsForSend(
   return commands;
 }
 
-/** The start-turn input for a send; a draft target launches its thread with this message. */
-export function buildStartTurnInput(
-  send: ComposerSend,
-  thread: ComposerSettings | null,
-): StartThreadTurnInput {
+/**
+ * The start-turn input for a send; a draft target launches its thread with this message.
+ * The model always rides along: the thread's cached model can lag behind a send that
+ * switched it, so leaving it out could run this message on the wrong one.
+ */
+export function buildStartTurnInput(send: ComposerSend): StartThreadTurnInput {
   const { target, settings } = send;
   const titleSeed = deriveThreadTitleSeed({ text: send.text, attachments: send.attachments });
-  const modelChanged =
-    thread === null || !modelSelectionsEqual(thread.modelSelection, settings.modelSelection);
   return {
     commandId: send.commandId,
     createdAt: send.createdAt,
@@ -121,7 +118,7 @@ export function buildStartTurnInput(
       text: send.text,
       attachments: send.attachments,
     },
-    ...(target.kind === "draft" || modelChanged ? { modelSelection: settings.modelSelection } : {}),
+    modelSelection: settings.modelSelection,
     titleSeed,
     runtimeMode: settings.runtimeMode,
     interactionMode: settings.interactionMode,

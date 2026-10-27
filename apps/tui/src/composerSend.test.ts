@@ -35,7 +35,7 @@ function send(overrides: Partial<ComposerSend> = {}): ComposerSend {
     messageId: MessageId.make("msg-1"),
     text: "Fix the build",
     attachments: [],
-    dispatch: "auto",
+    dispatch: "queue",
     settings: codex,
     createdAt: "2026-10-27T10:00:00.000Z",
     ...overrides,
@@ -43,42 +43,31 @@ function send(overrides: Partial<ComposerSend> = {}): ComposerSend {
 }
 
 describe("chooseDispatch", () => {
-  it("starts when idle, queues behind a run, and steers with the alternate key", () => {
-    expect(chooseDispatch({ running: false, alternate: false })).toBe("auto");
-    expect(chooseDispatch({ running: false, alternate: true })).toBe("auto");
-    expect(chooseDispatch({ running: true, alternate: false })).toBe("queue");
-    expect(chooseDispatch({ running: true, alternate: true })).toBe("steer");
-    expect(chooseDispatch({ running: true, alternate: false, requested: "steer" })).toBe("steer");
-    expect(chooseDispatch({ running: false, alternate: false, requested: "queue" })).toBe("auto");
+  it("queues on Enter and steers on Alt+Enter, whatever the cached run state says", () => {
+    expect(chooseDispatch({ alternate: false })).toBe("queue");
+    expect(chooseDispatch({ alternate: true })).toBe("steer");
+  });
+
+  it("keeps an explicit /queue or /steer even when the thread looks idle", () => {
+    // A stale idle snapshot must not turn /queue into a dispatch that can steer a live run.
+    expect(chooseDispatch({ alternate: false, requested: "queue" })).toBe("queue");
+    expect(chooseDispatch({ alternate: false, requested: "steer" })).toBe("steer");
   });
 });
 
 describe("buildStartTurnInput", () => {
-  it("sends a follow-up with the send's own ids and no model change", () => {
-    const input = buildStartTurnInput(send(), codex);
+  it("sends a follow-up with the send's own ids and its model", () => {
+    const input = buildStartTurnInput(send());
     expect(input).toMatchObject({
       commandId: "cmd-1",
       threadId: "thread-1",
       message: { messageId: "msg-1", role: "user", text: "Fix the build", attachments: [] },
+      modelSelection: codex.modelSelection,
       runtimeMode: "full-access",
       interactionMode: "default",
-      dispatchMode: "auto",
+      dispatchMode: "queue",
     });
-    expect(input.modelSelection).toBeUndefined();
     expect(input.bootstrap).toBeUndefined();
-  });
-
-  it("carries a picked model with the message", () => {
-    const claude = {
-      ...codex,
-      modelSelection: {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-haiku-5-5",
-      },
-    };
-    expect(buildStartTurnInput(send({ settings: claude }), codex).modelSelection).toEqual(
-      claude.modelSelection,
-    );
   });
 
   it("launches a draft as a new thread with its first message", () => {
@@ -86,7 +75,7 @@ describe("buildStartTurnInput", () => {
       target: { kind: "draft", threadId: ThreadId.make("new-1"), projectId: ProjectId.make("p") },
       settings: { ...codex, interactionMode: "plan" },
     });
-    expect(buildStartTurnInput(draft, null)).toMatchObject({
+    expect(buildStartTurnInput(draft)).toMatchObject({
       threadId: "new-1",
       titleSeed: "Fix the build",
       modelSelection: codex.modelSelection,

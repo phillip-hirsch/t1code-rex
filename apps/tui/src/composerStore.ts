@@ -353,9 +353,6 @@ export function createComposerStore(options: ComposerStoreOptions) {
       notifyThread(threadId);
     },
 
-    sendsWaiting: (): ReadonlyArray<ComposerSendEntry> =>
-      [...sends.values()].flat().filter((entry) => entry.status === "waiting"),
-
     snapshot(threadId: string): ComposerThreadSnapshot {
       const cached = snapshots.get(threadId);
       if (cached) return cached;

@@ -39,7 +39,7 @@ function sendFor(threadId: string, text: string): ComposerSend {
     messageId: MessageId.make(`msg-${text}`),
     text,
     attachments: [image],
-    dispatch: "auto",
+    dispatch: "queue",
     settings,
     createdAt: "2026-10-27T10:00:00.000Z",
   };

@@ -132,6 +132,9 @@ export function Composer(props: ComposerProps) {
   const slashMenuOpen = props.focused && slashItems.length > 0;
   const attachments = snapshot.attachments;
 
+  /** What the send button shows, and what Enter on an empty composer does. */
+  const primary = running && !hasText && attachments.length === 0 ? "stop" : "send";
+
   const readText = () => textareaRef.current?.plainText ?? "";
   const syncFromText = (text: string) => {
     setHasText(text.length > 0);
@@ -223,9 +226,13 @@ export function Composer(props: ComposerProps) {
         }
       }
     }
-    if (text.trim().length === 0 && attachments.length === 0) {
-      // Like before, Enter on an empty composer stops a running turn.
-      if (running && !stopRequested) props.onStop();
+    // The draft's images as of now, not as of the last render: the second of two quick
+    // Enters must find them already sent.
+    const draftAttachments = store.getDraft(threadId).attachments;
+    if (text.trim().length === 0 && draftAttachments.length === 0) {
+      // Like before, Enter on an empty composer stops a running turn, but only one that
+      // showed empty; a second quick Enter after a send must not stop the run.
+      if (primary === "stop" && !stopRequested) props.onStop();
       return;
     }
     if (pasting) {
@@ -240,9 +247,8 @@ export function Composer(props: ComposerProps) {
       createComposerSend({
         target,
         text,
-        attachments,
+        attachments: draftAttachments,
         dispatch: chooseDispatch({
-          running,
           alternate,
           ...(requested === undefined ? {} : { requested: requested.dispatch }),
         }),
@@ -324,12 +330,11 @@ export function Composer(props: ComposerProps) {
         : running
           ? "Queue a follow-up (Alt+Enter steers)"
           : "Ask for follow-up changes or attach images";
-  const primary = running && !hasText && attachments.length === 0 ? "stop" : "send";
 
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
       {snapshot.sends.map((entry) => (
-        <PendingSendRow key={entry.send.commandId} entry={entry} theme={theme} />
+        <PendingSendRow key={entry.send.commandId} entry={entry} running={running} theme={theme} />
       ))}
       {snapshot.notice ? (
         <text
@@ -670,8 +675,8 @@ function SlashMenu(props: {
   );
 }
 
-function PendingSendRow(props: { entry: ComposerSendEntry; theme: TuiTheme }) {
-  const { entry, theme } = props;
+function PendingSendRow(props: { entry: ComposerSendEntry; running: boolean; theme: TuiTheme }) {
+  const { entry, running, theme } = props;
   const palette = theme.palette;
   const flat = entry.send.text.replace(/\s+/gu, " ").trim();
   const preview = flat.length > PENDING_TEXT_MAX ? `${flat.slice(0, PENDING_TEXT_MAX - 1)}…` : flat;
@@ -681,11 +686,11 @@ function PendingSendRow(props: { entry: ComposerSendEntry; theme: TuiTheme }) {
     entry.status === "sending"
       ? entry.send.target.kind === "draft"
         ? "Starting thread…"
-        : entry.send.dispatch === "queue"
-          ? "Queueing…"
+        : !running
+          ? "Sending…"
           : entry.send.dispatch === "steer"
             ? "Steering…"
-            : "Sending…"
+            : "Queueing…"
       : "Not sent yet; retrying when connected";
   return (
     <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
