@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
+import * as Schema from "effect/Schema";
 import { Command } from "effect/cli";
 import { HttpClient, HttpClientError, HttpClientResponse, UrlParams } from "effect/http";
 
@@ -46,6 +47,19 @@ const cliArgs = (target: "latest" | "prerelease") => [
 const configLayer = ConfigProvider.layer(
   ConfigProvider.fromEnv({ env: { DISCORD_WEBHOOK_URL: webhookUrl.href } }),
 );
+const PayloadSchema = Schema.fromJsonString(
+  Schema.Struct({
+    content: Schema.String,
+    allowed_mentions: Schema.Struct({
+      parse: Schema.Array(Schema.String),
+      roles: Schema.Array(Schema.String),
+    }),
+    embeds: Schema.Array(
+      Schema.Struct({ title: Schema.String, description: Schema.String, url: Schema.String }),
+    ),
+  }),
+);
+const decodePayload = Schema.decodeUnknownSync(PayloadSchema);
 const payloadDescription = (payloads: ReturnType<typeof buildDiscordReleaseAnnouncement>) =>
   payloads.flatMap((payload) => payload.embeds.map((embed) => embed.description)).join("");
 const captureClient = (requests: string[], status = 204) =>
@@ -296,6 +310,30 @@ it.effect(
 );
 
 it.layer(NodeServices.layer)("Discord release CLI", (it) => {
+  it.effect("sends a long nightly changelog in order, mentioning the role only first", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const temp = yield* fs.makeTempDirectoryScoped({ prefix: "discord release " });
+      const notesFile = `${temp}/discord-release-notes.md`;
+      yield* fs.writeFileString(notesFile, Array.from({ length: 50 }, () => notes).join("\n\n"));
+      const requests: string[] = [];
+      yield* runCli([...cliArgs("prerelease"), "--release-notes-file", notesFile]).pipe(
+        Effect.provide([configLayer, captureClient(requests)]),
+      );
+      const payloads = requests.map((request) => decodePayload(request));
+      assert.ok(payloads.length > 2);
+      assert.equal(
+        payloads.flatMap((payload) => payload.embeds.map((embed) => embed.description)).join(""),
+        `${intro}\n\n${Array.from({ length: 50 }, () => formattedNotes).join("\n\n")}`,
+      );
+      for (const [index, payload] of payloads.entries())
+        assert.deepStrictEqual(payload.allowed_mentions, {
+          parse: [],
+          roles: index === 0 ? [latestAnnouncement.roleId] : [],
+        });
+    }),
+  );
+
   it.effect("fails before sending when the requested nightly notes file cannot be read", () =>
     Effect.gen(function* () {
       const requests: string[] = [];
