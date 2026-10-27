@@ -116,7 +116,8 @@ function scanBlocks(source: string, from: number, blocks: MessageBlock[]): void 
         if (markdownStart === -1) markdownStart = offset;
         markdownEnd = lineEnd;
         blankSinceMarkdown = false;
-        if (/^ {0,3}<!--/.test(line) && !line.slice(line.indexOf("<!--") + 4).includes("-->")) {
+        // "<!-->" and "<!--->" close on the same line, so check the whole line.
+        if (/^ {0,3}<!--/.test(line) && !line.includes("-->")) {
           inComment = true;
         }
       }

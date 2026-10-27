@@ -113,6 +113,13 @@ describe("splitMessageBlocks", () => {
     ]);
   });
 
+  it("treats <!--> and <!---> as closed comments, so a following fence is code", () => {
+    for (const opener of ["<!-->", "<!--->", "<!-- x -->"]) {
+      const { blocks } = splitMessageBlocks(`${opener}\n\n\`\`\`js\nlet a = 1;\n\`\`\``);
+      expect(blocks.map((block) => block.kind)).toEqual(["markdown", "code"]);
+    }
+  });
+
   it("matches a full split at every prefix of a message with a comment", () => {
     const message = "intro\n\n<!--\na\n\nb\n-->\n\ntail";
     let previous = null;
