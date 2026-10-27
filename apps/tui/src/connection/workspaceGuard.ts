@@ -2,16 +2,11 @@ import type {
   EnvironmentThreadState,
   ThreadSnapshotLoadResult,
 } from "@t3tools/client-runtime/state/threads";
-import * as Option from "effect/Option";
 import type { Atom, AtomRegistry } from "effect/reactivity";
 
 import { describeSendFailure } from "../composerSend.ts";
 import type { WorkspaceBlock, WorkspaceGuard } from "../composerSender.ts";
-import {
-  confirmedWorktreeBlock,
-  worktreeBlockOf,
-  type ServerLaunchView,
-} from "../worktreeLaunch.ts";
+import { confirmedWorktreeBlock, type ServerLaunchView } from "../worktreeLaunch.ts";
 
 export interface WorkspaceGuardOptions {
   readonly registry: AtomRegistry.AtomRegistry;
@@ -32,8 +27,9 @@ type Loaded = Exclude<ThreadSnapshotLoadResult, { readonly _tag: "unavailable" }
 
 /**
  * Watches a thread for the composer sender. A warm remount shows old state as live before
- * its replay, so live state counts once it agrees with the server's snapshot, is newer, or
- * has synchronized since watching started; until then an ask waits, or gets a reason.
+ * its replay, so live state counts only once it agrees with the server's snapshot or is
+ * newer. A replay alone proves nothing: it may be an older shared subscription catching up.
+ * Until the snapshot loads an ask waits, and once every attempt failed it gets a reason.
  */
 export function createWorkspaceGuard(options: WorkspaceGuardOptions): WorkspaceGuard {
   const { registry, stateAtom } = options;
@@ -41,11 +37,6 @@ export function createWorkspaceGuard(options: WorkspaceGuardOptions): WorkspaceG
   let server: ServerLaunchView | undefined;
   /** Why the snapshot couldn't be loaded, once every attempt failed. */
   let failure: string | undefined;
-  /**
-   * A replay ran since watching started: the server marks the thread as synchronizing until
-   * it has caught up, so live after that is the server's state.
-   */
-  let replayed = false;
   let attempts = 0;
   let cancelRetry = () => {};
   const waiters = new Set<() => void>();
@@ -53,14 +44,7 @@ export function createWorkspaceGuard(options: WorkspaceGuardOptions): WorkspaceG
     for (const check of waiters) check();
   };
 
-  const unsubscribe = registry.subscribe(
-    stateAtom,
-    (state) => {
-      if (state.status === "synchronizing") replayed = true;
-      changed();
-    },
-    { immediate: true },
-  );
+  const unsubscribe = registry.subscribe(stateAtom, () => changed(), { immediate: true });
 
   const load = () => {
     attempts += 1;
@@ -92,9 +76,6 @@ export function createWorkspaceGuard(options: WorkspaceGuardOptions): WorkspaceG
   const decide = (): { readonly value: WorkspaceBlock; readonly waiting: boolean } => {
     if (disposed) return { value: undefined, waiting: false };
     const live = registry.get(stateAtom);
-    if (replayed && live.status === "live" && Option.isSome(live.data)) {
-      return { value: worktreeBlockOf(live.data.value), waiting: false };
-    }
     const value = confirmedWorktreeBlock(live, server);
     if (value !== undefined) return { value, waiting: false };
     // Offline: the sender waits for the connection, and its replay settles it.

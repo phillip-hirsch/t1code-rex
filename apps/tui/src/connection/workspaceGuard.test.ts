@@ -426,7 +426,35 @@ describe("createWorkspaceGuard on client-runtime's thread atoms", () => {
     }),
   );
 
-  it.effect("PR 20 S2: retries a snapshot it can't load, and trusts the replay once it ran", () =>
+  it.effect("PR 20 r5: an older shared replay can't vouch against a newer failed snapshot", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      // The thread is on screen, and its subscription is still replaying when the send starts.
+      const unmount = h.registry.mount(h.stateAtom);
+      const shared = yield* Queue.take(h.subscriptions);
+      h.server.snapshot = FAILED;
+      const first = message("first");
+      const done = h.sender.send(first);
+      yield* settle;
+      expect(h.snapshotLoads).toEqual([FAILED]);
+
+      // That older replay finishes on state from before the failure: still waiting.
+      yield* h.replay(shared, BEFORE, 1);
+      yield* settle;
+      expect(yield* Queue.size(h.sent)).toBe(0);
+      expect(h.sender.pendingCount()).toBe(1);
+
+      // The stream then shows the failure: the message goes back, unsent.
+      yield* h.replay(shared, FAILED, 2);
+      yield* Effect.promise(() => done);
+      expect(yield* Queue.size(h.sent)).toBe(0);
+      expect(h.store.getDraft(THREAD_ID).text).toBe("first");
+      expect(h.store.snapshot(THREAD_ID).notice).toBe(WORKTREE_FAILED_NOTICE);
+      unmount();
+    }),
+  );
+
+  it.effect("PR 20 S2: retries a snapshot it can't load, and never trusts a replay alone", () =>
     Effect.gen(function* () {
       const h = yield* setup();
       yield* h.viewThenLeave(FAILED);
@@ -445,8 +473,15 @@ describe("createWorkspaceGuard on client-runtime's thread atoms", () => {
       expect(yield* Queue.size(h.sent)).toBe(0);
       expect(h.sender.pendingCount()).toBe(1);
 
-      // The replay shows the worktree: the message goes out, without the snapshot.
+      // A replay alone may be an older shared subscription catching up: still waiting.
       yield* h.replay(remount, READY, 2);
+      yield* settle;
+      expect(yield* Queue.size(h.sent)).toBe(0);
+      expect(h.sender.pendingCount()).toBe(1);
+
+      // The next attempt loads and agrees with the replay: the message goes out.
+      h.server.snapshot = READY;
+      yield* h.retrySnapshot;
       expect(yield* Queue.take(h.sent)).toBe(first.commandId);
       yield* Effect.promise(() => done);
       expect(h.sender.pendingCount()).toBe(0);
