@@ -81,8 +81,6 @@ export interface ComposerProps {
   readonly clipboardDir: string;
   readonly onFocus: () => void;
   readonly onStop: () => void;
-  /** `/resume` with nothing held here: releases the queue the server holds after Stop. */
-  readonly onResumeQueue: () => void;
   readonly onExit: () => void;
   readonly onNewThread: () => void;
   readonly onOpenModelPicker: () => void;
@@ -243,17 +241,22 @@ export function Composer(props: ComposerProps) {
             submit(false, { dispatch: action.dispatch, text: action.text });
             return;
           case "resume":
-            // Held messages release the server's queue first; with none, release it directly.
-            if (resumeHeld() > 0) return;
-            if (target.kind === "thread") props.onResumeQueue();
-            else props.onStatus("Nothing to resume");
+            // A draft has no thread whose queue the server could hold.
+            if (target.kind === "draft" && snapshot.sends.length === 0) {
+              props.onStatus("Nothing to resume");
+              return;
+            }
+            // Sends what's held here, after a `queue.resume`; with nothing here, just that.
+            if (resumeHeld() === 0) props.onStatus("Resuming the thread's queue");
             return;
           case "discard": {
-            const count = sender.discard(threadId);
+            const { messages, resumes } = sender.discard(threadId);
             props.onStatus(
-              count === 0
-                ? "No unsent messages"
-                : `${count} unsent message${count === 1 ? "" : "s"} back in the composer`,
+              messages > 0
+                ? `${messages} unsent message${messages === 1 ? "" : "s"} back in the composer`
+                : resumes > 0
+                  ? "Stopped resuming the queue"
+                  : "No unsent messages",
             );
             return;
           }

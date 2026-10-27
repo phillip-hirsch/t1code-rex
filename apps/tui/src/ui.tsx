@@ -41,6 +41,7 @@ import {
   describeSendFailure,
   type ComposerTarget,
 } from "./composerSend.ts";
+import { checkUnconfirmedSends } from "./composerRecovery.ts";
 import { createComposerSender } from "./composerSender.ts";
 import {
   applySettingsPatch,
@@ -364,20 +365,29 @@ function Shell(props: AppProps) {
         const timer = setTimeout(run, delayMs);
         return () => clearTimeout(timer);
       },
-      // Sends the last quit saved because they may have reached the server.
-      restore: composerStore.pendingSendsAtLaunch(),
-      resumeQueue: (threadId) =>
-        connection.resumeQueue({ commandId: CommandId.make(NodeCrypto.randomUUID()), threadId }),
-      onFailure: (send, error, action) =>
-        logger.log("composer.send.failed", {
-          threadId: send.target.threadId,
-          commandId: send.commandId,
+      resumeQueue: connection.resumeQueue,
+      onFailure: (job, error, action) =>
+        logger.log(job.kind === "send" ? "composer.send.failed" : "composer.resume.failed", {
+          threadId: job.threadId,
+          commandId: job.commandId,
           action,
           error: action === "stuck" ? "no reply yet" : describeSendFailure(error),
         }),
     }),
   );
   useEffect(() => () => sender.dispose(), [sender]);
+  // Messages the last quit couldn't confirm: dropped if their thread has them, else restored.
+  useEffect(
+    () =>
+      checkUnconfirmedSends({
+        store: composerStore,
+        watchThread: (threadId, onState) =>
+          connection.registry.subscribe(connection.thread(threadId).stateAtom, onState, {
+            immediate: true,
+          }),
+      }),
+    [composerStore, connection],
+  );
   // Forget modes and launches the shell now lists.
   const listedThreads = sidebar.threadsById;
   useEffect(
@@ -716,15 +726,6 @@ function Shell(props: AppProps) {
         if (result.ok) return;
         setStopRequestedRunId(null);
         setStatus(`Stop failed: ${describeSendFailure(result.error)}`);
-      });
-  };
-
-  // `/resume`: releases what the server holds after Stop, like upstream's "Resume thread".
-  const resumeQueue = (threadId: ThreadId) => {
-    void connection
-      .resumeQueue({ commandId: CommandId.make(NodeCrypto.randomUUID()), threadId })
-      .then((result) => {
-        if (!result.ok) setStatus(`Resume failed: ${describeSendFailure(result.error)}`);
       });
   };
 
@@ -1098,7 +1099,6 @@ function Shell(props: AppProps) {
                 clipboardDir={NodePath.join(paths.stateHomeDir, "clipboard")}
                 onFocus={() => setFocusArea("composer")}
                 onStop={stopRun}
-                onResumeQueue={() => resumeQueue(composerTarget.threadId)}
                 onExit={requestExit}
                 onNewThread={() => openNewThread(composerTarget.projectId)}
                 onOpenModelPicker={toggleModelPicker}

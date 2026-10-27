@@ -88,7 +88,6 @@ async function mountComposer(input: {
         onStop={() => {
           stops += 1;
         }}
-        onResumeQueue={() => undefined}
         onExit={() => undefined}
         onNewThread={() => undefined}
         onOpenModelPicker={() => undefined}
@@ -110,18 +109,25 @@ function recordingSender(
     Promise.resolve({ ok: true }),
 ) {
   const sent: Array<StartThreadTurnInput> = [];
+  /** Every command in order: message texts, and "queue.resume". */
+  const order: Array<string> = [];
   const sender = createComposerSender({
     store,
     startTurn: (input) => {
       sent.push(input);
+      order.push(input.message.text);
       return reply(input);
+    },
+    resumeQueue: () => {
+      order.push("queue.resume");
+      return Promise.resolve({ ok: true });
     },
     setRuntimeMode: () => Promise.resolve({ ok: true }),
     setInteractionMode: () => Promise.resolve({ ok: true }),
     threadSettings: () => settings,
     schedule: () => () => undefined,
   });
-  return { sent, sender };
+  return { sent, order, sender };
 }
 
 /** A composer on a running thread, with text and one image, as two quick Enters find it. */
@@ -198,7 +204,7 @@ async function checkBusyEnter(): Promise<void> {
 async function checkResumeHeld(): Promise<void> {
   const store = createComposerStore({ initialPrefs: {}, persist: null });
   let answerFirst: (result: ComposerCommandResult) => void = () => undefined;
-  const { sent, sender } = recordingSender(store, (input) =>
+  const { sent, order, sender } = recordingSender(store, (input) =>
     input.message.text === "first"
       ? new Promise((resolve) => {
           answerFirst = resolve;
@@ -230,6 +236,7 @@ async function checkResumeHeld(): Promise<void> {
   await settle(setup.renderOnce);
   check("N3: Enter on the empty composer sends it", sent.at(-1)?.message.text, "second");
   check("N3: sent once", sent.filter((input) => input.message.text === "second").length, 1);
+  check("N8: queue.resume goes out first", order.join(", "), "first, queue.resume, second");
   setup.renderer.destroy();
   sender.dispose();
 }

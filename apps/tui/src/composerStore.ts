@@ -1,7 +1,7 @@
 // @effect-diagnostics globalTimers:off -- The TUI runs on Bun outside the Effect runtime.
 import { ThreadId, type ProjectId } from "@t3tools/contracts";
 
-import type { ComposerAttachment, ComposerSend, PendingComposerSend } from "./composerSend.ts";
+import type { ComposerAttachment, ComposerSend, UnconfirmedComposerSend } from "./composerSend.ts";
 import {
   applySettingsPatch,
   defaultsFromSettings,
@@ -67,25 +67,18 @@ export interface ComposerStoreOptions {
 const EMPTY_DRAFT: ComposerDraft = { text: "", attachments: [] };
 const PERSIST_DELAY_MS = 300;
 
-/** Saved sends that look like ours; anything else in prefs.json is ignored. */
-function readPendingSends(value: unknown): ReadonlyArray<PendingComposerSend> {
+/** Saved records that look like ours; anything else in prefs.json is ignored. */
+function readUnconfirmedSends(value: unknown): Array<UnconfirmedComposerSend> {
   if (!Array.isArray(value)) return [];
-  return value.filter((entry: unknown): entry is PendingComposerSend => {
+  return value.filter((entry: unknown): entry is UnconfirmedComposerSend => {
     if (typeof entry !== "object" || entry === null) return false;
-    const { send, stages, next } = entry as Record<string, unknown>;
-    if (typeof send !== "object" || send === null || !Array.isArray(stages)) return false;
-    const { target, commandId, messageId, text, attachments } = send as Record<string, unknown>;
+    const { threadId, launch, messageId, text, attachments } = entry as Record<string, unknown>;
     return (
-      typeof target === "object" &&
-      target !== null &&
-      typeof (target as Record<string, unknown>).threadId === "string" &&
-      typeof commandId === "string" &&
+      typeof threadId === "string" &&
+      typeof launch === "boolean" &&
       typeof messageId === "string" &&
       typeof text === "string" &&
-      Array.isArray(attachments) &&
-      typeof next === "number" &&
-      next >= 0 &&
-      next < stages.length
+      Array.isArray(attachments)
     );
   });
 }
@@ -164,14 +157,12 @@ export function createComposerStore(options: ComposerStoreOptions) {
   const globalListeners = new Set<() => void>();
   let globalVersion = 0;
 
-  let pendingSends: ReadonlyArray<PendingComposerSend> = [];
+  // Only the window that owns prefs.json checks these; it's the only one that saves them.
+  let unconfirmed: ReadonlyArray<UnconfirmedComposerSend> =
+    persist === null ? [] : readUnconfirmedSends(initialPrefs.composerUnconfirmedSends);
 
-  let dirty: { drafts: boolean; newThreads: boolean; defaults: boolean; pendingSends: boolean } = {
-    drafts: false,
-    newThreads: false,
-    defaults: false,
-    pendingSends: false,
-  };
+  const clean = { drafts: false, newThreads: false, defaults: false, unconfirmed: false };
+  let dirty: Record<keyof typeof clean, boolean> = { ...clean };
   let timer: ReturnType<typeof setTimeout> | null = null;
 
   const flush = () => {
@@ -205,11 +196,11 @@ export function createComposerStore(options: ComposerStoreOptions) {
       patch.draftRuntimeMode = defaults.draftRuntimeMode;
       patch.draftInteractionMode = defaults.draftInteractionMode;
     }
-    if (dirty.pendingSends) {
-      patch.composerPendingSends = pendingSends.length === 0 ? undefined : pendingSends;
+    if (dirty.unconfirmed) {
+      patch.composerUnconfirmedSends = unconfirmed.length === 0 ? undefined : unconfirmed;
     }
-    const wrote = dirty.drafts || dirty.newThreads || dirty.defaults || dirty.pendingSends;
-    dirty = { drafts: false, newThreads: false, defaults: false, pendingSends: false };
+    const wrote = Object.values(dirty).some(Boolean);
+    dirty = { ...clean };
     if (wrote) persist(patch);
   };
 
@@ -236,18 +227,36 @@ export function createComposerStore(options: ComposerStoreOptions) {
     schedulePersist("drafts");
   };
 
+  /** Puts text and images back in front of whatever the composer holds, with why. */
+  const restoreDraft = (threadId: string, restored: ComposerDraft, notice: string) => {
+    const current = drafts.get(threadId) ?? EMPTY_DRAFT;
+    setDraft(threadId, {
+      text: mergeRestoredText(restored.text, current.text),
+      attachments: [...restored.attachments, ...current.attachments],
+    });
+    textRevisions.set(threadId, (textRevisions.get(threadId) ?? 0) + 1);
+    notices.set(threadId, notice);
+    notifyThread(threadId);
+  };
+
   return {
     /** False in windows that never save prefs: Rex thread tabs and locked-out windows. */
     canPersist: persist !== null,
 
-    /** Sends the last quit saved, for the window that owns prefs.json; none elsewhere. */
-    pendingSendsAtLaunch: (): ReadonlyArray<PendingComposerSend> =>
-      persist === null ? [] : readPendingSends(initialPrefs.composerPendingSends),
+    /** Messages that went out unconfirmed before a quit, not yet checked against their thread. */
+    unconfirmedSends: (): ReadonlyArray<UnconfirmedComposerSend> => unconfirmed,
 
-    /** Saves sends that may have reached the server, replacing any saved before. */
-    setPendingSends(sends: ReadonlyArray<PendingComposerSend>) {
-      pendingSends = sends;
-      schedulePersist("pendingSends");
+    /** Quitting: saves messages that went out unconfirmed, next to any still unchecked. */
+    addUnconfirmedSends(records: ReadonlyArray<UnconfirmedComposerSend>) {
+      if (records.length === 0) return;
+      unconfirmed = [...unconfirmed, ...records];
+      schedulePersist("unconfirmed");
+    },
+
+    /** Checked against its thread: drops the record (call `flush` to write it with the draft). */
+    removeUnconfirmedSend(record: UnconfirmedComposerSend) {
+      unconfirmed = unconfirmed.filter((entry) => entry !== record);
+      schedulePersist("unconfirmed");
     },
 
     getDraft: (threadId: string): ComposerDraft => drafts.get(threadId) ?? EMPTY_DRAFT,
@@ -374,23 +383,18 @@ export function createComposerStore(options: ComposerStoreOptions) {
       notifyThread(threadId);
     },
 
-    /** The server turned a send down: its text and images go back into the composer. */
+    /** A send that came back: its text and images go back into the composer, with why. */
     restoreSend(send: ComposerSend, notice: string) {
       const threadId = send.target.threadId;
-      const current = drafts.get(threadId) ?? EMPTY_DRAFT;
-      setDraft(threadId, {
-        text: mergeRestoredText(send.text, current.text),
-        attachments: [...send.attachments, ...current.attachments],
-      });
-      textRevisions.set(threadId, (textRevisions.get(threadId) ?? 0) + 1);
       const remaining = (sends.get(threadId) ?? []).filter(
         (entry) => entry.send.commandId !== send.commandId,
       );
       if (remaining.length === 0) sends.delete(threadId);
       else sends.set(threadId, remaining);
-      notices.set(threadId, notice);
-      notifyThread(threadId);
+      restoreDraft(threadId, send, notice);
     },
+
+    restoreDraft,
 
     setNotice(threadId: string, notice: string | null) {
       if ((notices.get(threadId) ?? null) === notice) return;

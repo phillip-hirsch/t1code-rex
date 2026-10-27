@@ -145,6 +145,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     thread: (threadId: ThreadId) => {
       const ref = { environmentId, threadId };
       return {
+        stateAtom: threadDetails.stateAtom(ref),
         visibleTurnItemsAtom: threadDetails.visibleTurnItemsAtom(ref),
         statusAtom: threadDetails.statusAtom(ref),
         errorAtom: threadDetails.errorAtom(ref),

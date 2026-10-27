@@ -80,14 +80,16 @@ export type ComposerSettingsCommand =
 export type ComposerStage = ComposerSettingsCommand | { readonly kind: "start-turn" };
 
 /**
- * A send that may already have reached the server, saved at quit with its ids and plan so
- * the next launch finishes it; the server answers a repeated id from its command receipt.
+ * A message that went out unconfirmed before tr3x quit. The next launch looks for its id on
+ * the thread, and puts the text back in the composer if it isn't there; it's never resent.
  */
-export interface PendingComposerSend {
-  readonly send: ComposerSend;
-  readonly stages: ReadonlyArray<ComposerStage>;
-  /** Stages before this one were accepted. */
-  readonly next: number;
+export interface UnconfirmedComposerSend {
+  readonly threadId: ThreadId;
+  /** It launched a new-thread draft, which stays open until the thread has the message. */
+  readonly launch: boolean;
+  readonly messageId: MessageId;
+  readonly text: string;
+  readonly attachments: ReadonlyArray<ComposerAttachment>;
 }
 
 /**

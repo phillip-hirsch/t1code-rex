@@ -9,11 +9,19 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { retryDelayMs, type ComposerSend, type PendingComposerSend } from "./composerSend.ts";
+import * as Option from "effect/Option";
+
+import {
+  checkUnconfirmedSends,
+  UNCONFIRMED_NOTICE,
+  type ThreadMessagesState,
+} from "./composerRecovery.ts";
+import { retryDelayMs, type ComposerSend } from "./composerSend.ts";
 import {
   createComposerSender,
   DISCARD_NOTICE,
   MAYBE_SENT_NOTICE,
+  QUIT_NOTICE,
   type ComposerCommandResult,
 } from "./composerSender.ts";
 import type { ComposerSettings } from "./composerSettings.ts";
@@ -63,10 +71,7 @@ function deferred() {
  */
 function setup(
   script: ReadonlyArray<ComposerCommandResult | Promise<ComposerCommandResult>>,
-  options: {
-    readonly store?: ComposerStore;
-    readonly restore?: ReadonlyArray<PendingComposerSend>;
-  } = {},
+  options: { readonly store?: ComposerStore } = {},
 ) {
   const store = options.store ?? createComposerStore({ initialPrefs: {}, persist: null });
   const results = [...script];
@@ -87,7 +92,8 @@ function setup(
     setRuntimeMode: (input) => respond("runtime-mode", input.commandId, input),
     setInteractionMode: (input) => respond("interaction-mode", input.commandId, input),
     threadSettings: () => server.settings,
-    resumeQueue: (threadId) => respond("queue.resume", `resume:${threadId}`, { threadId }),
+    // Logged as "resume"; the input keeps the job's real command id.
+    resumeQueue: (input) => respond("queue.resume", "resume", input),
     schedule: (run, delayMs) => {
       const timer = { run, delayMs };
       timers.push(timer);
@@ -96,7 +102,6 @@ function setup(
         if (index >= 0) timers.splice(index, 1);
       };
     },
-    ...(options.restore === undefined ? {} : { restore: options.restore }),
   });
   /** Runs the pending timers with this delay, as if that much time passed. */
   const elapse = (delayMs: number) => {
@@ -113,10 +118,11 @@ const settle = async () => {
 const ids = (calls: ReturnType<typeof setup>["calls"]) => calls.map((call) => call.commandId);
 
 /** A store that saves to an in-memory prefs.json, as the window that owns it does. */
-function savingStore(prefs: { current: TuiPrefs }) {
+function savingStore(prefs: { current: TuiPrefs; writes?: number }) {
   return createComposerStore({
     initialPrefs: prefs.current,
     persist: (patch) => {
+      prefs.writes = (prefs.writes ?? 0) + 1;
       const next: Record<string, unknown> = { ...prefs.current };
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) delete next[key];
@@ -339,55 +345,6 @@ describe("composer sender, Sol audit round 2", () => {
     expect(sender.trackedThreads().accepted).toBe(1);
   });
 
-  it("N2: at quit, saves a send that may have reached the server and hands unsent ones back; the next launch resends it once, same ids", async () => {
-    const prefs: { current: TuiPrefs } = { current: {} };
-    const inFlight = deferred();
-    const first = setup([inFlight.promise], { store: savingStore(prefs) });
-    void first.sender.send(send());
-    void first.sender.send(send({ ...second, text: "second" }));
-    void first.sender.send(send({ ...third, text: "third" }));
-    expect(ids(first.calls)).toEqual(["cmd-1"]);
-    first.sender.handOff();
-    first.store.flush();
-    // The unsent ones are back in the composer, in order; the started one is saved as planned.
-    expect(prefs.current.composerDraftsByThreadId?.t1?.text).toBe("second\n\nthird");
-    expect(prefs.current.composerPendingSends).toMatchObject([
-      { send: { commandId: "cmd-1", messageId: "msg-1", text: "hello" }, next: 0 },
-    ]);
-    // A second quit must not overwrite what the first saved.
-    first.sender.handOff();
-    first.store.flush();
-    expect(prefs.current.composerPendingSends).toHaveLength(1);
-
-    const relaunchedStore = savingStore(prefs);
-    const relaunched = setup([], {
-      store: relaunchedStore,
-      restore: relaunchedStore.pendingSendsAtLaunch(),
-    });
-    expect(relaunched.store.snapshot("t1").sends).toMatchObject([{ status: "waiting" }]);
-    expect(relaunched.store.getDraft("t1").text).toBe("second\n\nthird");
-    // Connected: it goes out with the ids it had, so the server dedupes it.
-    await relaunched.sender.retryWaiting();
-    expect(relaunched.calls.map((call) => call.input)).toMatchObject([
-      { commandId: "cmd-1", message: { messageId: "msg-1", text: "hello" } },
-    ]);
-    expect(relaunched.store.snapshot("t1").sends).toEqual([]);
-    relaunched.sender.handOff();
-    relaunched.store.flush();
-    expect(prefs.current.composerPendingSends).toBeUndefined();
-  });
-
-  it("N2: a window that can't save prefs never picks up saved sends", () => {
-    const store = createComposerStore({
-      initialPrefs: {
-        composerPendingSends: [{ send: send(), stages: [{ kind: "start-turn" }], next: 0 }],
-      },
-      persist: null,
-    });
-    expect(store.canPersist).toBe(false);
-    expect(store.pendingSendsAtLaunch()).toEqual([]);
-  });
-
   it("N3: Stop holds the thread's unsent messages until they're resumed", async () => {
     const inFlight = deferred();
     const { store, sender, calls } = setup([inFlight.promise]);
@@ -401,10 +358,10 @@ describe("composer sender, Sol audit round 2", () => {
     // A reconnect doesn't release the hold.
     await sender.retryWaiting();
     expect(ids(calls)).toEqual(["cmd-1"]);
-    expect(sender.resume("t1")).toBe(1);
+    expect(sender.resume(ThreadId.make("t1"))).toBe(1);
     await settle();
     // The server's held queue goes first: it holds messages sent before these.
-    expect(ids(calls)).toEqual(["cmd-1", "resume:t1", "cmd-2"]);
+    expect(ids(calls)).toEqual(["cmd-1", "resume", "cmd-2"]);
     expect(store.snapshot("t1").sends).toEqual([]);
   });
 
@@ -417,12 +374,12 @@ describe("composer sender, Sol audit round 2", () => {
     sender.hold("t1");
     inFlight.resolve(ok);
     await first;
-    sender.resume("t1");
+    sender.resume(ThreadId.make("t1"));
     await settle();
-    expect(ids(calls)).toEqual(["cmd-1", "resume:t1"]);
+    expect(ids(calls)).toEqual(["cmd-1", "resume"]);
     resumed.resolve(ok);
     await settle();
-    expect(ids(calls)).toEqual(["cmd-1", "resume:t1", "cmd-2"]);
+    expect(ids(calls)).toEqual(["cmd-1", "resume", "cmd-2"]);
   });
 
   it("N3: a new message releases the hold, held ones first, as upstream releases its queue", async () => {
@@ -434,7 +391,7 @@ describe("composer sender, Sol audit round 2", () => {
     inFlight.resolve(ok);
     await first;
     await sender.send(send(third));
-    expect(ids(calls)).toEqual(["cmd-1", "resume:t1", "cmd-2", "cmd-3"]);
+    expect(ids(calls)).toEqual(["cmd-1", "resume", "cmd-2", "cmd-3"]);
   });
 
   it("N3: /discard puts held messages back in the composer", async () => {
@@ -445,13 +402,14 @@ describe("composer sender, Sol audit round 2", () => {
     sender.hold("t1");
     inFlight.resolve(ok);
     await first;
-    expect(sender.discard("t1")).toBe(1);
+    expect(sender.discard("t1")).toEqual({ messages: 1, resumes: 0 });
     expect(store.getDraft("t1").text).toBe("two");
     expect(store.snapshot("t1").notice).toBe(DISCARD_NOTICE);
     expect(store.snapshot("t1").sends).toEqual([]);
-    sender.resume("t1");
+    // With nothing held here any more, /resume releases only the server's queue.
+    sender.resume(ThreadId.make("t1"));
     await settle();
-    expect(ids(calls)).toEqual(["cmd-1"]);
+    expect(ids(calls)).toEqual(["cmd-1", "resume"]);
   });
 
   it("N4: a command with no reply shows as stuck; /resume resends it with the same ids", async () => {
@@ -461,7 +419,7 @@ describe("composer sender, Sol audit round 2", () => {
     void sender.send(send(second));
     elapse(30_000);
     expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["stuck", "sending"]);
-    sender.resume("t1");
+    sender.resume(ThreadId.make("t1"));
     await settle();
     expect(ids(calls)).toEqual(["cmd-1", "cmd-1", "cmd-2"]);
     expect(store.snapshot("t1").sends).toEqual([]);
@@ -483,7 +441,7 @@ describe("composer sender, Sol audit round 2", () => {
     void sender.send(send({ text: "one" }));
     void sender.send(send({ ...second, text: "two" }));
     elapse(30_000);
-    expect(sender.discard("t1")).toBe(2);
+    expect(sender.discard("t1")).toEqual({ messages: 2, resumes: 0 });
     await settle();
     expect(store.getDraft("t1").text).toBe("one\n\ntwo");
     expect(store.snapshot("t1").notice).toBe(MAYBE_SENT_NOTICE);
@@ -495,7 +453,7 @@ describe("composer sender, Sol audit round 2", () => {
     const { store, sender, timers } = setup([dropped]);
     await sender.send(send());
     expect(store.snapshot("t1").sends).toMatchObject([{ status: "waiting" }]);
-    expect(sender.discard("t1")).toBe(1);
+    expect(sender.discard("t1")).toEqual({ messages: 1, resumes: 0 });
     expect(timers).toHaveLength(0);
     expect(store.snapshot("t1").notice).toBe(MAYBE_SENT_NOTICE);
   });
@@ -504,7 +462,7 @@ describe("composer sender, Sol audit round 2", () => {
     const inFlight = deferred();
     const { sender, calls } = setup([inFlight.promise]);
     const first = sender.send(send());
-    expect(sender.discard("t1")).toBe(0);
+    expect(sender.discard("t1")).toEqual({ messages: 0, resumes: 0 });
     inFlight.resolve(ok);
     await first;
     expect(ids(calls)).toEqual(["cmd-1"]);
@@ -531,5 +489,252 @@ describe("composer sender, Sol audit round 2", () => {
     expect(sender.trackedThreads().launched).toBe(1);
     sender.dispose();
     expect(sender.trackedThreads()).toEqual({ accepted: 0, launched: 0 });
+  });
+});
+
+describe("composer sender, Sol audit round 3", () => {
+  const approval: ComposerSettings = { ...threadSettings, runtimeMode: "approval-required" };
+  const second = { commandId: CommandId.make("cmd-2"), messageId: MessageId.make("msg-2") };
+  const third = { commandId: CommandId.make("cmd-3"), messageId: MessageId.make("msg-3") };
+  const never = () => new Promise<ComposerCommandResult>(() => undefined);
+  const notActive: ComposerCommandResult = {
+    ok: false,
+    error: new OrchestrationV2DispatchCommandError({
+      commandId: CommandId.make("resume"),
+      commandType: "queue.resume",
+      message: "Thread t1 is not active.",
+    }),
+    interrupted: false,
+  };
+  const live = (...messageIds: Array<string>): ThreadMessagesState => ({
+    status: "live",
+    data: Option.some({ messages: messageIds.map((id) => ({ id: MessageId.make(id) })) }),
+  });
+  const statuses = (store: ComposerStore) =>
+    store.snapshot("t1").sends.map((entry) => entry.status);
+  const resumeIds = (calls: ReturnType<typeof setup>["calls"]) =>
+    calls
+      .filter((call) => call.kind === "queue.resume")
+      .map((call) => (call.input as { commandId: string }).commandId);
+
+  /** Thread state delivered by hand: `push` hands a thread's state to whoever watches it. */
+  function threadWatcher() {
+    const watchers = new Map<string, (state: ThreadMessagesState) => void>();
+    return {
+      watchThread: (threadId: ThreadId, onState: (state: ThreadMessagesState) => void) => {
+        watchers.set(threadId, onState);
+        return () => watchers.delete(threadId);
+      },
+      push: (threadId: string, state: ThreadMessagesState) => watchers.get(threadId)?.(state),
+      watching: () => [...watchers.keys()],
+    };
+  }
+
+  /**
+   * Quits with one message out unconfirmed (an approval-mode send the server took the mode
+   * change for) and one never sent, then relaunches on the saved prefs.
+   */
+  async function quitAndRelaunch() {
+    const prefs: { current: TuiPrefs; writes?: number } = { current: {} };
+    const first = setup([ok, never()], { store: savingStore(prefs) });
+    void first.sender.send(send({ settings: approval }));
+    void first.sender.send(send({ ...second, text: "second" }));
+    await settle();
+    first.sender.handOff();
+    first.store.flush();
+    const relaunched = setup([], { store: savingStore(prefs) });
+    return { prefs, first, relaunched };
+  }
+
+  it("N6, N7: quit saves only an unconfirmed message's id and text; the next launch sends nothing and plans from the shell", async () => {
+    const { prefs, first, relaunched } = await quitAndRelaunch();
+    expect(ids(first.calls)).toEqual(["cmd-1:runtime-mode", "cmd-1"]);
+    // No command ids, plan, or modes: nothing to replay.
+    expect(prefs.current.composerUnconfirmedSends).toEqual([
+      { threadId: "t1", launch: false, messageId: "msg-1", text: "hello", attachments: [] },
+    ]);
+    expect(prefs.current.composerDraftsByThreadId?.t1?.text).toBe("second");
+    expect(first.store.snapshot("t1").notice).toBe(QUIT_NOTICE);
+
+    // Another client switched the thread back to full access while tr3x was closed.
+    await relaunched.sender.retryWaiting();
+    await settle();
+    expect(relaunched.calls).toEqual([]);
+    expect(relaunched.sender.pendingCount()).toBe(0);
+    expect(relaunched.sender.trackedThreads().accepted).toBe(0);
+    // The approval mode from before the restart isn't assumed: the next send sets it again.
+    await relaunched.sender.send(send({ ...third, settings: approval }));
+    expect(ids(relaunched.calls)).toEqual(["cmd-3:runtime-mode", "cmd-3"]);
+  });
+
+  it("drops a saved message the thread has, once its live state is in, leaving the composer alone", async () => {
+    const { prefs, relaunched } = await quitAndRelaunch();
+    const watcher = threadWatcher();
+    checkUnconfirmedSends({ store: relaunched.store, watchThread: watcher.watchThread });
+    expect(watcher.watching()).toEqual(["t1"]);
+    // Cached or still loading: not enough to tell.
+    watcher.push("t1", { status: "cached", data: Option.none() });
+    watcher.push("t1", { status: "synchronizing", data: Option.none() });
+    expect(relaunched.store.unconfirmedSends()).toHaveLength(1);
+    watcher.push("t1", live("msg-0", "msg-1"));
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+    expect(prefs.current.composerDraftsByThreadId?.t1?.text).toBe("second");
+    expect(watcher.watching()).toEqual([]);
+    expect(relaunched.calls).toEqual([]);
+  });
+
+  it("puts a saved message the thread lacks back in the composer with a note, dropping the record in the same write", async () => {
+    const { prefs, relaunched } = await quitAndRelaunch();
+    const watcher = threadWatcher();
+    checkUnconfirmedSends({ store: relaunched.store, watchThread: watcher.watchThread });
+    const writes = prefs.writes;
+    watcher.push("t1", live("msg-0"));
+    expect(prefs.writes).toBe((writes ?? 0) + 1);
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+    expect(prefs.current.composerDraftsByThreadId?.t1?.text).toBe("hello\n\nsecond");
+    expect(relaunched.store.snapshot("t1").notice).toBe(UNCONFIRMED_NOTICE);
+    expect(relaunched.calls).toEqual([]);
+  });
+
+  it("N10: a restored message the user clears never comes back, even after a crash", async () => {
+    const { prefs, relaunched } = await quitAndRelaunch();
+    const watcher = threadWatcher();
+    checkUnconfirmedSends({ store: relaunched.store, watchThread: watcher.watchThread });
+    watcher.push("t1", live());
+    relaunched.store.clearDraft("t1");
+    relaunched.store.flush();
+    // No hand-off: the process dies here.
+    const afterCrash = setup([], { store: savingStore(prefs) });
+    expect(afterCrash.store.unconfirmedSends()).toEqual([]);
+    expect(afterCrash.store.getDraft("t1").text).toBe("");
+    await afterCrash.sender.retryWaiting();
+    expect(afterCrash.calls).toEqual([]);
+  });
+
+  it("restores a launch that never landed into its new-thread draft, and closes the draft of one that did", async () => {
+    const prefs: { current: TuiPrefs } = { current: {} };
+    const first = setup([never(), never()], { store: savingStore(prefs) });
+    first.server.settings = null;
+    const lost = first.store.openNewThreadDraft(ProjectId.make("p"), () => ThreadId.make("new-1"));
+    const landed = first.store.openNewThreadDraft(ProjectId.make("q"), () =>
+      ThreadId.make("new-2"),
+    );
+    void first.sender.send(send({ target: { kind: "draft", ...lost }, text: "lost" }));
+    void first.sender.send(send({ ...second, target: { kind: "draft", ...landed } }));
+    await settle();
+    first.sender.handOff();
+    first.store.flush();
+    expect(prefs.current.composerUnconfirmedSends?.map((record) => record.launch)).toEqual([
+      true,
+      true,
+    ]);
+
+    const { store } = setup([], { store: savingStore(prefs) });
+    const watcher = threadWatcher();
+    checkUnconfirmedSends({ store, watchThread: watcher.watchThread });
+    // The server never made new-1; client-runtime reports a thread it lacks as deleted.
+    watcher.push("new-1", { status: "deleted", data: Option.none() });
+    watcher.push("new-2", live("msg-2"));
+    expect(store.getDraft("new-1").text).toBe("lost");
+    expect(store.findNewThreadDraft("new-1")).toBeDefined();
+    expect(store.getDraft("new-2").text).toBe("");
+    expect(store.findNewThreadDraft("new-2")).toBeUndefined();
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+  });
+
+  it("N8: messages held while the head was in flight wait for queue.resume, even when resumed before its reply", async () => {
+    const inFlight = deferred();
+    const resumed = deferred();
+    const { sender, calls } = setup([inFlight.promise, resumed.promise]);
+    void sender.send(send());
+    void sender.send(send(second));
+    sender.hold("t1");
+    sender.resume(ThreadId.make("t1"));
+    inFlight.resolve(ok);
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume"]);
+    resumed.resolve(ok);
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume", "cmd-2"]);
+  });
+
+  it("N8: a rejected resume keeps the hold and says why; /resume tries again", async () => {
+    const inFlight = deferred();
+    const { store, sender, calls } = setup([inFlight.promise, notActive]);
+    const first = sender.send(send());
+    void sender.send(send(second));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume"]);
+    expect(statuses(store)).toEqual(["held"]);
+    expect(store.snapshot("t1").notice).toBe(
+      "Resume failed: Thread t1 is not active. (/resume, /discard)",
+    );
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume", "resume", "cmd-2"]);
+  });
+
+  it("N8: a resume that lost the connection retries with the same id before the held messages", async () => {
+    const inFlight = deferred();
+    const { store, sender, calls, elapse } = setup([inFlight.promise, dropped]);
+    const first = sender.send(send());
+    void sender.send(send(second));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume"]);
+    expect(statuses(store)).toEqual(["waiting"]);
+    elapse(retryDelayMs(0));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume", "resume", "cmd-2"]);
+    const [once, again] = resumeIds(calls);
+    expect(again).toBe(once);
+  });
+
+  it("N9: a hung resume shows as stuck, and a reconnect resends it with the same id", async () => {
+    const inFlight = deferred();
+    const { store, sender, calls, elapse } = setup([inFlight.promise, never()]);
+    const first = sender.send(send());
+    void sender.send(send(second));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    elapse(30_000);
+    expect(store.snapshot("t1").notice).toBe(
+      "Resume got no reply (/resume retries, /discard drops it)",
+    );
+    await sender.retryWaiting();
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume", "resume", "cmd-2"]);
+    const [once, again] = resumeIds(calls);
+    expect(again).toBe(once);
+    expect(store.snapshot("t1").notice).toBeNull();
+  });
+
+  it("N9: a hung resume can be discarded: the held message comes back and nothing more goes out", async () => {
+    const inFlight = deferred();
+    const { store, sender, calls, elapse } = setup([inFlight.promise, never()]);
+    const first = sender.send(send());
+    void sender.send(send({ ...second, text: "two" }));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    elapse(30_000);
+    expect(sender.discard("t1")).toEqual({ messages: 1, resumes: 1 });
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume"]);
+    expect(store.getDraft("t1").text).toBe("two");
+    expect(store.snapshot("t1").notice).toBe(DISCARD_NOTICE);
+    expect(sender.pendingCount()).toBe(0);
   });
 });
