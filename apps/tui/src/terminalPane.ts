@@ -28,6 +28,11 @@ import {
 import { encodeTerminalKey, type TerminalKeyLike } from "./terminalKeys.ts";
 
 const WHEEL_ROWS = 3;
+/** Characters of input a starting pane holds for its shell; more is dropped. */
+const MAX_EARLY_INPUT = 65_536;
+
+/** A key or paste typed before the shell connected. */
+type EarlyInput = { readonly key: TerminalKeyLike } | { readonly paste: string };
 
 export interface TerminalPaneOptions extends RenderableOptions<TerminalPaneRenderable> {
   readonly connect: TerminalPaneConnector;
@@ -72,6 +77,9 @@ export class TerminalPaneRenderable extends Renderable {
   private stale = true;
   private cursorShown = false;
   private failure: string | null = null;
+  /** Typed while "Starting terminal…" shows; sent in order once the shell connects. */
+  private early: EarlyInput[] = [];
+  private earlySize = 0;
   private readonly colors = new Map<number, RGBA>();
 
   constructor(ctx: RenderContext, options: TerminalPaneOptions) {
@@ -104,6 +112,7 @@ export class TerminalPaneRenderable extends Renderable {
       this.emulator = emulator;
       this.applyGrid();
     } catch (error) {
+      this.dropEarlyInput();
       this.failure = error instanceof Error ? error.message : String(error);
       this.handlers?.onFailure(this.failure);
       this.requestRender();
@@ -127,6 +136,12 @@ export class TerminalPaneRenderable extends Renderable {
       // Read and subscribe in one step so no chunk lands between them.
       this.sync(this.connection.read());
       this.unsubscribe = this.connection.subscribe((buffer) => this.sync(buffer));
+      const early = this.early;
+      this.dropEarlyInput();
+      for (const input of early) {
+        if ("key" in input) this.sendKey(input.key);
+        else this.paste(input.paste);
+      }
     } else {
       this.connection.reportGridSize({ cols, rows });
     }
@@ -172,10 +187,10 @@ export class TerminalPaneRenderable extends Renderable {
     this.invalidate();
   }
 
-  /** Sends a key press to the shell; false when it sends nothing. */
+  /** Sends a key press to the shell, or holds it until the shell connects; false when neither. */
   sendKey(key: TerminalKeyLike): boolean {
     const emulator = this.emulator;
-    if (emulator === null || this.connection === null) return false;
+    if (emulator === null || this.connection === null) return this.holdEarlyInput({ key }, 1);
     const data = encodeTerminalKey(emulator, key);
     if (data.length === 0) return false;
     this.sendInput(data);
@@ -184,11 +199,31 @@ export class TerminalPaneRenderable extends Renderable {
 
   /** A paste, bracketed when the program asked for that. */
   paste(text: string): void {
+    if (text.length === 0) return;
     const emulator = this.emulator;
-    if (emulator === null || text.length === 0) return;
+    if (emulator === null || this.connection === null) {
+      this.holdEarlyInput({ paste: text }, text.length);
+      return;
+    }
     this.sendInput(emulator.encodePaste(text));
   }
 
+  /** Keeps input until the shell connects; a pane that failed or ended keeps none. */
+  private holdEarlyInput(input: EarlyInput, size: number): boolean {
+    if (this.failure !== null || this.isDestroyed || this.earlySize + size > MAX_EARLY_INPUT) {
+      return false;
+    }
+    this.early.push(input);
+    this.earlySize += size;
+    return true;
+  }
+
+  private dropEarlyInput(): void {
+    this.early = [];
+    this.earlySize = 0;
+  }
+
+  /** The user's own input; it also resumes input a failed write stopped. */
   private sendInput(data: string): void {
     if (data.length === 0) return;
     // Typing returns to the live screen, like any terminal.
@@ -196,6 +231,7 @@ export class TerminalPaneRenderable extends Renderable {
       this.emulator?.scrollToBottom();
       this.invalidate();
     }
+    this.connection?.resume();
     this.connection?.write(data);
   }
 
@@ -303,6 +339,7 @@ export class TerminalPaneRenderable extends Renderable {
   }
 
   protected override destroySelf(): void {
+    this.dropEarlyInput();
     this.unsubscribe?.();
     this.unsubscribe = null;
     this.connection?.dispose();

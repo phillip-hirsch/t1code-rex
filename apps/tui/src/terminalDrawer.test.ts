@@ -33,6 +33,13 @@ describe("openTerminalDrawer", () => {
     expect(state.activeTerminalId).toBe("term-1");
   });
 
+  it("skips ids whose close hasn't settled, even if the server still lists them", () => {
+    const state = openTerminalDrawer(EMPTY_THREAD_TERMINAL_STATE, ["term-1", "term-3"], ["term-1"]);
+    expect(terminalIdsOf(state)).toEqual(["term-3"]);
+    const fresh = openTerminalDrawer(EMPTY_THREAD_TERMINAL_STATE, ["term-1"], ["term-1"]);
+    expect(terminalIdsOf(fresh)).toEqual(["term-2"]);
+  });
+
   it("shows a hidden drawer with the terminals it had", () => {
     const split = splitTerminal(opened, "term-2", "horizontal");
     const reopened = openTerminalDrawer(hideTerminalDrawer(split), ["term-9"]);

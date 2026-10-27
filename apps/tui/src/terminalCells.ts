@@ -56,8 +56,16 @@ export function terminalRowRuns(row: TerminalRow): ReadonlyArray<TerminalCellRun
     if (cell.wide === SPACER_TAIL) return;
     const wide = cell.wide === WIDE || row.cells[x + 1]?.wide === SPACER_TAIL;
     const blank = cell.invisible || cell.text.length === 0;
-    // A cell's trailing ZWJ would let the outer terminal join it to the next cell's emoji.
-    const text = blank ? (wide ? "  " : " ") : cell.text.replace(TRAILING_ZWJ, "");
+    // Ghostty splits a ZWJ emoji it can't join into wide cells; the first keeps the ZWJ,
+    // which would let the outer terminal join it to the next one. Narrow text keeps its
+    // joiners: in scripts like Devanagari they're part of the text.
+    const text = blank
+      ? wide
+        ? "  "
+        : " "
+      : wide
+        ? cell.text.replace(TRAILING_ZWJ, "")
+        : cell.text;
     const attributes = cellAttributes(cell);
     if (wide) {
       flush();

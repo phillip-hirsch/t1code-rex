@@ -18,10 +18,12 @@ import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { act, useEffect, useState } from "react";
 
 import { resolveTuiShortcutCommand } from "../src/keybindings.ts";
+import { terminalRowRuns } from "../src/terminalCells.ts";
 import type { TerminalBackend, TerminalLaunch } from "../src/terminalConnection.ts";
-import { useTerminalDrawer } from "../src/terminalDrawerView.tsx";
+import { terminalFocusHints, useTerminalDrawer } from "../src/terminalDrawerView.tsx";
 import { createTerminalEmulator } from "../src/terminalEmulator.ts";
 import { encodeTerminalKey } from "../src/terminalKeys.ts";
+import { TerminalPaneRenderable } from "../src/terminalPane.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
 
 let failures = 0;
@@ -95,6 +97,16 @@ check(
   cell?.text === "r" && cell.foreground.r > cell.foreground.g,
   true,
 );
+// A joiner in Devanagari is the script's (क्‍ष is a half-form), not a split emoji's.
+emulator.write("\u001b[2J\u001b[Hक्\u200dष");
+check(
+  "a non-emoji joiner survives the row's runs",
+  terminalRowRuns(emulator.snapshot().rowData[0] ?? { cells: [] })
+    .map((run) => run.text)
+    .join("")
+    .startsWith("क्\u200dष"),
+  true,
+);
 emulator.dispose();
 
 interface FakeShell {
@@ -110,6 +122,8 @@ const shells = new Map<string, FakeShell>();
 const closed: string[] = [];
 /** Set, the server refuses to close a shell. */
 let closeFailure: string | null = null;
+/** Set, closes wait for it, as a slow server's reply does. */
+let closeGate: Promise<void> | null = null;
 const shellKey = (threadId: string, terminalId: string) => `${threadId}/${terminalId}`;
 
 function emit(shell: FakeShell, data: string) {
@@ -176,11 +190,13 @@ const backend: TerminalBackend = {
           data === "\r" ? "\r\n$ " : data === "\u0003" ? "^C\r\n$ " : data.replace(/\r/g, "\r\n"),
         );
       },
+      resume: () => {},
       reportGridSize: (size) => shell.grids.push(size),
       dispose: () => shell.listeners.clear(),
     };
   },
   close: async (threadId, terminalId) => {
+    if (closeGate !== null) await closeGate;
     if (closeFailure !== null) throw new Error(closeFailure);
     closed.push(shellKey(threadId, terminalId));
     shells.delete(shellKey(threadId, terminalId));
@@ -188,6 +204,8 @@ const backend: TerminalBackend = {
 };
 
 const statuses: string[] = [];
+/** The host the harness resolves shortcuts for. */
+let platform: NodeJS.Platform = "darwin";
 const controls: { showThread: (threadId: string) => void } = { showThread: () => {} };
 
 function Harness() {
@@ -224,7 +242,7 @@ function Harness() {
       },
       DEFAULT_RESOLVED_KEYBINDINGS,
       {
-        platform: "darwin",
+        platform,
         context: { terminalFocus: focus === "terminal", terminalOpen: drawer.open },
       },
     );
@@ -406,6 +424,91 @@ act(() => setup.mockInput.pressKey("j", { meta: true }));
 await settle(setup.renderOnce);
 check("⌘J in a focused terminal hides the drawer", frame().includes("Terminal"), false);
 check("…and hands focus back", frame().includes("focus:composer"), true);
+
+// Typed while "Starting terminal…" shows: the keys and the paste arrive, in order.
+act(() => controls.showThread("thread-c"));
+await settle(setup.renderOnce);
+act(() => setup.mockInput.pressKey("j", { meta: true }));
+act(() => {
+  for (const letter of "echo") setup.mockInput.pressKey(letter);
+  void setup.mockInput.pasteBracketedText(" early");
+  setup.mockInput.pressEnter();
+});
+await settle(setup.renderOnce);
+const shellC1 = () => shells.get("thread-c/term-1");
+check(
+  "input typed during startup reaches the shell, in order",
+  shellC1()?.input.join(""),
+  "echo early\r",
+);
+
+// Held input is bounded, and a pane that goes before its shell starts sends none of it.
+let heldConnects = 0;
+const held = new TerminalPaneRenderable(setup.renderer, {
+  cwd: "/work/held",
+  theme: THEME,
+  mutedColor: THEME.foreground,
+  connect: () => {
+    heldConnects += 1;
+    throw new Error("a destroyed pane connected");
+  },
+});
+const keyY = parseKeypress("y");
+held.paste("x".repeat(65_535));
+check("a starting pane holds keys", keyY !== null && held.sendKey(keyY), true);
+check("…up to its cap", keyY !== null && held.sendKey(keyY), false);
+held.destroy();
+check("a destroyed pane holds nothing", keyY !== null && held.sendKey(keyY), false);
+await new Promise((resolve) => setTimeout(resolve, 50));
+check("…and never connects", heldConnects, 0);
+
+// A close whose reply lands after the shell's exit event and a reopen leaves the new shell be.
+let releaseClose = () => {};
+closeGate = new Promise((resolve) => {
+  releaseClose = resolve;
+});
+await pressClose();
+const closingShell = shellC1();
+await act(async () => {
+  closingShell?.onExit?.();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+});
+await settle(setup.renderOnce);
+check("the exit event drops the closing terminal", frame().includes("Terminal"), false);
+act(() => setup.mockInput.pressKey("j", { meta: true }));
+await settle(setup.renderOnce);
+check("reopening skips the id whose close is in flight", frame().includes("term-2"), true);
+closeGate = null;
+await act(async () => {
+  releaseClose();
+  await new Promise((resolve) => setTimeout(resolve, 25));
+});
+await settle(setup.renderOnce);
+check("the late close reply leaves the new terminal open", frame().includes("Terminal"), true);
+act(() => setup.mockInput.pressKey("z"));
+await settle(setup.renderOnce);
+check("…and its shell takes input", shells.get("thread-c/term-2")?.input.join(""), "z");
+
+// Windows and Linux: Ctrl+D and Ctrl+U are the shell's.
+platform = "linux";
+act(() => {
+  setup.mockInput.pressKey("d", { ctrl: true });
+  setup.mockInput.pressKey("u", { ctrl: true });
+});
+await settle(setup.renderOnce);
+check(
+  "on Linux, Ctrl+D (EOF) and Ctrl+U (kill line) reach the shell",
+  shells.get("thread-c/term-2")?.input.join(""),
+  "z\u0004\u0015",
+);
+check("…without splitting", frame().includes("term-3"), false);
+platform = "darwin";
+check("the macOS footer shows ⌘D split", terminalFocusHints("darwin").includes("⌘D split"), true);
+check(
+  "the Linux footer offers no Ctrl+D split",
+  terminalFocusHints("linux").includes("split"),
+  false,
+);
 
 setup.renderer.destroy();
 console.log(

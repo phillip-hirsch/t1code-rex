@@ -71,6 +71,12 @@ describe("terminalRowRuns", () => {
     ]);
   });
 
+  it("keeps a joiner in narrow text, where it is part of the script", () => {
+    // Ghostty's cells for "aक्‍षb": the half-form joiner stays with its cluster.
+    const runs = terminalRowRuns({ cells: [cell("a"), cell("क्\u200d"), cell("ष"), cell("b")] });
+    expect(runs.map((run) => run.text)).toEqual(["aक्\u200dषb"]);
+  });
+
   it("draws hidden text as blanks", () => {
     expect(terminalRowRuns({ cells: [cell("p", { invisible: true })] })[0]?.text).toBe(" ");
   });

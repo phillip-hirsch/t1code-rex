@@ -171,6 +171,56 @@ describe("Ctrl+D with upstream's default bindings (diff.toggle is mod+d)", () =>
   });
 });
 
+describe("keys in a focused terminal with upstream's default bindings", () => {
+  const inTerminal = (platform: NodeJS.Platform) => ({
+    platform,
+    context: { terminalFocus: true, terminalOpen: true },
+  });
+
+  it("leaves Ctrl+D (EOF) and Ctrl+U (kill line) to the shell on Windows and Linux", () => {
+    for (const platform of ["linux", "win32"] as const) {
+      for (const [keyName, sequence] of [
+        ["d", "\u0004"],
+        ["u", "\u0015"],
+      ] as const) {
+        expect(
+          resolveTuiShortcutCommand(
+            { keyName, ctrl: true, sequence },
+            DEFAULT_RESOLVED_KEYBINDINGS,
+            inTerminal(platform),
+          ),
+        ).toBeNull();
+      }
+      expect(
+        resolveTuiShortcutCommand(
+          { keyName: "d", ctrl: true, shift: true },
+          DEFAULT_RESOLVED_KEYBINDINGS,
+          inTerminal(platform),
+        ),
+      ).toBe("terminal.splitVertical");
+    }
+  });
+
+  it("splits with Cmd+D on macOS and leaves Ctrl+D and Ctrl+U to the shell", () => {
+    const darwin = inTerminal("darwin");
+    expect(
+      resolveTuiShortcutCommand(
+        { keyName: "d", super: true },
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        darwin,
+      ),
+    ).toBe("terminal.split");
+    expect(
+      resolveTuiShortcutCommand({ keyName: "d", meta: true }, DEFAULT_RESOLVED_KEYBINDINGS, darwin),
+    ).toBe("terminal.split");
+    for (const keyName of ["d", "u"]) {
+      expect(
+        resolveTuiShortcutCommand({ keyName, ctrl: true }, DEFAULT_RESOLVED_KEYBINDINGS, darwin),
+      ).toBeNull();
+    }
+  });
+});
+
 describe("modelPickerJumpIndexFromCommand", () => {
   it("maps model picker jump commands to zero-based indexes", () => {
     expect(modelPickerJumpIndexFromCommand("modelPicker.jump.1")).toBe(0);

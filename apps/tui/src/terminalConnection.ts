@@ -30,7 +30,10 @@ export interface TerminalPaneConnection {
   readonly read: () => TerminalPaneBuffer;
   /** Calls back on every change, output chunks included; never re-renders React. */
   readonly subscribe: (listener: (buffer: TerminalPaneBuffer) => void) => () => void;
+  /** Sends input once the shell runs; dropped while input is stopped after a failed write. */
   readonly write: (data: string) => void;
+  /** The user typed again: input stopped by a failed write goes on, without what was dropped. */
+  readonly resume: () => void;
   readonly reportGridSize: (size: TerminalGridSize) => void;
   readonly dispose: () => void;
 }
@@ -106,8 +109,9 @@ function failureMessage(
 
 /**
  * A pane attached to the server's terminal the way web's drawer attaches. Input goes to a
- * running shell one write at a time; a failed write drops what's queued behind it and
- * stops input until the terminal reattaches, so no later chunk runs without it.
+ * running shell one write at a time. A failed write drops what's queued behind it and
+ * stops input, so no later chunk runs without it; the user's next key (`resume`) or a
+ * reattach starts it again.
  */
 export function connectServerTerminal(input: {
   readonly registry: AtomRegistry.AtomRegistry;
@@ -185,7 +189,7 @@ export function connectServerTerminal(input: {
         return;
       }
       pending = "";
-      inputError = `Input not sent: ${failureMessage(result, "Terminal write failed")}. Typing resumes when the terminal reconnects.`;
+      inputError = `Input not sent: ${failureMessage(result, "Terminal write failed")}. Keys typed after it were dropped; type again to resume.`;
       stoppedAt = lifecycle;
       notify();
       // The pane has printed why; a reattach that landed meanwhile resumes input at once.
@@ -207,6 +211,12 @@ export function connectServerTerminal(input: {
       if (disposed || inputError !== null) return;
       pending += data;
       pump();
+    },
+    resume: () => {
+      // The failure emptied `pending`, so only what's typed from here on is sent.
+      if (disposed || inputError === null) return;
+      inputError = null;
+      notify();
     },
     reportGridSize: session.reportGridSize,
     dispose: () => {

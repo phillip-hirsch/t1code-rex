@@ -34,6 +34,7 @@ import {
   type TerminalColor,
   type TerminalEmulatorTheme,
 } from "./terminalEmulator.ts";
+import { modShortcutLabel } from "./keybindings.ts";
 import { resolveTerminalDrawerKey } from "./terminalKeys.ts";
 import { TerminalPaneRenderable } from "./terminalPane.ts";
 import type { TuiTheme } from "./theme.ts";
@@ -45,8 +46,45 @@ function paneKey(threadId: string, terminalId: string): string {
 const BLACK: TerminalColor = { r: 0, g: 0, b: 0 };
 const WHITE: TerminalColor = { r: 255, g: 255, b: 255 };
 
-export const TERMINAL_FOCUS_HINTS =
-  "^] next pane  ⌘J hide  ⌘D split  ⌘N new tab  ⌘W close  ^⇧←→ switch  ^⇧↑↓ resize  ⇧PgUp scroll";
+/**
+ * The drawer's keys as this platform types them, null where there's none. On Windows and
+ * Linux Ctrl+D stays the shell's EOF, and Ctrl+Shift+D isn't offered: without the kitty
+ * keyboard protocol it arrives as Ctrl+D. Splitting there is in the palette.
+ */
+function terminalKeyLabels(platform?: NodeJS.Platform) {
+  const mod = (key: string) => modShortcutLabel(key, platform);
+  const split = mod("d");
+  return {
+    toggle: mod("j"),
+    split,
+    splitDown: split === null ? null : `${split.slice(0, -1)}⇧D`,
+    newTab: mod("n"),
+    close: mod("w"),
+  };
+}
+
+/** A focused terminal's footer. */
+export function terminalFocusHints(platform?: NodeJS.Platform): string {
+  const keys = terminalKeyLabels(platform);
+  const hint = (label: string | null, action: string) =>
+    label === null ? null : `${label} ${action}`;
+  return [
+    "^] next pane",
+    hint(keys.toggle, "hide"),
+    hint(keys.split, "split"),
+    hint(keys.newTab, "new tab"),
+    hint(keys.close, "close"),
+    "^⇧←→ switch",
+    "^⇧↑↓ resize",
+    "⇧PgUp scroll",
+  ]
+    .filter((entry) => entry !== null)
+    .join("  ");
+}
+
+export const TERMINAL_FOCUS_HINTS = terminalFocusHints();
+const KEYS = terminalKeyLabels();
+const inTerminal = (label: string | null) => (label === null ? "" : `${label} in the terminal`);
 
 /** Where the active thread's shells start, or null when it has no folder yet. */
 export interface TerminalDrawerTarget {
@@ -123,6 +161,10 @@ export function useTerminalDrawer(options: {
   );
   // Opening a drawer picks up shells that outlived an earlier tr3x.
   useEffect(() => backend.retain(), [backend]);
+  /** Closes in flight per thread, by terminal id: those ids aren't reused until they settle. */
+  const [closing] = useState(() => new Map<string, Map<string, number>>());
+  /** Bumped when a terminal is dropped, so a late close leaves a reopened one with its id be. */
+  const [generations] = useState(() => new Map<string, number>());
 
   const latest = useRef(options);
   useLayoutEffect(() => {
@@ -137,6 +179,13 @@ export function useTerminalDrawer(options: {
     activeId === null ? null : (panes.get(paneKey(target?.threadId ?? "", activeId)) ?? null);
 
   const serverTerminalIds = backend.runningTerminalIds;
+  const closingIds = (threadId: string) => [...(closing.get(threadId)?.keys() ?? [])];
+  /** Ids a new terminal can't take: the server's shells and the ones still closing. */
+  const takenIds = (threadId: string) => [...serverTerminalIds(threadId), ...closingIds(threadId)];
+  const openDrawer = (threadId: string) =>
+    store.update(threadId, (entry) =>
+      openTerminalDrawer(entry, serverTerminalIds(threadId), closingIds(threadId)),
+    );
 
   const requireTarget = (): TerminalDrawerTarget | null => {
     if (target === null) options.onStatus("Select a thread with a folder to open a terminal");
@@ -148,9 +197,7 @@ export function useTerminalDrawer(options: {
     if (current === null) return;
     const drawer = store.get(current.threadId);
     if (!drawer.open) {
-      store.update(current.threadId, (entry) =>
-        openTerminalDrawer(entry, serverTerminalIds(current.threadId)),
-      );
+      openDrawer(current.threadId);
       options.onFocus();
     } else if (!focused) {
       options.onFocus();
@@ -164,7 +211,7 @@ export function useTerminalDrawer(options: {
     const current = requireTarget();
     if (current === null) return;
     store.update(current.threadId, (entry) =>
-      addTerminalGroup(entry, nextTerminalId(entry, serverTerminalIds(current.threadId))),
+      addTerminalGroup(entry, nextTerminalId(entry, takenIds(current.threadId))),
     );
     options.onFocus();
   };
@@ -174,15 +221,13 @@ export function useTerminalDrawer(options: {
     if (current === null) return;
     const drawer = store.get(current.threadId);
     if (!drawer.open) {
-      store.update(current.threadId, (entry) =>
-        openTerminalDrawer(entry, serverTerminalIds(current.threadId)),
-      );
+      openDrawer(current.threadId);
     } else if (!canSplitTerminal(drawer, direction, { cols: area.cols, rows: height - 1 })) {
       options.onStatus("No room for another terminal pane");
       return;
     }
     store.update(current.threadId, (entry) =>
-      splitTerminal(entry, nextTerminalId(entry, serverTerminalIds(current.threadId)), direction),
+      splitTerminal(entry, nextTerminalId(entry, takenIds(current.threadId)), direction),
     );
     options.onFocus();
   };
@@ -193,30 +238,48 @@ export function useTerminalDrawer(options: {
       disposePane(threadId, terminalId);
       // A close and the exit it causes both land here; only the first changes anything.
       if (!terminalIdsOf(store.get(threadId)).includes(terminalId)) return;
+      const key = paneKey(threadId, terminalId);
+      generations.set(key, (generations.get(key) ?? 0) + 1);
       const next = store.update(threadId, (entry) => removeTerminal(entry, terminalId));
       const now = latest.current;
       if (!next.open && now.target?.threadId === threadId && now.focused) now.onLeave();
     },
-    [disposePane, store],
+    [disposePane, generations, store],
   );
 
-  /** Ends the shell and its history. A failed close keeps the terminal, so ⌘W can retry. */
-  const endTerminal = useCallback(async (threadId: ThreadId, terminalId: string) => {
-    try {
-      await latest.current.backend.close(threadId, terminalId);
-      return true;
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      latest.current.onStatus(`Couldn't close ${terminalId}: ${reason}`);
-      return false;
-    }
-  }, []);
+  /** Ends the shell and its history. A failed close keeps the terminal, so closing can retry. */
+  const endTerminal = useCallback(
+    async (threadId: ThreadId, terminalId: string) => {
+      const counts = closing.get(threadId) ?? new Map<string, number>();
+      closing.set(threadId, counts);
+      counts.set(terminalId, (counts.get(terminalId) ?? 0) + 1);
+      try {
+        await latest.current.backend.close(threadId, terminalId);
+        return true;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        latest.current.onStatus(`Couldn't close ${terminalId}: ${reason}`);
+        return false;
+      } finally {
+        const left = (counts.get(terminalId) ?? 1) - 1;
+        if (left > 0) counts.set(terminalId, left);
+        else counts.delete(terminalId);
+        if (counts.size === 0) closing.delete(threadId);
+      }
+    },
+    [closing],
+  );
 
   const close = (terminalId: string | null = activeId) => {
     const current = requireTarget();
     if (current === null || terminalId === null) return;
+    const key = paneKey(current.threadId, terminalId);
+    const generation = generations.get(key) ?? 0;
     void endTerminal(current.threadId, terminalId).then((closed) => {
-      if (closed) dropTerminal(current.threadId, terminalId);
+      // The shell's exit event may have dropped it first; its id may be another terminal's now.
+      if (closed && (generations.get(key) ?? 0) === generation) {
+        dropTerminal(current.threadId, terminalId);
+      }
     });
   };
 
@@ -282,28 +345,28 @@ export function useTerminalDrawer(options: {
     {
       id: "terminal:toggle",
       label: open ? (focused ? "Hide terminal" : "Focus terminal") : "Open terminal",
-      description: target === null ? "Select a thread first" : "⌘J",
+      description: target === null ? "Select a thread first" : (KEYS.toggle ?? ""),
       disabled: target === null,
       run: toggle,
     },
     {
       id: "terminal:new",
       label: "New terminal tab",
-      description: "⌘N in the terminal",
+      description: inTerminal(KEYS.newTab),
       disabled: target === null,
       run: newTerminal,
     },
     {
       id: "terminal:split",
       label: "Split terminal",
-      description: "⌘D in the terminal",
+      description: inTerminal(KEYS.split),
       disabled: target === null,
       run: () => split("horizontal"),
     },
     {
       id: "terminal:split-vertical",
       label: "Split terminal down",
-      description: "⌘⇧D in the terminal",
+      description: inTerminal(KEYS.splitDown),
       disabled: target === null,
       run: () => split("vertical"),
     },
@@ -312,8 +375,7 @@ export function useTerminalDrawer(options: {
           {
             id: "terminal:close",
             label: "Close terminal",
-            description:
-              activeId === null ? "⌘W in the terminal" : `${activeId}  ⌘W in the terminal`,
+            description: [activeId, inTerminal(KEYS.close)].filter(Boolean).join("  "),
             run: () => close(),
           },
         ]

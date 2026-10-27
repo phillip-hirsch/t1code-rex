@@ -62,14 +62,17 @@ function withGroup(terminalId: string): TerminalGroup {
 
 /**
  * Shows the drawer. One with no terminals gets the server's running ones for this
- * thread (they outlive the TUI), or a first one.
+ * thread (they outlive the TUI), or a first one. `closing` ids are still being closed,
+ * so they're neither picked up nor reused.
  */
 export function openTerminalDrawer(
   state: ThreadTerminalState,
   runningTerminalIds: ReadonlyArray<string> = [],
+  closing: ReadonlyArray<string> = [],
 ): ThreadTerminalState {
   if (state.groups.length > 0) return state.open ? state : { ...state, open: true };
-  const ids = runningTerminalIds.length > 0 ? runningTerminalIds : [DEFAULT_TERMINAL_ID];
+  const running = runningTerminalIds.filter((id) => !closing.includes(id));
+  const ids = running.length > 0 ? running : [nextTerminalId(state, closing)];
   return { open: true, groups: ids.map(withGroup), activeTerminalId: ids[0] ?? null };
 }
 

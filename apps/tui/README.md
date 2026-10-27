@@ -68,7 +68,8 @@ When an agent asks for approval or asks a question, a panel shows it above the c
 Each thread has a terminal drawer below the composer, running shells on the server in the thread's worktree or project folder. Shells keep running while you look at another thread, and switching back shows them as you left them. After a server restart they come back with their scrollback.
 
 - **⌘J** opens the drawer and focuses it; again hides it. From another pane it focuses the open drawer.
-- In the terminal, **⌘D** splits, **⌘⇧D** splits downward, **⌘N** opens a tab, **⌘W** closes the shell. These are upstream's keybindings, so `keybindings.json` changes them.
+- In the terminal, **⌘D** splits, **⌘⇧D** splits downward, **⌘N** opens a tab, **⌘W** closes the shell. These are upstream's keybindings, so `keybindings.json` changes them. On Windows and Linux they're Ctrl keys, except that Ctrl+D (EOF) and Ctrl+U (kill line) stay the shell's: split there from the palette. Ctrl+Shift+D splits downward only in terminals with the kitty keyboard protocol; elsewhere it arrives as Ctrl+D.
+- Keys typed while a terminal starts are sent once its shell connects. If the server rejects input, the pane says so and drops what was typed after it; typing again resumes.
 - The terminal gets every other key, Ctrl+C, Esc and Tab included. **Ctrl+]** moves focus on to the next pane; **Tab** comes back. A click focuses a pane too.
 - **Ctrl+Shift+←/→** switches terminals, **Ctrl+Shift+↑/↓** resizes the drawer (or drag its header), **Shift+PgUp/PgDn** and the mouse wheel scroll back.
 

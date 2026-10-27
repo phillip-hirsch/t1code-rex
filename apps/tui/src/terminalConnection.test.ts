@@ -116,7 +116,7 @@ describe("connectServerTerminal", () => {
     await settle();
     expect(writes.map((write) => write.data)).toEqual(["echo "]);
     expect(connection.read().error).toBe(
-      "Input not sent: socket closed. Typing resumes when the terminal reconnects.",
+      "Input not sent: socket closed. Keys typed after it were dropped; type again to resume.",
     );
     expect(seen.at(-1)).toContain("Input not sent");
 
@@ -125,6 +125,25 @@ describe("connectServerTerminal", () => {
     connection.write("pwd\r");
     await settle();
     expect(writes.map((write) => write.data)).toEqual(["echo ", "pwd\r"]);
+    expect(connection.read().error).toBeNull();
+  });
+
+  it("resumes on the next key, sent fresh, on the same shell and attach stream", async () => {
+    const { connection, attach, writes, settle } = setup();
+    attach("running");
+    connection.write("rm -rf bu");
+    connection.write("ild\r");
+    writes[0]?.reply(failed("socket closed."));
+    await settle();
+    // An emulator reply isn't the user typing; it doesn't resume input.
+    connection.write("\u001b[1;1R");
+    await settle();
+    expect(writes.map((write) => write.data)).toEqual(["rm -rf bu"]);
+
+    connection.resume();
+    connection.write("\u0003");
+    await settle();
+    expect(writes.map((write) => write.data)).toEqual(["rm -rf bu", "\u0003"]);
     expect(connection.read().error).toBeNull();
   });
 
