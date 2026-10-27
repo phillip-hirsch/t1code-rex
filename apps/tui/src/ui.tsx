@@ -1951,8 +1951,8 @@ function Shell(props: AppProps) {
                   },
                   ...(composerTarget.kind === "thread"
                     ? {
-                        queuedMessageIds: connection.thread(composerTarget.threadId)
-                          .queuedMessageIdsAtom,
+                        projectedMessageIds: connection.thread(composerTarget.threadId)
+                          .projectedMessageIdsAtom,
                       }
                     : {}),
                   mentionSearch: {

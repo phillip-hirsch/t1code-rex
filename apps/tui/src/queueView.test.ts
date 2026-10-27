@@ -11,12 +11,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import type { ComposerSendEntry } from "./composerStore.ts";
 import {
+  createProjectedMessageIdsSelector,
   createQueueViewSelector,
   deriveQueueView,
   leftQueueNotice,
   queueHoldReason,
   queueRowActions,
-  queuedMessageIdsKey,
   reorderTarget,
   unlistedSends,
   type QueueView,
@@ -190,14 +190,45 @@ function entry(messageId: string): ComposerSendEntry {
 }
 
 describe("unlistedSends", () => {
+  const sends = [entry("a"), entry("b")];
+  const shown = (projected: ReadonlySet<MessageId>) =>
+    unlistedSends(sends, projected).map((pending) => pending.send.messageId);
+
   it("hides a pending send once the server lists it as queued, and keeps the rest", () => {
-    const sends = [entry("a"), entry("b")];
+    const select = createProjectedMessageIdsSelector();
     // The server queued send "a": its run's message id is the send's.
-    const listed = { ...queued("r2", 2, 0), userMessageId: MessageId.make("a") };
-    const key = queuedMessageIdsKey(view([listed], [message("a", "a")]));
-    expect(unlistedSends(sends, key).map((shown) => shown.send.messageId)).toEqual(["b"]);
-    expect(unlistedSends(sends, "")).toBe(sends);
-    expect(unlistedSends(sends, "zzz")).toBe(sends);
+    const runs = [
+      run("r1", 1, { status: "running" }),
+      { ...queued("r2", 2, 0), userMessageId: MessageId.make("a") },
+    ];
+    expect(shown(select(projection(runs, [message("a", "a")])))).toEqual(["b"]);
+    expect(unlistedSends(sends, new Set())).toBe(sends);
+    expect(unlistedSends(sends, new Set([MessageId.make("zzz")]))).toBe(sends);
+  });
+
+  it("keeps it hidden once its queued run is removed, before the dispatch reply comes", () => {
+    const select = createProjectedMessageIdsSelector();
+    const queuedA = { ...queued("r2", 2, 0), userMessageId: MessageId.make("a") };
+    select(projection([queuedA], [message("a", "a")]));
+    // Removed from the queue elsewhere: the run is cancelled, its message stays projected.
+    const cancelled = { ...queuedA, status: "cancelled", queuePosition: null } as Run;
+    expect(shown(select(projection([cancelled], [message("a", "a")])))).toEqual(["b"]);
+  });
+
+  it("hides a send the transcript already has, as at startup when it already ran", () => {
+    const select = createProjectedMessageIdsSelector();
+    const started = { ...run("r2", 2, { status: "running" }), userMessageId: MessageId.make("a") };
+    expect(shown(select(projection([started], [message("a", "a")])))).toEqual(["b"]);
+    // Only the transcript has it (an older run outside the projection's window).
+    expect(shown(select(projection([], [message("a", "a")])))).toEqual(["b"]);
+  });
+
+  it("keeps the same set while the projection's runs and messages don't change", () => {
+    const select = createProjectedMessageIdsSelector();
+    const runs = [run("r1", 1)];
+    const first = select(projection(runs, [message("m-r1", "x")]));
+    expect(select(projection(runs, [message("m-r1", "x, streamed")]))).toBe(first);
+    expect(select(projection([...runs, run("r2", 2)], [message("m-r1", "x")]))).not.toBe(first);
   });
 });
 

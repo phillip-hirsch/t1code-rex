@@ -144,23 +144,49 @@ export function createQueueViewSelector() {
   };
 }
 
-/** The server's queued message ids, one per line: a key that only changes with the queue. */
-export function queuedMessageIdsKey(view: QueueView | null): string {
-  return view === null ? "" : view.rows.map((row) => row.messageId).join("\n");
+/** The parts of a thread's projection that name its messages. */
+export interface ProjectedMessages {
+  readonly runs: ReadonlyArray<{ readonly userMessageId: MessageId }>;
+  readonly messages: ReadonlyArray<{ readonly id: MessageId }>;
 }
 
 /**
- * Sends still pending here, less those the server already lists as queued: the reply can
- * lag the server's update, and one message must not show twice. The sender keeps the job
- * until the reply comes, so it's still covered by Stop, /discard and quitting.
+ * Every message id the thread's projection has, from its runs and its messages: queued,
+ * started, finished or removed. The same set while those don't change, so a streaming run
+ * doesn't re-render the composer.
+ */
+export function createProjectedMessageIdsSelector() {
+  let runs: ProjectedMessages["runs"] | null = null;
+  let messages: ProjectedMessages["messages"] | null = null;
+  let ids: ReadonlySet<MessageId> = new Set();
+  return (projection: ProjectedMessages | null): ReadonlySet<MessageId> => {
+    if (projection === null) {
+      runs = messages = null;
+      if (ids.size > 0) ids = new Set();
+      return ids;
+    }
+    if (projection.runs === runs && projection.messages === messages) return ids;
+    ({ runs, messages } = projection);
+    const next = new Set<MessageId>();
+    for (const run of projection.runs) next.add(run.userMessageId);
+    for (const message of projection.messages) next.add(message.id);
+    if (next.size !== ids.size || [...next].some((id) => !ids.has(id))) ids = next;
+    return ids;
+  };
+}
+
+/**
+ * Sends still pending here, less those the thread's projection already has: the reply can
+ * lag the server's update, and one message must not show twice, whether it's queued, started
+ * or was removed since. The sender keeps the job until the reply comes, so it's still covered
+ * by Stop, /discard and quitting.
  */
 export function unlistedSends(
   sends: ReadonlyArray<ComposerSendEntry>,
-  queuedKey: string,
+  projected: ReadonlySet<MessageId>,
 ): ReadonlyArray<ComposerSendEntry> {
-  if (queuedKey === "" || sends.length === 0) return sends;
-  const listed = new Set(queuedKey.split("\n"));
-  const shown = sends.filter((entry) => !listed.has(entry.send.messageId));
+  if (projected.size === 0 || sends.length === 0) return sends;
+  const shown = sends.filter((entry) => !projected.has(entry.send.messageId));
   return shown.length === sends.length ? sends : shown;
 }
 

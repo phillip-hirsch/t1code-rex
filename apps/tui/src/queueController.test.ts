@@ -281,6 +281,34 @@ describe("queue controller", () => {
       "The run ended before the steer went out; s sends it now",
     );
   });
+
+  it("never redirects a steer to a newer run that started while the worktree was checked", async () => {
+    let release: (value: WorkspaceBlock) => void = () => {};
+    const { controller, calls, store, server } = setup({
+      blockedReason: () =>
+        new Promise<WorkspaceBlock>((resolve) => {
+          release = resolve;
+        }),
+    });
+    const steering = controller.sendNow(threadId, RunId.make("b"));
+    await settle();
+    // The run it was for finished and queued message "a" started in its place.
+    server.view = queueOf(server.view?.rows.slice(1) ?? [], { activeRunId: RunId.make("a") });
+    release(null);
+    expect(await steering).toBe(false);
+    expect(calls).toEqual([]);
+    expect(store.snapshot(threadId).notice).toBe(
+      "The run ended before the steer went out; nothing was sent",
+    );
+  });
+
+  it("moves only as the row's actions allow: not while the provider can't reorder", async () => {
+    const { controller, calls, statuses, server } = setup();
+    server.view = queueOf(server.view?.rows ?? [], { canReorder: false });
+    expect(await controller.move(threadId, RunId.make("b"), 1)).toBe(false);
+    expect(calls).toEqual([]);
+    expect(statuses).toEqual(["This thread's provider session can't reorder its queue now"]);
+  });
 });
 
 describe("queue controller edits", () => {

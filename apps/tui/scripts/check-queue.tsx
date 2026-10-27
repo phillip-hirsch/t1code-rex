@@ -1,10 +1,8 @@
 // @effect-diagnostics globalConsole:off globalTimers:off globalDate:off -- A Bun check script; it runs outside the Effect runtime.
 /**
- * Checks the real queue list (QueuePanel) with the real composer dock under OpenTUI with the
- * kitty keyboard protocol, as in Rex, routed as ui.tsx routes keys through `useSyncKeyboard`.
- * The controller, sender and composer store are the app's; the server is scripted, and
- * updates the thread's queue the way its projection would.
- * Needs Bun. Run: bun apps/tui/scripts/check-queue.tsx
+ * Checks the real queue list and composer dock under OpenTUI with kitty keys and a mock mouse,
+ * keys routed as ui.tsx does; the server is scripted and moves the projection as it would.
+ * Run with Bun: bun apps/tui/scripts/check-queue.tsx
  */
 import type { KeyEvent } from "@opentui/core";
 import { testRender } from "@opentui/react/test-utils";
@@ -31,7 +29,12 @@ import { createComposerStore } from "../src/composerStore.ts";
 import { resolveTuiShortcutCommand, tuiShortcutEvent } from "../src/keybindings.ts";
 import { createQueueController } from "../src/queueController.ts";
 import { QueuePanel, type QueuePanelHandle } from "../src/queuePanel.tsx";
-import { queuedMessageIdsKey, type QueueRow, type QueueView } from "../src/queueView.ts";
+import {
+  createProjectedMessageIdsSelector,
+  type ProjectedMessages,
+  type QueueRow,
+  type QueueView,
+} from "../src/queueView.ts";
 import { useSyncKeyboard } from "../src/syncKeyboard.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
 
@@ -95,13 +98,30 @@ interface Controls {
   readonly focus: "composer" | "queue";
 }
 
-async function mount(initial: QueueView, options: { readonly running?: boolean } = {}) {
+async function mount(
+  initial: QueueView,
+  options: {
+    readonly running?: boolean;
+    /** Messages the thread's projection has besides the queued ones. */
+    readonly projected?: ReadonlyArray<MessageId>;
+  } = {},
+) {
   const registry = AtomRegistry.make();
   const viewAtom = Atom.make<QueueView | null>(initial).pipe(Atom.keepAlive);
   const runsAtom = Atom.make<ReadonlyArray<QueuedRunStatus> | null>(
     initial.rows.map((entry) => ({ id: entry.runId, status: "queued" })),
   ).pipe(Atom.keepAlive);
-  const idsAtom = Atom.make((get) => queuedMessageIdsKey(get(viewAtom)));
+  // The thread's runs and messages: a queued message stays in them once it leaves the queue.
+  const projectionAtom = Atom.make<ProjectedMessages>({
+    runs: [...(options.projected ?? []), ...initial.rows.map((entry) => entry.messageId)].map(
+      (userMessageId) => ({ userMessageId }),
+    ),
+    messages: [...(options.projected ?? []), ...initial.rows.map((entry) => entry.messageId)].map(
+      (id) => ({ id }),
+    ),
+  }).pipe(Atom.keepAlive);
+  const selectIds = createProjectedMessageIdsSelector();
+  const idsAtom = Atom.make((get) => selectIds(get(projectionAtom)));
   const statusByRun = new Map<string, string>();
   const calls: Call[] = [];
   const statuses: string[] = [];
@@ -117,6 +137,16 @@ async function mount(initial: QueueView, options: { readonly running?: boolean }
       }
     }
     registry.set(viewAtom, { ...current, rows, ...overrides });
+    const projected = registry.get(projectionAtom);
+    const added = rows.filter(
+      (entry) => !projected.runs.some((known) => known.userMessageId === entry.messageId),
+    );
+    if (added.length > 0) {
+      registry.set(projectionAtom, {
+        runs: [...projected.runs, ...added.map((entry) => ({ userMessageId: entry.messageId }))],
+        messages: [...projected.messages, ...added.map((entry) => ({ id: entry.messageId }))],
+      });
+    }
     registry.set(
       runsAtom,
       [...(registry.get(runsAtom) ?? [])].map((run) =>
@@ -139,7 +169,7 @@ async function mount(initial: QueueView, options: { readonly running?: boolean }
   const sender = createComposerSender({
     store,
     startTurn: (input) => {
-      calls.push({ type: "message.dispatch", input: { messageId: input.messageId } });
+      calls.push({ type: "message.dispatch", input: { messageId: input.message.messageId } });
       return Promise.resolve({ ok: true });
     },
     setRuntimeMode: () => Promise.resolve({ ok: true }),
@@ -211,10 +241,16 @@ async function mount(initial: QueueView, options: { readonly running?: boolean }
         },
       );
       const used = (() => {
-        if (shortcut === "thread.steerQueuedMessage" && panel.current?.sendFirst(key.repeated)) {
+        if (
+          shortcut === "thread.steerQueuedMessage" &&
+          panel.current?.sendFirst(key.repeated === true)
+        ) {
           return true;
         }
-        if (shortcut === "thread.editQueuedMessage" && panel.current?.editLast(key.repeated)) {
+        if (
+          shortcut === "thread.editQueuedMessage" &&
+          panel.current?.editLast(key.repeated === true)
+        ) {
           return true;
         }
         if (focus === "composer" && dock.current?.handleKey(key)) return true;
@@ -269,7 +305,7 @@ async function mount(initial: QueueView, options: { readonly running?: boolean }
               onStatus: (status) => statuses.push(status),
               onClone: async () => null,
               mentionSearch: NO_MENTION_SEARCH_SOURCE,
-              queuedMessageIds: idsAtom,
+              projectedMessageIds: idsAtom,
             }}
             sender={sender}
             requests={null}
@@ -301,6 +337,17 @@ async function mount(initial: QueueView, options: { readonly running?: boolean }
   const arrow = (direction: "A" | "B", mods = 1) =>
     setup.renderer.stdin.emit("data", Buffer.from(`\x1b[1;${mods}${direction}`));
   const type = (text: string) => setup.mockInput.typeText(text);
+  /** Clicks the first place the frame shows `label`. */
+  const click = async (label: string) => {
+    const lines = frame().split("\n");
+    const y = lines.findIndex((line) => line.includes(label));
+    if (y === -1) {
+      check(`"${label}" is on screen to click`, false, true);
+      return;
+    }
+    await act(() => setup.mockMouse.click(lines[y]!.indexOf(label) + 1, y));
+    await settle(setup.renderOnce);
+  };
   const close = async () => {
     await act(async () => {
       sender.dispose();
@@ -320,6 +367,7 @@ async function mount(initial: QueueView, options: { readonly running?: boolean }
     kitty,
     arrow,
     type,
+    click,
     update,
     view,
     close,
@@ -507,19 +555,20 @@ async function checkShortcutsAndTyping() {
   await ui.close();
 }
 
+const pendingSend: ComposerSend = {
+  target: { kind: "thread", threadId, projectId: ProjectId.make("p") },
+  commandId: CommandId.make("cmd-pending"),
+  messageId: MessageId.make("msg-pending"),
+  text: "pending follow-up",
+  attachments: [],
+  dispatch: "queue",
+  settings,
+  createdAt: "2026-10-27T10:00:00.000Z",
+};
+
 async function checkNoDuplicateRows() {
   const ui = await mount(queueOf([]));
-  const send: ComposerSend = {
-    target: { kind: "thread", threadId, projectId: ProjectId.make("p") },
-    commandId: CommandId.make("cmd-pending"),
-    messageId: MessageId.make("msg-pending"),
-    text: "pending follow-up",
-    attachments: [],
-    dispatch: "queue",
-    settings,
-    createdAt: "2026-10-27T10:00:00.000Z",
-  };
-  await ui.press(() => ui.store.beginSend(send));
+  await ui.press(() => ui.store.beginSend(pendingSend));
   check(
     "Q10: a send still on its way shows in the composer",
     ui.frame().includes("pending follow-up"),
@@ -535,11 +584,113 @@ async function checkNoDuplicateRows() {
   await ui.close();
 }
 
+async function checkEditCursor() {
+  const ui = await mount(queueOf([row("a", "abc")]));
+  await ui.press(() => ui.kitty(TAB));
+  await ui.press(() => ui.kitty(ENTER));
+  // Home, then two letters: the cursor stays where the first one left it.
+  await ui.press(() => ui.setup.mockInput.pressKey("HOME"));
+  await ui.press(() => ui.type("X"));
+  await ui.press(() => ui.type("Y"));
+  await ui.press(() => ui.kitty(ENTER));
+  const edit = ui.calls.find((call) => call.type === "queued-run.edit");
+  check("S1: Home, X, Y in the editor saves XYabc", edit?.input.text, "XYabc");
+  await ui.close();
+}
+
+async function checkMouse() {
+  const ui = await mount(queueOf(THREE));
+  await ui.press(() => ui.kitty(TAB));
+  await ui.click("x remove");
+  check("S2: a click on x remove asks first", ui.frame().includes("Remove? x again"), true);
+  check(
+    "S2: and sends nothing yet",
+    ui.calls.some((call) => call.type === "queued-run.cancel"),
+    false,
+  );
+  await ui.click("Remove? x again");
+  const cancels = ui.calls.filter((call) => call.type === "queued-run.cancel");
+  check("S2: a second click removes it", cancels.length, 1);
+  check("S2: the selected one", cancels[0]?.input.runId, "a");
+  check("S2: two left", ui.frame().includes("Up next · 2 queued"), true);
+
+  // Moving with the mouse, as Shift+↑/↓ does.
+  await ui.click("⇧↓ down");
+  const reorder = ui.calls.find((call) => call.type === "queued-run.reorder");
+  check(
+    "S5: a click on ⇧↓ down moves the selected one down: last",
+    reorder?.input.beforeRunId,
+    null,
+  );
+  check("S5: it's the first", reorder?.input.runId, "b");
+  check("S5: the selection follows it", ui.frame().includes("› 2. 󰒲 then fix"), true);
+  await ui.click("⇧↓ down");
+  check(
+    "S5: the last one won't move down, and the server isn't asked",
+    ui.calls.filter((call) => call.type === "queued-run.reorder").length,
+    1,
+  );
+  check("S5: and says why", ui.statuses.at(-1), "It's already last");
+  await ui.click("⇧↑ up");
+  check(
+    "S5: a click on ⇧↑ up moves it back up",
+    ui.calls.filter((call) => call.type === "queued-run.reorder").at(-1)?.input.beforeRunId,
+    "c",
+  );
+  // A session that can't reorder: the clicks send nothing, as the keys don't.
+  await ui.press(() => ui.update(ui.view()?.rows ?? [], { canReorder: false }));
+  const moves = ui.calls.length;
+  await ui.click("⇧↓ down");
+  check("S5: nothing moves while the session can't reorder", ui.calls.length, moves);
+  check(
+    "S5: and it says so",
+    ui.statuses.at(-1),
+    "This thread's provider session can't reorder its queue now",
+  );
+  await ui.close();
+}
+
+async function checkRemovedPendingSend() {
+  const ui = await mount(queueOf([]));
+  const pending = MessageId.make("msg-pending");
+  await ui.press(() =>
+    ui.store.beginSend({ ...pendingSend, messageId: pending, text: "late reply" }),
+  );
+  await ui.press(() => ui.update([{ ...row("p", "late reply"), messageId: pending }]));
+  // Removed from the queue while the dispatch reply is still on its way.
+  await ui.press(() => ui.update([]));
+  check(
+    "S4: a removed queued message doesn't come back as a pending send",
+    ui.frame().includes("late reply"),
+    false,
+  );
+  await ui.close();
+}
+
+async function checkStartupPendingSend() {
+  // At startup the message already ran: the transcript has it, the queue doesn't.
+  const started = MessageId.make("msg-started");
+  const ui = await mount(queueOf([]), { projected: [started] });
+  await ui.press(() =>
+    ui.store.beginSend({ ...pendingSend, messageId: started, text: "already ran" }),
+  );
+  check(
+    "S4: a send the transcript already has doesn't show as pending",
+    ui.frame().includes("already ran"),
+    false,
+  );
+  await ui.close();
+}
+
 await checkList();
 await checkHeld();
 await checkReorderRemoveEdit();
 await checkStaleEdit();
 await checkShortcutsAndTyping();
 await checkNoDuplicateRows();
+await checkEditCursor();
+await checkMouse();
+await checkRemovedPendingSend();
+await checkStartupPendingSend();
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);

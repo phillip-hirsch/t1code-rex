@@ -270,13 +270,18 @@ export function createQueueController(options: QueueControllerOptions) {
         failed: "Couldn't remove it",
       }),
 
+    /** One place up or down, as the row's move actions allow; keys and clicks both come here. */
     move(threadId: ThreadId, runId: RunId, delta: -1 | 1): Promise<boolean> {
       const view = options.view(threadId);
-      const beforeRunId = view === null ? undefined : reorderTarget(view, runId, delta);
-      if (view !== null && beforeRunId === undefined && listed(threadId, runId)) {
-        options.onStatus(delta === -1 ? "It's already first" : "It's already last");
+      const index = view?.rows.findIndex((row) => row.runId === runId) ?? -1;
+      const actions =
+        view === null ? null : queueRowActions(view, index, { busy: isBusy(threadId) });
+      const verdict = delta === -1 ? actions?.moveUp : actions?.moveDown;
+      if (verdict !== undefined && !verdict.ok) {
+        options.onStatus(verdict.reason);
         return Promise.resolve(false);
       }
+      const beforeRunId = view === null ? undefined : reorderTarget(view, runId, delta);
       return change(threadId, runId, {
         send: (commandId) =>
           options.reorderQueuedRun({
@@ -318,22 +323,21 @@ export function createQueueController(options: QueueControllerOptions) {
         );
         return Promise.resolve(false);
       }
-      let targetRunId: RunId | null = view.activeRunId;
+      // The run the user chose to steer; a newer one never takes its place.
+      const targetRunId = view.activeRunId;
       return change(threadId, runId, {
         prepare: async () => {
           const blocked = await workspaceBlock(threadId);
           if (blocked !== null) return blocked;
-          // The run it was to steer may have ended meanwhile; a steer never starts one.
+          // The run may have ended while the worktree was checked; a steer never starts one.
           const now = options.view(threadId);
-          targetRunId = now?.canPromoteToSteer === true ? now.activeRunId : null;
-          return targetRunId === null
-            ? "The run ended before the steer went out; s sends it now"
-            : null;
+          if (now?.canPromoteToSteer === true && now.activeRunId === targetRunId) return null;
+          return `The run ended before the steer went out; ${
+            now?.canSendNow === true ? "s sends it now" : "nothing was sent"
+          }`;
         },
         send: (commandId) =>
-          targetRunId === null
-            ? Promise.resolve(failure(new Error("The run ended")))
-            : options.promoteQueuedRun({ commandId, threadId, queuedRunId: runId, targetRunId }),
+          options.promoteQueuedRun({ commandId, threadId, queuedRunId: runId, targetRunId }),
         done: "Steering the run with it",
         failed: "Couldn't steer with it",
       });

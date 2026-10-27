@@ -2,7 +2,7 @@ import type { KeyEvent, TextareaRenderable } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import type { RunId, ThreadId } from "@t3tools/contracts";
 import type { Atom } from "effect/reactivity";
-import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
+import { useCallback, useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 
 import type { QueueController } from "./queueController.ts";
 import { QUEUE_EDIT_KEY_HINTS, resolveQueueKey } from "./queueKeys.ts";
@@ -73,6 +73,12 @@ export function QueuePanel(props: QueuePanelProps) {
   }>({ runId: null, index: 0 });
   const [armedRunId, setArmedRunId] = useState<RunId | null>(null);
   const editorRef = useRef<TextareaRenderable | null>(null);
+  // Stable, so React calls it only when an editor mounts or unmounts: the cursor starts at
+  // the end once, then stays where the user puts it.
+  const attachEditor = useCallback((node: TextareaRenderable | null) => {
+    node?.gotoBufferEnd();
+    editorRef.current = node;
+  }, []);
 
   const found = rows.findIndex((row) => row.runId === (edit?.runId ?? selection.runId));
   // A selected message that left the queue hands the selection to the one in its place.
@@ -102,6 +108,11 @@ export function QueuePanel(props: QueuePanelProps) {
   const beginEdit = (row: QueueRow) => {
     select(row);
     if (controller.beginEdit(threadId, row.runId)) onFocus();
+  };
+  /** Keys and clicks move the same way; the selection follows the moved message. */
+  const move = (row: QueueRow, delta: -1 | 1) => {
+    select(row);
+    void controller.move(threadId, row.runId, delta);
   };
   /** Remove asks once: the first press arms it, a second removes. */
   const remove = (row: QueueRow) => {
@@ -144,7 +155,7 @@ export function QueuePanel(props: QueuePanelProps) {
           return true;
         }
         case "move":
-          void controller.move(threadId, selected.runId, action.delta);
+          move(selected, action.delta);
           return true;
         case "edit":
           beginEdit(selected);
@@ -225,10 +236,7 @@ export function QueuePanel(props: QueuePanelProps) {
               <box style={{ flexGrow: 1, minWidth: 0 }}>
                 <textarea
                   key={`${threadId}:${row.runId}`}
-                  ref={(node: TextareaRenderable | null) => {
-                    if (node !== null && editorRef.current !== node) node.gotoBufferEnd();
-                    editorRef.current = node;
-                  }}
+                  ref={attachEditor}
                   focused={focused && !saving}
                   initialValue={edit.text}
                   placeholder="The queued message"
@@ -310,6 +318,16 @@ export function QueuePanel(props: QueuePanelProps) {
                       onPress={() => void controller.sendNow(threadId, row.runId)}
                     />
                     <QueueAction
+                      label="⇧↑ up"
+                      tone={actions.moveUp.ok ? palette.muted : palette.subtle}
+                      onPress={() => move(row, -1)}
+                    />
+                    <QueueAction
+                      label="⇧↓ down"
+                      tone={actions.moveDown.ok ? palette.muted : palette.subtle}
+                      onPress={() => move(row, 1)}
+                    />
+                    <QueueAction
                       label="x remove"
                       tone={actions.remove.ok ? palette.muted : palette.subtle}
                       onPress={() => remove(row)}
@@ -334,7 +352,15 @@ function QueueAction(props: {
   readonly onPress: () => void;
 }) {
   return (
-    <box onMouseDown={props.onPress} style={{ flexShrink: 0, paddingLeft: 2 }}>
+    <box
+      onMouseDown={(event) => {
+        // The row under it selects on click, which would disarm a remove.
+        event.preventDefault();
+        event.stopPropagation();
+        props.onPress();
+      }}
+      style={{ flexShrink: 0, paddingLeft: 2 }}
+    >
       <text wrapMode="none" content={props.label} style={{ fg: props.tone }} />
     </box>
   );

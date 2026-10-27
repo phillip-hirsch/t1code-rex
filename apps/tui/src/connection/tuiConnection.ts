@@ -104,7 +104,11 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import type { ComposerCommandResult, WorkspaceGuard } from "../composerSender.ts";
 import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurns } from "../diffTurns.ts";
 import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
-import { createQueueViewSelector, queuedMessageIdsKey, type QueueView } from "../queueView.ts";
+import {
+  createProjectedMessageIdsSelector,
+  createQueueViewSelector,
+  type QueueView,
+} from "../queueView.ts";
 import { branchRefsInput, mergeRefPages, type BranchRefPages } from "../branchPicker.ts";
 import {
   deriveWorktreeLaunch,
@@ -214,12 +218,13 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       );
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-queue:${threadId}`));
   });
-  const queuedMessageIdsAtom = Atom.family((threadId: ThreadId) =>
-    Atom.make((get) => queuedMessageIdsKey(get(queueViewAtom(threadId)))).pipe(
-      Atom.setIdleTTL(0),
-      Atom.withLabel(`tr3x:thread-queued-ids:${threadId}`),
-    ),
-  );
+  // Every message id the thread's projection has, for hiding pending sends it already shows.
+  const projectedMessageIdsAtom = Atom.family((threadId: ThreadId) => {
+    const select = createProjectedMessageIdsSelector();
+    return Atom.make((get) =>
+      select(Option.getOrNull(get(threadDetails.stateAtom({ environmentId, threadId })).data)),
+    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-message-ids:${threadId}`));
+  });
   // What an open queued-message edit watches for its run leaving the queue, as on web.
   const queuedRunsAtom = Atom.family((threadId: ThreadId): QueuedRunsAtom =>
     makeQueuedRunsAtom({
@@ -429,8 +434,8 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         historyAtom: threadDetails.historyAtom(ref),
         requestQueueAtom: requestQueueAtom(threadId),
         queueViewAtom: queueViewAtom(threadId),
-        /** The queued messages' ids as one key, for hiding pending sends the server lists. */
-        queuedMessageIdsAtom: queuedMessageIdsAtom(threadId),
+        /** Every message id the projection has, for hiding pending sends it already shows. */
+        projectedMessageIdsAtom: projectedMessageIdsAtom(threadId),
         queuedRunsAtom: queuedRunsAtom(threadId),
       };
     },

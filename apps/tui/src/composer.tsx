@@ -14,6 +14,7 @@ import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  type MessageId,
   type ProjectEntry,
   type ProjectSearchEntriesInput,
   type ProjectSearchEntriesResult,
@@ -148,12 +149,13 @@ export interface ComposerProps {
   /** `/git`, `/branch` and `/worktree`, where the window has the branch toolbar. */
   readonly git?: ComposerGitCommands;
   readonly mentionSearch: ComposerMentionSearch;
-  /** The server's queued message ids (`queuedMessageIdsKey`); the queue list shows those. */
-  readonly queuedMessageIds?: Atom.Atom<string>;
+  /** Every message id the thread's projection has; a pending send it has shows there. */
+  readonly projectedMessageIds?: Atom.Atom<ReadonlySet<MessageId>>;
   readonly ref?: Ref<ComposerHandle>;
 }
 
-const NO_QUEUED_IDS: Atom.Atom<string> = Atom.make("");
+const NO_MESSAGE_IDS: ReadonlySet<MessageId> = new Set();
+const NO_PROJECTED_IDS = Atom.make(() => NO_MESSAGE_IDS);
 
 function newId(): string {
   return NodeCrypto.randomUUID();
@@ -171,7 +173,7 @@ export function Composer(props: ComposerProps) {
   const { target, store, sender, theme, baseSettings, running, stopRequested, ref } = props;
   const palette = theme.palette;
   const threadId = target.threadId;
-  const queuedIds = useAtomValue(props.queuedMessageIds ?? NO_QUEUED_IDS);
+  const projectedIds = useAtomValue(props.projectedMessageIds ?? NO_PROJECTED_IDS);
   const snapshot = useSyncExternalStore(
     useCallback(
       (listener: () => void) => store.subscribeThread(threadId, listener),
@@ -579,7 +581,7 @@ export function Composer(props: ComposerProps) {
 
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      {unlistedSends(snapshot.sends, queuedIds).map((entry) => (
+      {unlistedSends(snapshot.sends, projectedIds).map((entry) => (
         <PendingSendRow key={entry.send.commandId} entry={entry} running={running} theme={theme} />
       ))}
       {snapshot.notice ? (
