@@ -63,13 +63,23 @@ When an agent asks for approval or asks a question, a panel shows it above the c
 - As in upstream's web app, sending a message while an approval is on screen declines that approval, then steers the run with your message. The decline waits its turn behind earlier messages, and Stop, `/discard` and quitting cover it like any unsent message. A question on screen is left alone. A request that arrives while you're typing stays out of view until you pause for 1.5 s, send or leave the composer, so that send leaves it alone.
 - After a stop, a pending approval can only be declined, to clear it.
 
+## Terminal
+
+Each thread has a terminal drawer below the composer, running shells on the server in the thread's worktree or project folder. Shells keep running while you look at another thread, and switching back shows them as you left them. After a server restart they come back with their scrollback.
+
+- **⌘J** opens the drawer and focuses it; again hides it. From another pane it focuses the open drawer.
+- In the terminal, **⌘D** splits, **⌘⇧D** splits downward, **⌘N** opens a tab, **⌘W** closes the shell. These are upstream's keybindings, so `keybindings.json` changes them.
+- The terminal gets every other key, Ctrl+C, Esc and Tab included. **Ctrl+]** moves focus on to the next pane; **Tab** comes back. A click focuses a pane too.
+- **Ctrl+Shift+←/→** switches terminals, **Ctrl+Shift+↑/↓** resizes the drawer (or drag its header), **Shift+PgUp/PgDn** and the mouse wheel scroll back.
+
 ## Rex
 
 When tr3x runs inside a Rex session (`REX_SESSION` is set), the command palette (`⌘K`, or `Ctrl+K`) gets a Rex section:
 
 - **Open thread in Rex tab** starts a second tr3x in a new Rex tab, focused on that thread. Running it again focuses the existing tab.
+- **Open terminal in Rex split** opens a native Rex split below tr3x, with a shell in the thread's folder.
 
-Terminal splits and diff tabs return with the orchestration v2 port (see `docs/rex-parity-plan.md`).
+Diff tabs return with the orchestration v2 port (see `docs/rex-parity-plan.md`).
 
 Thread tabs connect to the server of the window that opened them, so they need that window to stay open. They read your prefs but don't save them. Set `TR3X_REX_BIN` if `rex` isn't on your `PATH`.
 
