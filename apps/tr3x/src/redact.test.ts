@@ -3,7 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { redactSecrets } from "./redact.ts";
 
 describe("redactSecrets", () => {
-  it("masks the ticket in a WebSocket error, which Bun prints with the full URL", () => {
+  it("masks the ticket in a WebSocket error that carries the full URL", () => {
     expect(
       redactSecrets(
         "WebSocket connection to 'ws://127.0.0.1:59837/ws?wsTicket=eyJ2IjoxfQ.sig-_x&orchestrationProtocol=2' failed: Expected 101 status code: 426",

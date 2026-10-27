@@ -34,7 +34,7 @@ function tempHome(): string {
 }
 
 function startCli(home: string, command: "daemon" | "doctor"): CliProcess {
-  const child = NodeChildProcess.spawn("bun", [CLI, command], {
+  const child = NodeChildProcess.spawn(process.execPath, [CLI, command], {
     env: { ...process.env, TR3X_HOME: home, TR3X_NODE_BIN: process.execPath },
     stdio: ["ignore", "pipe", "pipe"],
   });

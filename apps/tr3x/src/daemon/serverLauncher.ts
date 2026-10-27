@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off globalFetch:off -- The launcher runs on Bun outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off globalFetch:off -- The launcher runs on Node outside the Effect runtime.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeEvents from "node:events";
@@ -155,7 +155,7 @@ export function resolveServerCommand(env: NodeJS.ProcessEnv = process.env): {
   cwd: string;
 } {
   const configured = env.TR3X_NODE_BIN?.trim();
-  const node = configured || (process.versions.bun === undefined ? process.execPath : "node");
+  const node = configured || process.execPath;
   return {
     command: node,
     args: [NodePath.join(SERVER_APP_DIR, "src", "bin.ts")],
