@@ -135,6 +135,36 @@ describe("createRexWindowRegistry", () => {
   });
 });
 
+describe("createRexWindowRegistry concurrency", () => {
+  it("opens one tab when the same thread is opened twice at once", async () => {
+    const windows = new Set<string>();
+    const client = createRexClient(context, async (_bin, args) =>
+      args[1] === "ls"
+        ? JSON.stringify({ windows: [...windows].map((window_id) => ({ window_id })) })
+        : "",
+    );
+    const registry = createRexWindowRegistry(client);
+    let opened = 0;
+    const open = async () => {
+      opened += 1;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const windowId = `window:${opened}`;
+      windows.add(windowId);
+      return { windowId, blockId: `block:${opened}` };
+    };
+
+    const results = await Promise.all([
+      registry.openOrFocus("thread:a", open),
+      registry.openOrFocus("thread:a", open),
+    ]);
+    expect(opened).toBe(1);
+    expect(results).toEqual([
+      { windowId: "window:1", reused: false },
+      { windowId: "window:1", reused: true },
+    ]);
+  });
+});
+
 describe("rexTabLabel", () => {
   it("collapses whitespace and truncates long titles", () => {
     expect(rexTabLabel("  Fix\n login  ")).toBe("Fix login");

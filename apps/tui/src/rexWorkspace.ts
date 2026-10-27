@@ -161,23 +161,37 @@ export function createRexClient(context: RexContext, run: RexRunner = execRex): 
 
 /**
  * Opens a tab once per key and focuses it again on later calls. If the user
- * closed the tab, a new one is opened.
+ * closed the tab, a new one is opened. Calls for the same key run one at a
+ * time, so a double trigger focuses the tab the first call opened.
  */
 export function createRexWindowRegistry(client: RexClient) {
   const windowIdsByKey = new Map<string, string>();
+  const pendingByKey = new Map<string, Promise<unknown>>();
+
+  async function openOrFocusNow(key: string, open: () => Promise<RexWindowRef>) {
+    const known = windowIdsByKey.get(key);
+    if (known && (await client.listWindowIds()).has(known)) {
+      await client.focus(known);
+      return { windowId: known, reused: true };
+    }
+    const { windowId } = await open();
+    windowIdsByKey.set(key, windowId);
+    return { windowId, reused: false };
+  }
+
   return {
     async openOrFocus(
       key: string,
       open: () => Promise<RexWindowRef>,
     ): Promise<{ readonly windowId: string; readonly reused: boolean }> {
-      const known = windowIdsByKey.get(key);
-      if (known && (await client.listWindowIds()).has(known)) {
-        await client.focus(known);
-        return { windowId: known, reused: true };
+      const previous = pendingByKey.get(key) ?? Promise.resolve();
+      const run = previous.catch(() => undefined).then(() => openOrFocusNow(key, open));
+      pendingByKey.set(key, run);
+      try {
+        return await run;
+      } finally {
+        if (pendingByKey.get(key) === run) pendingByKey.delete(key);
       }
-      const { windowId } = await open();
-      windowIdsByKey.set(key, windowId);
-      return { windowId, reused: false };
     },
   };
 }
