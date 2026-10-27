@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off -- The TUI runs on Bun outside the Effect runtime.
 /**
  * What a key does while the composer has focus. Keys this returns null for go to the
  * textarea, which edits text as usual (Shift+Enter or Ctrl+J for a newline).

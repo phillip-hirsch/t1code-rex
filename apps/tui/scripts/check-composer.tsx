@@ -6,13 +6,13 @@
  *   bun apps/tui/scripts/check-composer.tsx
  */
 import type { KeyEvent } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import type { StartThreadTurnInput } from "@t3tools/client-runtime/state/threads";
 import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
-import { act, createRef, type RefObject } from "react";
+import { act, createRef, type RefObject, useState } from "react";
 
 import { Composer, NO_MENTION_SEARCH_SOURCE, type ComposerHandle } from "../src/composer.tsx";
+import { isEnterKey } from "../src/composerKeys.ts";
 import { UNCONFIRMED_NOTICE } from "../src/composerRecovery.ts";
 import { createComposerSend, DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
 import {
@@ -22,6 +22,7 @@ import {
 } from "../src/composerSender.ts";
 import type { ComposerSettings } from "../src/composerSettings.ts";
 import { createComposerStore, type ComposerStore } from "../src/composerStore.ts";
+import { useSyncKeyboard } from "../src/syncKeyboard.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
 
 let failures = 0;
@@ -47,14 +48,27 @@ const settings: ComposerSettings = {
 };
 const threadId = ThreadId.make("t1");
 
+/**
+ * Keys reach the composer the way ui.tsx routes them, through the app's own keyboard hook.
+ * While unfocused, Enter focuses the composer, as Enter in the thread or sidebar does.
+ */
 function Harness(props: {
   readonly composer: RefObject<ComposerHandle | null>;
-  readonly children: React.ReactNode;
+  readonly startFocused: boolean;
+  readonly children: (focused: boolean) => React.ReactNode;
 }) {
-  useKeyboard((key: KeyEvent) => {
+  const [focused, setFocused] = useState(props.startFocused);
+  useSyncKeyboard((key: KeyEvent) => {
+    if (!focused) {
+      if (isEnterKey(key.name)) {
+        setFocused(true);
+        key.preventDefault();
+      }
+      return;
+    }
     if (props.composer.current?.handleKey(key)) key.preventDefault();
   });
-  return <>{props.children}</>;
+  return <>{props.children(focused)}</>;
 }
 
 interface Mounted {
@@ -66,38 +80,41 @@ async function mountComposer(input: {
   readonly store: ComposerStore;
   readonly sender: ComposerSender;
   readonly running: boolean;
+  readonly focused?: boolean;
 }): Promise<Mounted> {
   let stops = 0;
   const composer = createRef<ComposerHandle>();
   const setup = await testRender(
-    <Harness composer={composer}>
-      <Composer
-        ref={composer}
-        target={{ kind: "thread", threadId, projectId: ProjectId.make("p") }}
-        store={input.store}
-        sender={input.sender}
-        theme={DEFAULT_TUI_THEME}
-        focused
-        baseSettings={settings}
-        modelLabel={() => "Claude Haiku 5.5"}
-        providerBadge={() => ({ icon: "✱", color: "#ffffff" })}
-        running={input.running}
-        stopRequested={false}
-        followUpBehavior={DEFAULT_FOLLOW_UP_BEHAVIOR}
-        clipboardDir="/tmp"
-        onFocus={() => undefined}
-        onStop={() => {
-          stops += 1;
-        }}
-        onExit={() => undefined}
-        onNewThread={() => undefined}
-        onOpenModelPicker={() => undefined}
-        onSetInteractionMode={() => undefined}
-        onSetRuntimeMode={() => undefined}
-        onStatus={() => undefined}
-        onClone={async () => null}
-        mentionSearch={NO_MENTION_SEARCH_SOURCE}
-      />
+    <Harness composer={composer} startFocused={input.focused ?? true}>
+      {(focused) => (
+        <Composer
+          ref={composer}
+          target={{ kind: "thread", threadId, projectId: ProjectId.make("p") }}
+          store={input.store}
+          sender={input.sender}
+          theme={DEFAULT_TUI_THEME}
+          focused={focused}
+          baseSettings={settings}
+          modelLabel={() => "Claude Haiku 5.5"}
+          providerBadge={() => ({ icon: "✱", color: "#ffffff" })}
+          running={input.running}
+          stopRequested={false}
+          followUpBehavior={DEFAULT_FOLLOW_UP_BEHAVIOR}
+          clipboardDir="/tmp"
+          onFocus={() => undefined}
+          onStop={() => {
+            stops += 1;
+          }}
+          onExit={() => undefined}
+          onNewThread={() => undefined}
+          onOpenModelPicker={() => undefined}
+          onSetInteractionMode={() => undefined}
+          onSetRuntimeMode={() => undefined}
+          onStatus={() => undefined}
+          onClone={async () => null}
+          mentionSearch={NO_MENTION_SEARCH_SOURCE}
+        />
+      )}
     </Harness>,
     { width: 70, height: 12, kittyKeyboard: true },
   );
@@ -134,40 +151,76 @@ function recordingSender(
   return { sent, order, sender };
 }
 
-/** A composer on a running thread, with text and one image, as two quick Enters find it. */
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Sends bytes as one stdin chunk, so the parser hands every key over before React renders. */
+function emitChunk(setup: Mounted["setup"], bytes: string): void {
+  act(() => {
+    setup.renderer.stdin.emit("data", Buffer.from(bytes));
+  });
+}
+
+/**
+ * A composer on a running thread, with text and one image, as two quick Enters find it:
+ * in one input chunk, then as two presses a render apart. Neither second Enter may stop
+ * the run the first one steered. As upstream, Enter on an empty composer never stops a
+ * run; Esc does.
+ */
 async function checkDoubleEnter(): Promise<void> {
   const store = createComposerStore({ initialPrefs: {}, persist: null });
-  store.setDraftText(threadId, "What color is this?");
-  store.addAttachment(threadId, {
-    id: "img-1",
-    type: "image",
-    name: "red.png",
-    mimeType: "image/png",
-    sizeBytes: 68,
-    dataUrl: "data:image/png;base64,AAAA",
-  });
+  const draft = (text: string) => {
+    store.setDraftText(threadId, text);
+    store.addAttachment(threadId, {
+      id: `img-${text}`,
+      type: "image",
+      name: "red.png",
+      mimeType: "image/png",
+      sizeBytes: 68,
+      dataUrl: "data:image/png;base64,AAAA",
+    });
+  };
+  draft("What color is this?");
   const { sent, sender } = recordingSender(store);
   const { setup, stops } = await mountComposer({ store, sender, running: true });
-  // Both Enters land before React renders again.
-  act(() => {
-    setup.mockInput.pressEnter();
-    setup.mockInput.pressEnter();
-  });
+  emitChunk(setup, "\r\r");
   await settle(setup.renderOnce);
-  check("S2: two quick Enters send one message", sent.length, 1);
-  check("S2: the message carries its image once", sent[0]?.message.attachments.length, 1);
-  check(
-    "S2: no second message, empty or not",
-    sent.filter((input) => input.message.attachments.length > 0).length,
-    1,
-  );
-  check("S2: the second Enter doesn't stop the run", stops(), 0);
-  check("S2: the composer is empty after", store.getDraft(threadId).attachments.length, 0);
+  check("S1: two Enters in one chunk send one message", sent.length, 1);
+  check("S1: the message carries its image once", sent[0]?.message.attachments.length, 1);
+  check("S1: the second Enter in the chunk doesn't stop the run", stops(), 0);
+  check("S1: the composer is empty after", store.getDraft(threadId).attachments.length, 0);
 
-  // Control: Enter on a composer that showed empty during a run still stops it.
+  // Two presses, the composer rendered empty between them.
+  act(() => draft("And this?"));
+  await settle(setup.renderOnce);
   act(() => setup.mockInput.pressEnter());
   await settle(setup.renderOnce);
-  check("S2 control: Enter on an empty composer stops the run", stops(), 1);
+  act(() => setup.mockInput.pressEnter());
+  await settle(setup.renderOnce);
+  check("S1: two quick presses send one message", sent.length, 2);
+  check("S1: the second quick press doesn't stop the run", stops(), 0);
+
+  // Enter on a composer that sat empty during a run does nothing; Esc stops it.
+  await sleep(1000);
+  act(() => setup.mockInput.pressEnter());
+  await settle(setup.renderOnce);
+  check("parity: Enter on an empty composer doesn't stop the run", stops(), 0);
+  act(() => setup.mockInput.pressEscape());
+  await settle(setup.renderOnce);
+  check("control: Esc stops the run", stops(), 1);
+  setup.renderer.destroy();
+  sender.dispose();
+}
+
+/** Enter that focuses the composer (from the thread or sidebar) and a second Enter, in one chunk. */
+async function checkFocusEnter(): Promise<void> {
+  const store = createComposerStore({ initialPrefs: {}, persist: null });
+  const { sender } = recordingSender(store);
+  const { setup, stops } = await mountComposer({ store, sender, running: true, focused: false });
+  emitChunk(setup, "\r\r");
+  await settle(setup.renderOnce);
+  check("S1: Enter, Enter from the thread doesn't stop the run", stops(), 0);
+  act(() => setup.mockInput.pressEnter());
+  await settle(setup.renderOnce);
+  check("S1: nor does a later Enter on the empty composer", stops(), 0);
   setup.renderer.destroy();
   sender.dispose();
 }
@@ -204,7 +257,7 @@ async function checkBusyEnter(): Promise<void> {
   sender.dispose();
 }
 
-/** N3: Stop holds unsent messages; Enter on the empty composer after the run stops sends them. */
+/** N3: Stop holds unsent messages; Enter leaves them held, and /resume sends them. */
 async function checkResumeHeld(): Promise<void> {
   const store = createComposerStore({ initialPrefs: {}, persist: null });
   let answerFirst: (result: ComposerCommandResult) => void = () => undefined;
@@ -236,9 +289,16 @@ async function checkResumeHeld(): Promise<void> {
     setup.captureCharFrame().includes("Held after Stop: second"),
     true,
   );
+  emitChunk(setup, "\r\r");
+  await settle(setup.renderOnce);
+  check("N3: Enter, Enter on the empty composer releases nothing", order.join(", "), "first");
+  await act(async () => {
+    await setup.mockInput.typeText("/resume");
+  });
+  await settle(setup.renderOnce);
   act(() => setup.mockInput.pressEnter());
   await settle(setup.renderOnce);
-  check("N3: Enter on the empty composer sends it", sent.at(-1)?.message.text, "second");
+  check("N3: /resume sends it", sent.at(-1)?.message.text, "second");
   check("N3: sent once", sent.filter((input) => input.message.text === "second").length, 1);
   check("N8: queue.resume goes out first", order.join(", "), "first, queue.resume, second");
   setup.renderer.destroy();
@@ -314,6 +374,7 @@ async function checkDiscardHeld(hungResume: boolean): Promise<void> {
 }
 
 await checkDoubleEnter();
+await checkFocusEnter();
 await checkBusyEnter();
 await checkResumeHeld();
 await checkRestoredNote();

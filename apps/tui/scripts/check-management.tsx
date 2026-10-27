@@ -9,7 +9,6 @@ import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import type { KeyEvent, PasteEvent } from "@opentui/core";
-import { useKeyboard, usePaste } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import {
   ProjectId,
@@ -35,6 +34,7 @@ import {
 import { ConfirmDialogView } from "../src/managementViews.tsx";
 import { resolveSidebarKey, type SidebarKeyAction } from "../src/sidebarKeys.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
+import { useSyncKeyboard, useSyncPaste } from "../src/syncKeyboard.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -58,7 +58,7 @@ const KEYS = { width: 80, height: 16, kittyKeyboard: true } as const;
 async function checkSidebarKeys(): Promise<void> {
   const actions: Array<SidebarKeyAction | null> = [];
   function Recorder() {
-    useKeyboard((key: KeyEvent) => {
+    useSyncKeyboard((key: KeyEvent) => {
       actions.push(resolveSidebarKey(key, { hasMultiSelection: false }));
     });
     return <text content="sidebar" />;
@@ -104,7 +104,7 @@ async function checkConfirmDialog(): Promise<void> {
     const [state, setState] = useState<ConfirmDialogState | null>(() =>
       openConfirm([deleteThreadsConfirm(["Fix the parser"])]),
     );
-    useKeyboard((key: KeyEvent) => {
+    useSyncKeyboard((key: KeyEvent) => {
       if (state === null) return;
       const outcome = reduceConfirmKey(state, key);
       if (outcome.type === "state") setState(outcome.state);
@@ -150,10 +150,10 @@ function Harness(props: {
   readonly routePaste?: { current: boolean };
   readonly children: ReactNode;
 }) {
-  useKeyboard((key: KeyEvent) => {
+  useSyncKeyboard((key: KeyEvent) => {
     if (props.composer.current?.handleKey(key)) key.preventDefault();
   });
-  usePaste((event: PasteEvent) => {
+  useSyncPaste((event: PasteEvent) => {
     if (props.routePaste?.current !== true) return;
     event.preventDefault();
     event.stopPropagation();

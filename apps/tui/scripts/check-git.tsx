@@ -7,7 +7,6 @@
  */
 import type { KeyEvent } from "@opentui/core";
 import { RegistryContext } from "@effect/atom-react";
-import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import {
   EMPTY_VCS_ACTION_STATE,
@@ -46,6 +45,7 @@ import {
 import { presentedThread, projectShell } from "../src/shellTestFixtures.ts";
 import type { SidebarThread } from "../src/sidebarModel.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
+import { useSyncKeyboard } from "../src/syncKeyboard.ts";
 import { routeThreadPaneKey } from "../src/threadPaneKeys.ts";
 import { resolveScrollKey } from "../src/threadScroll.ts";
 import {
@@ -360,7 +360,8 @@ function Harness() {
     harness.controls = controller;
     harness.footer = status;
   });
-  useKeyboard((key: KeyEvent) => {
+  // As the shell reads keys: each one renders before the next of the same chunk.
+  useSyncKeyboard((key: KeyEvent) => {
     if (controller.handleKey(key)) return;
     if (key.name === "w") {
       controller.toggleWorktree();
@@ -775,6 +776,21 @@ check(
   "S1: it says what to do",
   harness.footer,
   "This worktree setup can't be retried; start a new thread",
+);
+// `c` and ⏎ in one stdin chunk: the menu opens and renders before ⏎ picks its retry.
+act(() =>
+  git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main", retryable: true }),
+);
+await render();
+const beforeBurst = git.calls.length;
+act(() => {
+  setup.renderer.stdin.emit("data", Buffer.from("c\r"));
+});
+await render();
+check(
+  "S1: c then ⏎ in one chunk retries",
+  git.calls.slice(beforeBurst).join(", "),
+  `retryPreparation ${REOPENED} ${RUN}`,
 );
 act(() => git.setLaunch(REOPENED, null));
 

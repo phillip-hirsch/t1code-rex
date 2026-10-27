@@ -33,7 +33,7 @@ describe("resolveFooterStatus", () => {
   });
 
   it("keeps the held-messages note after the run ends", () => {
-    const text = "Stopping; 1 unsent message held. Enter or /resume sends, /discard edits";
+    const text = "Stopping; 1 unsent message held. /resume or ▶ sends, /discard edits";
     const notice = createStopNotice(running(STOPPED_RUN), text);
     expect(resolveFooterStatus(notice, ended(STOPPED_RUN, "interrupted"))).toBe(text);
   });

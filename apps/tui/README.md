@@ -32,8 +32,8 @@ Keys match upstream T3 Code's web app:
 
 - **Enter** sends. While a run is busy, Enter steers it, the way upstream's default "Follow-up behavior" does. **Cmd+Enter** or **Ctrl+Enter** queues the message behind the run instead. Many terminals only report Cmd or Ctrl with Enter under the kitty keyboard protocol, so **Alt+Enter** queues too. `/steer <message>` and `/queue <message>` do the same from any terminal. Set `"followUpBehavior": "queue"` in `prefs.json` to swap Enter and the alternate key, like upstream's setting.
 - **Shift+Enter** or **Ctrl+J** adds a newline.
-- **Esc** stops a run. Ctrl+C clears the text, then stops a run, then quits. Enter on an empty composer stops a busy run too.
-- After a stop, messages that hadn't gone out yet are held, like the queue the server holds. Enter on the empty composer or `/resume` sends them; `/discard` puts them back in the composer. Sending a new message releases the hold too. Either way, the server's held queue is released first, so messages go out in the order you sent them. If that release fails, the messages stay held and the composer says why. `/resume` with nothing held here just releases the server's queue.
+- **Esc** or the **■** button stops a run. Ctrl+C clears the text, then stops a run, then quits. As in upstream, Enter on an empty composer does nothing, so a doubled or stray Enter never stops a run.
+- After a stop, messages that hadn't gone out yet are held, like the queue the server holds. `/resume` or the **▶** button sends them; `/discard` puts them back in the composer. Sending a new message releases the hold too. Either way, the server's held queue is released first, so messages go out in the order you sent them. If that release fails, the messages stay held and the composer says why. `/resume` with nothing held here just releases the server's queue.
 - A message that gets no reply for 30 seconds shows as stuck. `/resume` sends it again with the same ids, so the server doesn't take it twice, and `/discard` puts it back in the composer. If it may already have been sent, the composer says so.
 - On quit, unsent messages go back into their thread's composer. A message that went out without a reply yet is saved by id; on the next launch tr3x looks for it on the thread, and if it isn't there, puts it back in the composer with a note that it may not have been sent. tr3x never sends anything again on its own. A window that can't save prefs (a Rex thread tab, or a second main window) asks you to quit again before dropping unsent messages.
 
@@ -63,13 +63,25 @@ When an agent asks for approval or asks a question, a panel shows it above the c
 - As in upstream's web app, sending a message while an approval is on screen declines that approval, then steers the run with your message. The decline waits its turn behind earlier messages, and Stop, `/discard` and quitting cover it like any unsent message. A question on screen is left alone. A request that arrives while you're typing stays out of view until you pause for 1.5 s, send or leave the composer, so that send leaves it alone.
 - After a stop, a pending approval can only be declined, to clear it.
 
+## Terminal
+
+Each thread has a terminal drawer below the composer, running shells on the server in the thread's worktree or project folder. Shells keep running while you look at another thread, and switching back shows them as you left them. After a server restart they come back with their scrollback.
+
+- **⌘J** opens the drawer and focuses it; again hides it. From another pane it focuses the open drawer.
+- In the terminal, **⌘D** splits, **⌘⇧D** splits downward, **⌘N** opens a tab, **⌘W** closes the shell. These are upstream's keybindings, so `keybindings.json` changes them. Cmd only reaches tr3x in terminals with the kitty keyboard protocol (Rex, kitty, Ghostty, WezTerm). Alt (Option) is never Cmd, so Alt+B, Alt+F, Alt+D and Alt+Backspace stay the shell's word keys.
+- On Windows and Linux, a focused terminal keeps every Ctrl+letter for the shell: Ctrl+N, Ctrl+W, Ctrl+J, Ctrl+D, Ctrl+U and the rest. Press **Ctrl+]**, then **Ctrl+K**, for the palette's Hide, Split, New tab and Close terminal. Ctrl+J opens or focuses the drawer from another pane. Ctrl+Shift+D splits downward in terminals with the kitty keyboard protocol; elsewhere it arrives as Ctrl+D. An explicit `ctrl+<letter>` binding in `keybindings.json` still applies in the terminal.
+- Keys typed while a terminal starts are sent once its shell connects. If the server rejects input, the pane says so and drops what was typed after it; typing again resumes.
+- The terminal gets every other key, Ctrl+C, Esc and Tab included. **Ctrl+]** moves focus on to the next pane; **Tab** comes back. A click focuses a pane too.
+- **Ctrl+Shift+←/→** switches terminals, **Ctrl+Shift+↑/↓** resizes the drawer (or drag its header), **Shift+PgUp/PgDn** and the mouse wheel scroll back.
+
 ## Rex
 
 When tr3x runs inside a Rex session (`REX_SESSION` is set), the command palette (`⌘K`, or `Ctrl+K`) gets a Rex section:
 
 - **Open thread in Rex tab** starts a second tr3x in a new Rex tab, focused on that thread. Running it again focuses the existing tab.
+- **Open terminal in Rex split** opens a native Rex split below tr3x, with a shell in the thread's folder.
 
-Terminal splits and diff tabs return with the orchestration v2 port (see `docs/rex-parity-plan.md`).
+Diff tabs return with the orchestration v2 port (see `docs/rex-parity-plan.md`).
 
 Thread tabs connect to the server of the window that opened them, so they need that window to stay open. They read your prefs but don't save them. Set `TR3X_REX_BIN` if `rex` isn't on your `PATH`.
 

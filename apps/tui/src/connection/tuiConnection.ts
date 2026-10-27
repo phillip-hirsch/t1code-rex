@@ -23,6 +23,7 @@ import {
   type VcsActionState,
 } from "@t3tools/client-runtime/state/vcs";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
+import { createTerminalEnvironmentAtoms } from "@t3tools/client-runtime/state/terminal";
 import {
   ShellSnapshotLoader,
   createEnvironmentShellAtoms,
@@ -283,6 +284,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
   const filesystem = createFilesystemEnvironmentAtoms(runtime);
   const shellCommands = createShellEnvironmentAtoms(runtime);
   const orchestration = createOrchestrationEnvironmentAtoms(runtime);
+  const terminals = createTerminalEnvironmentAtoms(runtime);
   const archivedShellSnapshotAtom = orchestration.archivedShellSnapshot({
     environmentId,
     input: {},
@@ -496,6 +498,8 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     updateServerSettings: (patch: ServerSettingsPatch) =>
       runAction(server.updateSettings, { patch }),
     retryNow: catalog.retryNow,
+    /** Upstream's terminal atoms: attach, write, resize and close server-side shells. */
+    terminals,
     dispose: () => {
       registry.dispose();
       options.session.stop();
