@@ -143,7 +143,68 @@ describe("startManagedServer", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
-  it("exchanges the bearer once per server generation and again after a restart", async () => {
+  it("keeps the bearer across a restart while the server accepts it, so Rex tabs stay signed in", async () => {
+    vi.useFakeTimers();
+    const { children, spawnImpl } = fakeSpawn();
+    const exchangeBearerToken = vi.fn(async ({ credential }: { credential: string }) => {
+      return `bearer:${credential}`;
+    });
+    let accepted = true;
+    const isBearerAccepted = vi.fn(async () => accepted);
+    let tokenIndex = 0;
+    const server = await startManagedServer(
+      { baseDir: "/tmp/.t1", port: 43114, restartDelayMs: 25 },
+      {
+        spawnImpl,
+        waitUntilReady: ready,
+        randomToken: () => `token-${(tokenIndex += 1)}`,
+        exchangeBearerToken,
+        isBearerAccepted,
+        env: {},
+      },
+    );
+    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
+
+    children[0]!.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
+    expect(exchangeBearerToken).toHaveBeenCalledTimes(1);
+
+    // A failed check while the new server boots keeps the bearer and retries.
+    children[1]!.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(25);
+    isBearerAccepted.mockRejectedValueOnce(new Error("connection refused"));
+    await expect(server.getBearerToken()).rejects.toThrow("connection refused");
+    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
+    expect(exchangeBearerToken).toHaveBeenCalledTimes(1);
+
+    accepted = false;
+    children[2]!.emit("exit", 1, null);
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(server.getBearerToken()).resolves.toBe("bearer:token-4");
+    expect(exchangeBearerToken).toHaveBeenCalledTimes(2);
+    server.stop();
+  });
+
+  it("stops the server process when it never becomes ready", async () => {
+    vi.useFakeTimers();
+    const { children, spawnImpl } = fakeSpawn();
+    const started = startManagedServer(
+      { baseDir: "/tmp/.t1", port: 43115, restartDelayMs: 25 },
+      {
+        spawnImpl,
+        waitUntilReady: () => Promise.reject(new Error("not ready")),
+        killGraceMs: 100,
+        env: {},
+      },
+    );
+    await expect(started).rejects.toThrow("not ready");
+    expect(children[0]!.kill).toHaveBeenCalledWith("SIGTERM");
+    await vi.advanceTimersByTimeAsync(100);
+    expect(children[0]!.kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("exchanges the bearer once per server generation and again after a restart it rejects", async () => {
     vi.useFakeTimers();
     const { children, calls, spawnImpl } = fakeSpawn();
     const exchangeBearerToken = vi.fn(async ({ credential }: { credential: string }) => {
@@ -158,6 +219,7 @@ describe("startManagedServer", () => {
         waitUntilReady: ready,
         randomToken: () => `token-${(tokenIndex += 1)}`,
         exchangeBearerToken,
+        isBearerAccepted: async () => false,
         env: {},
       },
     );

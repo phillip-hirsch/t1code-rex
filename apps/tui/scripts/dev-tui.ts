@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
 import { currentTuiHost, resolveTuiPaths } from "../src/config.ts";
-import { startManagedServer } from "../src/serverLauncher.ts";
+import { type ManagedServer, startManagedServer } from "../src/serverLauncher.ts";
 
 /**
  * Starts one T3 Code server on T1Code's data directory and runs the TUI under
@@ -39,8 +39,34 @@ const log = (event: string, details?: Record<string, unknown>) => {
   );
 };
 
+let shuttingDown = false;
+let server: ManagedServer | null = null;
+let tui: NodeChildProcess.ChildProcess | null = null;
+
+function terminateChild(
+  child: NodeChildProcess.ChildProcess | null | undefined,
+  signal: NodeJS.Signals = "SIGTERM",
+) {
+  if (!child || child.exitCode !== null || child.killed) return;
+  child.kill(signal);
+}
+
+// Safe to call before the server or TUI exist, e.g. when the data dir is owned (exit 78).
+function shutdown(signal?: NodeJS.Signals, exitCode = 0) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  terminateChild(tui, signal);
+  server?.stop();
+  process.exitCode = exitCode;
+  setTimeout(() => {
+    terminateChild(tui, "SIGKILL");
+    terminateChild(server?.process, "SIGKILL");
+    process.exit(process.exitCode ?? exitCode);
+  }, 1_500).unref();
+}
+
 const configuredPort = process.env.T1CODE_PORT?.trim();
-const server = await startManagedServer({
+const managed = await startManagedServer({
   baseDir: paths.homeDir,
   cwd: process.cwd(),
   ...(process.env.T1CODE_HOST?.trim() ? { host: process.env.T1CODE_HOST.trim() } : {}),
@@ -50,46 +76,34 @@ const server = await startManagedServer({
     process.stderr.write(`${message}\n`);
     shutdown(undefined, 1);
   },
+}).catch((error: unknown): Promise<never> => {
+  // onFatal has already reported a state-dir conflict; report anything else once.
+  if (!shuttingDown) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  }
+  shutdown(undefined, 1);
+  return new Promise<never>(() => {});
 });
-const bearerToken = await server.getBearerToken();
+server = managed;
+const bearerToken = await managed.getBearerToken();
 process.stderr.write(
-  `T1Code dev server ${server.environment.serverVersion} at ${server.httpBaseUrl} (logs: ${paths.logPath})\n`,
+  `T1Code dev server ${managed.environment.serverVersion} at ${managed.httpBaseUrl} (logs: ${paths.logPath})\n`,
 );
 
-const tui = NodeChildProcess.spawn("bun", ["--silent", "--watch", "run", TUI_ENTRY], {
+tui = NodeChildProcess.spawn("bun", ["--silent", "--watch", "run", TUI_ENTRY], {
   cwd: REPO_ROOT,
   env: {
     ...stripReservedLaunchEnv(process.env),
     T1CODE_HOME: paths.homeDir,
     T1CODE_CONFIG_HOME: paths.configHomeDir,
     T1CODE_STATE_HOME: paths.stateHomeDir,
-    T1CODE_HOST: server.host,
-    T1CODE_PORT: String(server.port),
+    T1CODE_HOST: managed.host,
+    T1CODE_PORT: String(managed.port),
     T1CODE_AUTH_TOKEN: bearerToken,
     T1CODE_TUI_ATTACH_ONLY: "1",
   },
   stdio: "inherit",
 });
-
-let shuttingDown = false;
-
-function terminateChild(child: NodeChildProcess.ChildProcess, signal: NodeJS.Signals = "SIGTERM") {
-  if (child.exitCode !== null || child.killed) return;
-  child.kill(signal);
-}
-
-function shutdown(signal?: NodeJS.Signals, exitCode = 0) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  terminateChild(tui, signal);
-  server.stop();
-  process.exitCode = exitCode;
-  setTimeout(() => {
-    terminateChild(tui, "SIGKILL");
-    terminateChild(server.process, "SIGKILL");
-    process.exit(process.exitCode ?? exitCode);
-  }, 1_500).unref();
-}
 
 process.on("SIGINT", () => shutdown("SIGINT"));
 process.on("SIGTERM", () => shutdown("SIGTERM"));

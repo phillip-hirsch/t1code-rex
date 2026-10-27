@@ -95,7 +95,11 @@ export interface ManagedServer extends ServerEndpoint {
   readonly host: string;
   readonly port: number;
   readonly environment: EnvironmentSummary;
-  /** Exchanges the current bootstrap credential once per server generation and caches the bearer. */
+  /**
+   * Returns a bearer for the server. Exchanges the bootstrap credential once, then
+   * keeps the same bearer across restarts while the server still accepts it,
+   * because a new exchange revokes the bearer Rex thread tabs were given.
+   */
   readonly getBearerToken: () => Promise<string>;
   readonly events: NodeEvents.EventEmitter<{
     restart: [attempt: number];
@@ -131,6 +135,11 @@ export interface ManagedServerDependencies {
     httpBaseUrl: string;
     credential: string;
   }) => Promise<string>;
+  readonly isBearerAccepted?: (input: {
+    httpBaseUrl: string;
+    bearerToken: string;
+  }) => Promise<boolean>;
+  readonly killGraceMs?: number;
 }
 
 const THIS_DIR = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
@@ -280,6 +289,23 @@ function extractFatalStartupError(output: string): string | null {
   return null;
 }
 
+async function isBearerAcceptedByServer(input: {
+  httpBaseUrl: string;
+  bearerToken: string;
+}): Promise<boolean> {
+  // Resolves false only for a definitive rejection; network errors and other
+  // statuses (e.g. 503 while booting) throw so the caller retries later.
+  const response = await fetch(new URL("/api/auth/session", input.httpBaseUrl), {
+    headers: { authorization: `Bearer ${input.bearerToken}` },
+  });
+  if (response.status === 401 || response.status === 403) return false;
+  if (!response.ok) throw new Error(`Server returned ${response.status} for the session check.`);
+  const body: unknown = await response.json();
+  return typeof body === "object" && body !== null && "authenticated" in body
+    ? body.authenticated === true
+    : false;
+}
+
 function stateDirOwnedMessage(baseDir: string): string {
   return `Another T1Code or T3 Code server already owns ${baseDir}. Stop it, or attach to it with T1CODE_TUI_ATTACH_ONLY=1.`;
 }
@@ -353,6 +379,8 @@ export async function startManagedServer(
     dependencies.randomToken ?? (() => NodeCrypto.randomBytes(32).toString("hex"));
   const waitUntilReady = dependencies.waitUntilReady ?? waitForServerReady;
   const exchangeBearerToken = dependencies.exchangeBearerToken ?? exchangeBootstrapForBearer;
+  const isBearerAccepted = dependencies.isBearerAccepted ?? isBearerAcceptedByServer;
+  const killGraceMs = dependencies.killGraceMs ?? 5_000;
   const port = options.port ?? (await reservePort());
   const host = normalizeHost(options.host);
   const endpoint = buildServerEndpoint(host, port);
@@ -379,7 +407,6 @@ export async function startManagedServer(
     fatalStartupError = null;
     generation += 1;
     bootstrapToken = randomToken();
-    bearer = null;
     const spawned = spawnImpl(command, args, {
       cwd: options.cwd ?? process.cwd(),
       env: stripReservedLaunchEnv(env),
@@ -432,6 +459,22 @@ export async function startManagedServer(
     return spawned;
   };
 
+  const stop = () => {
+    stopped = true;
+    if (restartTimer !== null) {
+      clearTimeoutImpl(restartTimer);
+      restartTimer = null;
+    }
+    const current = child;
+    if (!current || current.exitCode !== null || current.signalCode) return;
+    current.kill("SIGTERM");
+    const escalate = setTimeoutImpl(() => {
+      if (current.exitCode === null && !current.signalCode) current.kill("SIGKILL");
+    }, killGraceMs);
+    escalate.unref?.();
+    current.once("exit", () => clearTimeoutImpl(escalate));
+  };
+
   const first = spawnChild();
   let environment: EnvironmentSummary;
   try {
@@ -441,35 +484,39 @@ export async function startManagedServer(
       process: first,
     });
   } catch (error) {
-    stopped = true;
+    // Don't leave a slow server running and holding the data directory.
+    stop();
     if (fatalStartupError) throw new Error(fatalStartupError, { cause: error });
     throw error;
   }
   ready = true;
   options.onLog?.("server.ready", { host, port, serverVersion: environment.serverVersion });
 
-  const getBearerToken = () => {
-    if (bearer === null || bearer.generation !== generation) {
-      const current = generation;
-      const token = exchangeBearerToken({
-        httpBaseUrl: endpoint.httpBaseUrl,
-        credential: bootstrapToken,
-      }).catch((error: unknown) => {
-        if (bearer?.generation === current) bearer = null;
-        throw error;
-      });
-      bearer = { generation: current, token };
-    }
-    return bearer.token;
-  };
+  const exchange = () =>
+    exchangeBearerToken({ httpBaseUrl: endpoint.httpBaseUrl, credential: bootstrapToken });
 
-  const stop = () => {
-    stopped = true;
-    if (restartTimer !== null) {
-      clearTimeoutImpl(restartTimer);
-      restartTimer = null;
-    }
-    if (child && !child.killed) child.kill("SIGTERM");
+  const getBearerToken = () => {
+    if (bearer !== null && bearer.generation === generation) return bearer.token;
+    const current = generation;
+    const previousEntry = bearer;
+    // Exchange again only when the server definitively rejects the old bearer. A
+    // network error while the new server boots must not trigger an exchange, or
+    // it would revoke the bearer that Rex thread tabs share.
+    const token = (
+      previousEntry
+        ? previousEntry.token.then(async (bearerToken) =>
+            (await isBearerAccepted({ httpBaseUrl: endpoint.httpBaseUrl, bearerToken }))
+              ? bearerToken
+              : exchange(),
+          )
+        : exchange()
+    ).catch((error: unknown) => {
+      // Let the next call try again from the same state.
+      if (bearer?.generation === current) bearer = previousEntry;
+      throw error;
+    });
+    bearer = { generation: current, token };
+    return token;
   };
 
   return {
