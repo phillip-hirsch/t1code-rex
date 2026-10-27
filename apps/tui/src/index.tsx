@@ -14,6 +14,7 @@ import {
   shouldTrackSystemThemeMode,
 } from "./rendererTheme";
 import { normalizeTuiThemeId, resolveTerminalThemeMode, resolveTuiTheme } from "./theme";
+import { consumeThreadWindowLaunch } from "./threadWindowLaunch";
 import { App } from "./ui";
 
 function readBooleanEnv(value: string | undefined): boolean | undefined {
@@ -77,6 +78,13 @@ if (process.env.T1CODE_HEADLESS === "1") {
 } else {
   let shuttingDown = false;
   let interruptRequestToken = 0;
+  let threadWindowLaunch: ReturnType<typeof consumeThreadWindowLaunch>;
+  try {
+    threadWindowLaunch = consumeThreadWindowLaunch();
+  } catch (error) {
+    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    process.exit(1);
+  }
   const paths = resolveTuiPaths();
   const prefs = await readPrefs(paths);
   const appTheme = prefs.appSettings?.theme ?? DEFAULT_APP_THEME;
@@ -115,6 +123,7 @@ if (process.env.T1CODE_HEADLESS === "1") {
         initialTuiThemeId={tuiThemeId}
         initialSystemThemeMode={initialSystemThemeMode}
         initialTerminalThemeColors={detectedTerminalPalette.colors}
+        threadWindowLaunch={threadWindowLaunch}
         {...(prefs.appSettings ? { initialAppSettings: prefs.appSettings } : {})}
       />,
     );

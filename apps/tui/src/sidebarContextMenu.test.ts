@@ -27,6 +27,14 @@ describe("sidebarContextMenu", () => {
     ]);
   });
 
+  it("offers opening a thread in a Rex tab only inside Rex", () => {
+    expect(buildThreadContextMenuItems({ rex: true })[0]).toEqual({
+      id: "open-rex-tab",
+      label: "Open in Rex Tab",
+    });
+    expect(buildThreadContextMenuItems().map((item) => item.id)).not.toContain("open-rex-tab");
+  });
+
   it("builds archived thread context menu items", () => {
     expect(buildThreadContextMenuItems({ archived: true })).toContainEqual({
       id: "unarchive",
