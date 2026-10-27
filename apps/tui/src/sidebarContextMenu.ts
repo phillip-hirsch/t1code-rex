@@ -2,6 +2,7 @@ import type { OrchestrationReadModel } from "@t3tools/contracts";
 
 export type SidebarContextMenuActionId =
   | "rename"
+  | "open-rex-tab"
   | "mark-unread"
   | "open-editor"
   | "open-folder"
@@ -31,9 +32,10 @@ export type ProjectRemovalConfirmStep = {
 type ThreadReadModel = OrchestrationReadModel["threads"][number];
 
 export function buildThreadContextMenuItems(
-  input: { archived?: boolean } = {},
+  input: { archived?: boolean; rex?: boolean } = {},
 ): readonly SidebarContextMenuItem[] {
   return [
+    ...(input.rex === true ? [{ id: "open-rex-tab" as const, label: "Open in Rex Tab" }] : []),
     { id: "rename", label: "Rename thread" },
     { id: "mark-unread", label: "Mark unread" },
     { id: "open-editor", label: "Open in Editor" },

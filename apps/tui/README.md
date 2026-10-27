@@ -23,6 +23,16 @@ Linux notes:
 - Bundled server and web client for local use
 - Codex-first workflow tuned for terminal usage
 
+## Rex
+
+When T1Code runs inside a Rex session (`REX_SESSION` is set), the command palette gets a Rex section and the thread menu gets **Open in Rex Tab**:
+
+- **Open thread in Rex tab** starts a second T1Code in a new Rex tab, focused on that thread. Running it again focuses the existing tab.
+- **Open terminal in Rex split** opens a shell below T1Code in the thread's worktree or project folder.
+- **Open diff in Rex tab** runs `git diff HEAD` for the thread's worktree or project folder.
+
+Thread tabs connect to the server of the window that opened them, so they need that window to stay open. They read your prefs but don't save them. Set `T1CODE_REX_BIN` if `rex` isn't on your `PATH`.
+
 ## Source
 
 - Repo: https://github.com/maria-rcks/t1code
