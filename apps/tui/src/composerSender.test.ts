@@ -164,6 +164,7 @@ function recovery(
   const asked: Array<string> = [];
   const timers: Array<() => void> = [];
   const orphaned: Array<string> = [];
+  const moved: Array<string> = [];
   let minted = 0;
   const stop = checkUnconfirmedSends({
     store,
@@ -180,13 +181,14 @@ function recovery(
       timers.push(run);
       return () => timers.splice(timers.indexOf(run), 1);
     },
+    onMoved: (record, projectId) => moved.push(`${record.text} -> ${projectId}`),
     onOrphaned: (record) => orphaned.push(record.text),
   });
   const retry = async () => {
     for (const run of timers.splice(0)) run();
     await settle();
   };
-  return { asked, timers, orphaned, stop, retry };
+  return { asked, timers, orphaned, moved, stop, retry };
 }
 
 const startTurns = (calls: ReturnType<typeof setup>["calls"]) =>
@@ -882,8 +884,9 @@ describe("composer sender, Sol audit round 4", () => {
   it("N12: a deleted thread's message goes into a new-thread draft in its project, in one write", async () => {
     const prefs = quitPrefs();
     const store = savingStore(prefs);
-    recovery(store, { t1: history([], { deleted: true }) });
+    const check = recovery(store, { t1: history([], { deleted: true }) });
     await settle();
+    expect(check.moved).toEqual(["hello -> p"]);
     expect(prefs.writes).toBe(1);
     expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
     expect(prefs.current.draftThreadsByProjectId?.p?.id).toBe("minted-1");

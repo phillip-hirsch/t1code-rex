@@ -77,6 +77,8 @@ export function checkUnconfirmedSends(options: {
   readonly projectExists: (projectId: ProjectId) => boolean | null;
   readonly mintThreadId: () => ThreadId;
   readonly schedule: (run: () => void, delayMs: number) => () => void;
+  /** A record whose thread is gone, now in its project's new-thread draft. */
+  readonly onMoved?: (record: UnconfirmedComposerSend, projectId: ProjectId) => void;
   /** A record whose thread and project are gone; it stays saved for /recover. */
   readonly onOrphaned?: (record: UnconfirmedComposerSend) => void;
 }): () => void {
@@ -102,6 +104,7 @@ export function checkUnconfirmedSends(options: {
       store.restoreDraft(draft.threadId, record, UNCONFIRMED_NOTICE);
     }
     store.flush();
+    if (outcome.kind === "restore-in-project") options.onMoved?.(record, outcome.projectId);
   };
 
   const check = (record: UnconfirmedComposerSend, attempt: number) => {

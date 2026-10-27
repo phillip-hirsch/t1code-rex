@@ -394,6 +394,14 @@ function Shell(props: AppProps) {
           const timer = setTimeout(run, delayMs);
           return () => clearTimeout(timer);
         },
+        onMoved: (_record, projectId) => {
+          const project = connection.registry
+            .get(connection.projectsAtom)
+            .find((entry) => entry.id === projectId);
+          setStatus(
+            `An unsent message's thread is gone; it's in a new thread in ${project?.title ?? "its project"}`,
+          );
+        },
         onOrphaned: () =>
           setStatus("An unsent message's thread and project are gone; /recover restores it"),
       }),
