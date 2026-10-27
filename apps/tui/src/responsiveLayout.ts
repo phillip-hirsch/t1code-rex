@@ -62,3 +62,34 @@ export function resolveTuiResponsiveLayout(input: {
       showComposerModeLabels || showComposerModelLabel || showComposerTraitsLabel,
   };
 }
+
+export type SidebarToggleState = Readonly<{
+  collapsedPreference: boolean;
+  overlayOpen: boolean;
+  /** Where focus goes after the toggle. */
+  focus: "sidebar" | "thread";
+}>;
+
+/**
+ * Ctrl+B. Where docking fits, it hides the docked sidebar or re-docks a hidden one, clearing
+ * the collapse preference so a later widen keeps it docked. Only at forced-collapse widths
+ * does it open or close the overlay. Returns null when there is nothing to toggle.
+ */
+export function toggleSidebarState(
+  layout: Pick<TuiResponsiveLayout, "sidebarForcedCollapsed" | "showSidebar" | "showSidebarToggle">,
+  state: Pick<SidebarToggleState, "collapsedPreference" | "overlayOpen">,
+): SidebarToggleState | null {
+  if (layout.sidebarForcedCollapsed) {
+    const overlayOpen = !state.overlayOpen;
+    return {
+      collapsedPreference: state.collapsedPreference,
+      overlayOpen,
+      focus: overlayOpen ? "sidebar" : "thread",
+    };
+  }
+  if (!layout.showSidebar) {
+    return { collapsedPreference: false, overlayOpen: false, focus: "sidebar" };
+  }
+  if (!layout.showSidebarToggle) return null;
+  return { collapsedPreference: true, overlayOpen: false, focus: "thread" };
+}

@@ -6,6 +6,7 @@ import {
   buildSidebarGroups,
   buildSidebarRows,
   isSidebarThread,
+  shareSidebarRows,
   visibleThreads,
 } from "./sidebarModel.ts";
 
@@ -175,5 +176,50 @@ describe("buildSidebarRows edge cases", () => {
       "thread:e1",
       "thread:e2",
     ]);
+  });
+});
+
+describe("shareSidebarRows", () => {
+  const many = Array.from({ length: 5 }, (_, index) =>
+    thread(`t${index}`, "alpha", `2026-06-0${9 - index}T00:00:00.000Z`),
+  );
+  const groups = buildSidebarGroups({
+    projects: [alpha, beta],
+    threads: many,
+    projectSortOrder: "manual",
+    threadSortOrder: "updated_at",
+  });
+  const build = (activeThreadId: string | null, showAll = false) =>
+    buildSidebarRows({
+      groups,
+      expandedProjectIds: new Set(["alpha"]),
+      showAllProjectIds: new Set(showAll ? ["alpha"] : []),
+      previewCount: 3,
+      activeThreadId,
+    });
+
+  it("returns the previous list when a rebuild repeats it", () => {
+    const previous = build(null);
+    expect(shareSidebarRows(previous, build("t1"))).toBe(previous);
+  });
+
+  it("keeps unchanged rows and swaps only the ones that changed", () => {
+    const previous = build(null);
+    // The selected t4 sorts past the preview, so it joins the list and the more row shrinks.
+    const shared = shareSidebarRows(previous, build("t4"));
+    expect(shared.map((row) => row.key)).toEqual([
+      "project:alpha",
+      "thread:t0",
+      "thread:t1",
+      "thread:t2",
+      "thread:t4",
+      "more:alpha",
+      "project:beta",
+    ]);
+    expect(shared.slice(0, 4)).toEqual(previous.slice(0, 4));
+    for (let index = 0; index < 4; index += 1) expect(shared[index]).toBe(previous[index]);
+    expect(shared[6]).toBe(previous[5]);
+    expect(shared[5]).not.toBe(previous[4]);
+    expect(shared[5]).toMatchObject({ kind: "more", hiddenCount: 1 });
   });
 });

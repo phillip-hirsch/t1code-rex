@@ -20,7 +20,11 @@ import type { TuiPaths } from "./config.ts";
 import type { TuiConnection } from "./connection/tuiConnection.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
-import { resolveTuiResponsiveLayout, TUI_SIDEBAR_WIDTH } from "./responsiveLayout.ts";
+import {
+  resolveTuiResponsiveLayout,
+  toggleSidebarState,
+  TUI_SIDEBAR_WIDTH,
+} from "./responsiveLayout.ts";
 import {
   createRexClient,
   createRexWindowRegistry,
@@ -58,11 +62,16 @@ export interface AppProps {
   readonly initialPrefs: TuiPrefs;
   /** Null in Rex thread tabs, which never write prefs.json. */
   readonly prefsWriter: PrefsWriter | null;
+  /** A main window that found prefs.json locked by another one; it says it won't save. */
+  readonly prefsLockedOut?: boolean;
   readonly cwd: string;
   readonly interruptRequestToken?: number;
   readonly onRequestExit?: () => void;
   readonly threadWindowLaunch?: ThreadWindowLaunch | null;
 }
+
+/** Footer note in a main window that another window's prefs lock keeps from saving. */
+const PREFS_LOCKED_OUT_NOTE = "prefs not saved here";
 
 interface PaletteAction {
   readonly id: string;
@@ -458,18 +467,17 @@ function Shell(props: AppProps) {
     [runTask],
   );
 
-  const toggleSidebar = useCallback(() => {
+  const toggleSidebar = () => {
     setContextMenu(null);
-    if (!layout.showSidebar) {
-      const next = !sidebarOverlayOpen;
-      setSidebarOverlayOpen(next);
-      setFocusArea(next ? "sidebar" : "thread");
-      return;
-    }
-    if (!layout.showSidebarToggle) return;
-    setSidebarCollapsedPreference(true);
-    setFocusArea("thread");
-  }, [layout.showSidebar, layout.showSidebarToggle, sidebarOverlayOpen]);
+    const next = toggleSidebarState(layout, {
+      collapsedPreference: sidebarCollapsedPreference,
+      overlayOpen: sidebarOverlayOpen,
+    });
+    if (next === null) return;
+    setSidebarCollapsedPreference(next.collapsedPreference);
+    setSidebarOverlayOpen(next.overlayOpen);
+    setFocusArea(next.focus);
+  };
 
   // Re-showing the sidebar after a widen keeps it docked instead of as an overlay.
   const wasDocked = useRef(layout.showSidebar);
@@ -683,6 +691,14 @@ function Shell(props: AppProps) {
       >
         <text wrapMode="none" truncate content={footerHints} style={{ fg: palette.subtle }} />
         <box style={{ flexGrow: 1 }} />
+        {props.prefsLockedOut ? (
+          <text
+            wrapMode="none"
+            content={status ? `  ${PREFS_LOCKED_OUT_NOTE}  ·  ` : `  ${PREFS_LOCKED_OUT_NOTE}`}
+            // The hints truncate first, so the note always shows whole.
+            style={{ fg: palette.subtle, flexShrink: 0 }}
+          />
+        ) : null}
         {status ? (
           <text wrapMode="none" truncate content={status} style={{ fg: palette.muted }} />
         ) : null}

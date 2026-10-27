@@ -50,6 +50,8 @@
     "@t3tools/shared": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "^19.0.0",
+    "@types/react-test-renderer": "^19.3.0",
+    "react-test-renderer": "19.3.0",
     "typescript": "catalog:"
   },
   "optionalDependencies": {

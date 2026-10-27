@@ -156,3 +156,33 @@ export function buildSidebarRows(input: {
   }
   return rows;
 }
+
+function sameRow(left: SidebarRow, right: SidebarRow): boolean {
+  if (left.kind !== right.kind || left.key !== right.key || left.projectId !== right.projectId) {
+    return false;
+  }
+  if (left.kind === "thread" && right.kind === "thread") return left.threadId === right.threadId;
+  if (left.kind === "more" && right.kind === "more") return left.hiddenCount === right.hiddenCount;
+  return true;
+}
+
+/**
+ * Reuses `previous` row objects that `next` repeats, keyed by row key, so memoized rows
+ * skip re-rendering when the list is rebuilt. Returns `previous` itself when nothing
+ * changed. O(n).
+ */
+export function shareSidebarRows(
+  previous: ReadonlyArray<SidebarRow>,
+  next: ReadonlyArray<SidebarRow>,
+): ReadonlyArray<SidebarRow> {
+  if (previous === next) return next;
+  const previousByKey = new Map(previous.map((row) => [row.key, row]));
+  let unchanged = previous.length === next.length;
+  const shared = next.map((row, index) => {
+    const old = previousByKey.get(row.key);
+    const reused = old !== undefined && sameRow(old, row) ? old : row;
+    if (reused !== previous[index]) unchanged = false;
+    return reused;
+  });
+  return unchanged ? previous : shared;
+}

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   capThreadVisits,
   clearThreadUnread,
+  MAX_TRACKED_VISITS,
   markThreadUnread,
   recordThreadVisit,
 } from "./threadVisits.ts";
@@ -29,6 +30,29 @@ describe("recordThreadVisit", () => {
 });
 
 describe("capThreadVisits", () => {
+  it("keeps the given thread even when its visit is the oldest", () => {
+    const visits = {
+      a: "2026-06-03T00:00:00.000Z",
+      b: "2026-06-02T00:00:00.000Z",
+      old: "2026-06-01T00:00:00.000Z",
+    };
+    expect(capThreadVisits(visits, 2, "old")).toEqual({
+      a: "2026-06-03T00:00:00.000Z",
+      old: "2026-06-01T00:00:00.000Z",
+    });
+  });
+
+  it("records an old run into a full cache once, then returns the same object", () => {
+    const full: Record<string, string> = {};
+    for (let index = 0; index < MAX_TRACKED_VISITS; index += 1) {
+      full[`newer-${index}`] = "2026-06-21T00:00:00.000Z";
+    }
+    const recorded = recordThreadVisit(full, "old", finishedRun);
+    expect(recorded.old).toBe(finishedRun.completedAt);
+    expect(Object.keys(recorded)).toHaveLength(MAX_TRACKED_VISITS);
+    expect(recordThreadVisit(recorded, "old", finishedRun)).toBe(recorded);
+  });
+
   it("drops the oldest visits past the limit", () => {
     const visits = {
       a: "2026-06-01T00:00:00.000Z",

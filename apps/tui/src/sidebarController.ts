@@ -1,15 +1,16 @@
 import type { KeyEvent } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from "@t3tools/client-core";
-import type { OrchestrationProjectShell } from "@t3tools/contracts";
+import type { OrchestrationProjectShell, OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
+import type { Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import type { TuiConnection } from "./connection/tuiConnection.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
 import {
   buildSidebarGroups,
   buildSidebarRows,
   projectRowKey,
+  shareSidebarRows,
   threadRowKey,
   type SidebarRow,
   type SidebarThread,
@@ -25,7 +26,7 @@ import {
   collapseProject,
   ensureProjectExpanded,
   pruneExpandedProjects,
-  resolveProjectExpansionOnRowPress,
+  toggleProjectExpanded,
 } from "./sidebarProjects.ts";
 import {
   resolveProjectStatus,
@@ -40,8 +41,16 @@ import {
   type ThreadVisits,
 } from "./threadVisits.ts";
 
+/** The shell atoms the sidebar reads; the TUI connection provides them. */
+export interface SidebarShellSource {
+  readonly projectsAtom: Atom.Atom<ReadonlyArray<OrchestrationProjectShell>>;
+  readonly threadShellsAtom: Atom.Atom<ReadonlyArray<SidebarThread>>;
+  readonly hasShellSnapshotAtom: Atom.Atom<boolean>;
+  readonly olderSettledAtom: Atom.Atom<OrchestrationV2ShellSnapshot["olderSettled"]>;
+}
+
 export interface SidebarControllerOptions {
-  readonly connection: TuiConnection;
+  readonly connection: SidebarShellSource;
   readonly initialPrefs: TuiPrefs;
   /** Only the main window saves prefs; Rex thread tabs share the file read-only. */
   readonly prefsWriter: PrefsWriter | null;
@@ -95,7 +104,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
       }),
     [projects, threads, settings],
   );
-  const rows = useMemo(
+  const builtRows = useMemo(
     () =>
       buildSidebarRows({
         groups,
@@ -106,6 +115,14 @@ export function useSidebarController(options: SidebarControllerOptions) {
       }),
     [groups, expandedProjectIds, showAllProjectIds, settings, selection.threadId],
   );
+  // Rebuilt rows reuse the previous objects they repeat, so a selection change or shell
+  // update re-renders only the rows it touches.
+  const [sharedRows, setSharedRows] = useState({ built: builtRows, rows: builtRows });
+  let rows = sharedRows.rows;
+  if (sharedRows.built !== builtRows) {
+    rows = shareSidebarRows(sharedRows.rows, builtRows);
+    setSharedRows({ built: builtRows, rows });
+  }
   const projectsById = useMemo(
     () => new Map<string, OrchestrationProjectShell>(projects.map((p) => [p.id, p])),
     [projects],
@@ -153,6 +170,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
 
   const activeThread =
     selection.threadId === null ? null : (threadsById.get(selection.threadId) ?? null);
+  const activeProjectId = activeThread?.projectId ?? selection.projectId;
 
   // Adjustments made while rendering, so a shell change costs one render rather than an
   // effect's second pass: restore the start selection once the first snapshot lands, keep
@@ -197,6 +215,9 @@ export function useSidebarController(options: SidebarControllerOptions) {
   }
 
   const cursorKey = resolveCursorKey(rows, storedCursorKey, selection);
+  // When the cursor's row disappears, the cursor goes back to following the selection, so
+  // the row returning later (an unarchive) doesn't pull it away from the open thread.
+  if (storedCursorKey !== null && cursorKey !== storedCursorKey) setCursorKey(null);
   const cursorRow = rows.find((row) => row.key === cursorKey) ?? null;
 
   useEffect(() => {
@@ -210,10 +231,12 @@ export function useSidebarController(options: SidebarControllerOptions) {
     });
   }, [expandedProjectIds, initialized, prefsWriter, selection, unread, visits]);
 
+  /** Every explicit open (click, Enter, or landing on the row) clears its unread mark. */
   const selectThread = useCallback((projectId: string, threadId: string) => {
     setSelection({ projectId, threadId });
     setCursorKey(threadRowKey(threadId));
     setExpandedProjectIds((current) => ensureProjectExpanded(current, projectId));
+    setUnread((current) => clearThreadUnread(current, threadId));
   }, []);
 
   const toggleShowAll = useCallback((projectId: string) => {
@@ -227,50 +250,37 @@ export function useSidebarController(options: SidebarControllerOptions) {
   /** Moves the cursor without selecting, as a right-click does before its menu opens. */
   const focusRow = useCallback((row: SidebarRow) => setCursorKey(row.key), []);
 
-  /** Mouse presses: the row under the pointer becomes the cursor. */
+  /**
+   * Mouse presses: the row under the pointer becomes the cursor. A project row only folds
+   * or unfolds; the selection is always a thread and its own project.
+   */
   const pressRow = useCallback(
     (row: SidebarRow) => {
       setCursorKey(row.key);
       if (row.kind === "thread") {
         selectThread(row.projectId, row.threadId);
       } else if (row.kind === "project") {
-        setSelection((current) =>
-          current.projectId === row.projectId ? current : { ...current, projectId: row.projectId },
-        );
-        setExpandedProjectIds((current) =>
-          resolveProjectExpansionOnRowPress({
-            expandedProjectIds: current,
-            projectId: row.projectId,
-            isProjectActive: selection.projectId === row.projectId,
-          }),
-        );
+        setExpandedProjectIds((current) => toggleProjectExpanded(current, row.projectId));
       } else {
         toggleShowAll(row.projectId);
       }
     },
-    [selectThread, selection.projectId, toggleShowAll],
+    [selectThread, toggleShowAll],
   );
 
   /**
-   * Arrow keys (or j/k/h/l) walk the tree. Landing on a thread opens it, as before;
-   * Enter opens a thread or toggles a project. Returns "open" when the caller should move
+   * Arrow keys (or j/k/h/l) walk the tree. Landing on a thread opens it, as before; landing
+   * on a project only moves the cursor. Enter opens a thread or toggles a project. Returns "open" when the caller should move
    * focus to the thread view.
    */
   const handleKey = useCallback(
-    (key: KeyEvent): "handled" | "open" | null => {
+    (key: Pick<KeyEvent, "name">): "handled" | "open" | null => {
       const name = key.name;
       if (name === "up" || name === "down" || name === "k" || name === "j") {
         const next = moveCursor(rows, cursorKey, name === "up" || name === "k" ? -1 : 1);
         if (next === null) return "handled";
         setCursorKey(next.key);
         if (next.kind === "thread") selectThread(next.projectId, next.threadId);
-        else if (next.kind === "project") {
-          setSelection((current) =>
-            current.projectId === next.projectId
-              ? current
-              : { ...current, projectId: next.projectId },
-          );
-        }
         return "handled";
       }
       if (name === "home" || name === "end") {
@@ -309,11 +319,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
           toggleShowAll(cursorRow.projectId);
           return "handled";
         }
-        setExpandedProjectIds((current) =>
-          current.has(cursorRow.projectId)
-            ? collapseProject(current, cursorRow.projectId)
-            : ensureProjectExpanded(current, cursorRow.projectId),
-        );
+        setExpandedProjectIds((current) => toggleProjectExpanded(current, cursorRow.projectId));
         return "handled";
       }
       return null;
@@ -344,8 +350,8 @@ export function useSidebarController(options: SidebarControllerOptions) {
     expandedProjectIds,
     selection,
     activeThread,
-    activeProject:
-      selection.projectId === null ? null : (projectsById.get(selection.projectId) ?? null),
+    // The open thread's own project, so the thread view never pairs it with another title.
+    activeProject: activeProjectId === null ? null : (projectsById.get(activeProjectId) ?? null),
     cursorKey,
     cursorRow,
     handleKey,

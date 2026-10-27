@@ -40,6 +40,8 @@ TR3X_TUI_ATTACH_ONLY=1 TR3X_HOST=127.0.0.1 TR3X_PORT=3773 \
 
 `TR3X_AUTH_TOKEN` is a bearer token, never a server bootstrap secret.
 
+Only one main window saves prefs for a config directory. The first one holds `prefs.json.lock` next to `prefs.json` until it quits. Any other main window reads prefs but doesn't save them, and its footer says "prefs not saved here". If the owner dies without quitting, the next window takes the lock over.
+
 ## Rex
 
 When tr3x runs inside a Rex session (`REX_SESSION` is set), the command palette (`⌘K`, or `Ctrl+K`) gets a Rex section:

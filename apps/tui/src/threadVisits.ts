@@ -13,7 +13,8 @@ export const MAX_TRACKED_VISITS = 500;
 /**
  * Marks the open thread seen through its latest finished run. The stored time is the run's
  * completion, a watermark rather than a clock reading, so it needs no clock and records
- * once per run.
+ * once per run. The controller calls this while rendering, so it must be idempotent: the
+ * thread just recorded survives the cap even when its run is older than every other visit.
  */
 export function recordThreadVisit(
   visits: ThreadVisits,
@@ -25,14 +26,25 @@ export function recordThreadVisit(
   if (completedAt === null || Number.isNaN(completedAtMs)) return visits;
   const visitedAtMs = Date.parse(visits[threadId] ?? "");
   if (!Number.isNaN(visitedAtMs) && visitedAtMs >= completedAtMs) return visits;
-  return capThreadVisits({ ...visits, [threadId]: completedAt });
+  return capThreadVisits({ ...visits, [threadId]: completedAt }, MAX_TRACKED_VISITS, threadId);
 }
 
-export function capThreadVisits(visits: ThreadVisits, max = MAX_TRACKED_VISITS): ThreadVisits {
+/** Drops the oldest visits past `max`, always keeping `keepThreadId`'s. */
+export function capThreadVisits(
+  visits: ThreadVisits,
+  max = MAX_TRACKED_VISITS,
+  keepThreadId?: string,
+): ThreadVisits {
   const entries = Object.entries(visits);
   if (entries.length <= max) return visits;
   return Object.fromEntries(
-    entries.toSorted((left, right) => right[1].localeCompare(left[1])).slice(0, max),
+    entries
+      .toSorted(
+        (left, right) =>
+          Number(right[0] === keepThreadId) - Number(left[0] === keepThreadId) ||
+          right[1].localeCompare(left[1]),
+      )
+      .slice(0, max),
   );
 }
 

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { TUI_SIDEBAR_WIDTH, resolveTuiResponsiveLayout } from "./responsiveLayout.ts";
+import {
+  TUI_SIDEBAR_WIDTH,
+  resolveTuiResponsiveLayout,
+  toggleSidebarState,
+} from "./responsiveLayout.ts";
 
 describe("resolveTuiResponsiveLayout", () => {
   it("keeps the full layout in wide terminals", () => {
@@ -144,5 +148,63 @@ describe("resolveTuiResponsiveLayout", () => {
         sidebarTitle: "tr3x",
       }),
     );
+  });
+});
+
+describe("toggleSidebarState", () => {
+  const press = (
+    viewportColumns: number,
+    state: { collapsedPreference: boolean; overlayOpen: boolean },
+  ) =>
+    toggleSidebarState(
+      resolveTuiResponsiveLayout({
+        viewportColumns,
+        sidebarCollapsedPreference: state.collapsedPreference,
+      }),
+      state,
+    );
+
+  it("re-docks after hiding at a narrow width and widening", () => {
+    const hidden = press(85, { collapsedPreference: false, overlayOpen: false });
+    expect(hidden).toEqual({ collapsedPreference: true, overlayOpen: false, focus: "thread" });
+
+    // Widened to 140, the sidebar is still hidden by the preference; Ctrl+B docks it.
+    const layout = resolveTuiResponsiveLayout({
+      viewportColumns: 140,
+      sidebarCollapsedPreference: true,
+    });
+    expect(layout.showSidebar).toBe(false);
+    const shown = press(140, { collapsedPreference: true, overlayOpen: false });
+    expect(shown).toEqual({ collapsedPreference: false, overlayOpen: false, focus: "sidebar" });
+    expect(
+      resolveTuiResponsiveLayout({ viewportColumns: 140, sidebarCollapsedPreference: false })
+        .showSidebar,
+    ).toBe(true);
+  });
+
+  it("re-docks at the same narrow width it was hidden at", () => {
+    expect(press(85, { collapsedPreference: true, overlayOpen: false })).toEqual({
+      collapsedPreference: false,
+      overlayOpen: false,
+      focus: "sidebar",
+    });
+  });
+
+  it("toggles the overlay only where the sidebar is forced closed", () => {
+    const opened = press(70, { collapsedPreference: false, overlayOpen: false });
+    expect(opened).toEqual({ collapsedPreference: false, overlayOpen: true, focus: "sidebar" });
+    expect(press(70, { collapsedPreference: false, overlayOpen: true })).toEqual({
+      collapsedPreference: false,
+      overlayOpen: false,
+      focus: "thread",
+    });
+    // A preference set before narrowing survives the overlay toggles.
+    expect(press(70, { collapsedPreference: true, overlayOpen: false })?.collapsedPreference).toBe(
+      true,
+    );
+  });
+
+  it("does nothing where the docked sidebar has no toggle", () => {
+    expect(press(160, { collapsedPreference: false, overlayOpen: false })).toBeNull();
   });
 });
