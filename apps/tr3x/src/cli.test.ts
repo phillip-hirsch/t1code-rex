@@ -99,6 +99,16 @@ function argvOf(pids: ReadonlyArray<number>): string {
   });
 }
 
+/** Pids of T3 servers running with `home` as their base dir. */
+function serverPidsFor(home: string): number[] {
+  return NodeChildProcess.execFileSync("ps", ["-A", "-ww", "-o", "pid=,args="], {
+    encoding: "utf8",
+  })
+    .split("\n")
+    .filter((line) => line.includes(`--base-dir ${home} `) && line.includes("--mode desktop"))
+    .map((line) => Number.parseInt(line, 10));
+}
+
 describe("tr3x daemon", () => {
   it("starts one server, lets a second daemon attach, and stops only the server it started", async () => {
     const home = tempHome();
@@ -152,6 +162,28 @@ describe("tr3x daemon", () => {
     expect(await second.exited).toBe(0);
     expect(isProcessAlive(Number(takenOver[1]))).toBe(false);
     expect(NodeFS.existsSync(paths.daemonStatePath)).toBe(false);
+  });
+
+  it("gives the server to exactly one of two daemons started together", async () => {
+    const home = tempHome();
+    const daemons = [startCli(home, "daemon"), startCli(home, "daemon")];
+    const owner = await Promise.any(
+      daemons.map(async (cli) => ({ cli, started: await waitForLine(cli, STARTED) })),
+    );
+    const server = trackServer(Number(owner.started[1]));
+    const attached = daemons.find((cli) => cli !== owner.cli)!;
+    await waitForLine(
+      attached,
+      new RegExp(`attached to daemon ${owner.cli.child.pid}: T3 server`, "u"),
+    );
+    expect(attached.output()).not.toMatch(STARTED);
+    expect(serverPidsFor(home)).toEqual([server]);
+
+    attached.child.kill("SIGTERM");
+    expect(await attached.exited).toBe(0);
+    owner.cli.child.kill("SIGTERM");
+    expect(await owner.cli.exited).toBe(0);
+    expect(serverPidsFor(home)).toEqual([]);
   });
 
   it("recovers after the owning daemon is killed with SIGKILL", async () => {
