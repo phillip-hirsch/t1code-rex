@@ -1,6 +1,8 @@
 import { workspacePreparationRetryRunIds } from "@t3tools/client-runtime/state/turn-item-presentation";
 import type { OrchestrationV2ThreadProjection, RunId } from "@t3tools/contracts";
 import { latestExecutedRun } from "@t3tools/shared/orchestrationV2ThreadError";
+import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 
 /**
  * A thread's launch into a new worktree that hasn't given it one yet, as the server has it:
@@ -88,4 +90,37 @@ export function worktreeBlockOf(projection: LaunchProjection): string | null {
     worktreePath: projection.thread.worktreePath,
     launch: deriveWorktreeLaunch(projection),
   });
+}
+
+/** A thread as the server had it once the guard started watching, over HTTP. */
+export type ServerLaunchView =
+  | { readonly _tag: "missing" }
+  | {
+      readonly _tag: "present";
+      readonly projection: LaunchProjection & {
+        readonly updatedAt: DateTime.Utc;
+      };
+    };
+
+/**
+ * `worktreeBlockOf` for the live state once it agrees with `server`, fetched after watching
+ * started, or has moved past it; undefined until then. A warm remount shows kept state as
+ * live before its replay, and that state can predate a preparation that failed meanwhile.
+ */
+export function confirmedWorktreeBlock(
+  live: {
+    readonly status: string;
+    readonly data: Option.Option<LaunchProjection & { readonly updatedAt: DateTime.Utc }>;
+  },
+  server: ServerLaunchView | undefined,
+): string | null | undefined {
+  // The server turns the send down itself.
+  if (live.status === "deleted" || server?._tag === "missing") return null;
+  if (server === undefined || live.status !== "live" || Option.isNone(live.data)) return undefined;
+  const block = worktreeBlockOf(live.data.value);
+  const agrees = (block === null) === (worktreeBlockOf(server.projection) === null);
+  const newer =
+    DateTime.toEpochMillis(live.data.value.updatedAt) >
+    DateTime.toEpochMillis(server.projection.updatedAt);
+  return agrees || newer ? block : undefined;
 }

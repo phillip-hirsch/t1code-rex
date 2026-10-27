@@ -65,10 +65,15 @@ export interface ComposerSenderOptions {
 
 /** Keeps a thread's runs loaded while the sender has jobs for it. */
 export interface WorkspaceGuard {
-  /** Why nothing may start on the thread now; undefined while its runs aren't loaded. */
-  readonly blockedReason: () => string | null | undefined;
+  /**
+   * Why nothing may start on the thread now; undefined while the server's state isn't known.
+   * A promise only while the answer is on its way; once known, it's answered at once.
+   */
+  readonly blockedReason: () => WorkspaceBlock | Promise<WorkspaceBlock>;
   readonly dispose: () => void;
 }
+
+export type WorkspaceBlock = string | null | undefined;
 
 /** A message, or the `queue.resume` that releases the server's held queue after Stop. */
 interface JobState {
@@ -119,6 +124,8 @@ interface ThreadQueue {
 }
 
 const OK: ComposerCommandResult = { ok: true };
+/** How long a guard's answer may take before the job waits and asks again, as offline. */
+const GUARD_WAIT_MS = 5_000;
 const ABANDONED = Symbol("abandoned");
 const HELD = Symbol("held");
 /** The thread's runs aren't loaded yet, so whether its worktree is there is unknown. */
@@ -128,6 +135,9 @@ const UNKNOWN = Symbol("unknown");
 interface Blocked {
   readonly blocked: string;
 }
+
+/** The guard's answer: go (null), wait, or go back. Waited answers can also pause or drop it. */
+type Gated = Blocked | typeof UNKNOWN | typeof HELD | typeof ABANDONED | null;
 const STALL_MS = 30_000;
 
 export const DISCARD_NOTICE = "Not sent; edit it and send again";
@@ -284,13 +294,28 @@ export function createComposerSender(options: ComposerSenderOptions) {
    * there's nothing to check yet; everything after it is checked. Watching starts here, not
    * when the job is queued: a thread watched before it exists reads as deleted.
    */
-  const gate = (queue: ThreadQueue, job: Job): Blocked | typeof UNKNOWN | null => {
+  const gate = (queue: ThreadQueue, job: Job): Gated | Promise<Gated> => {
     const { guardWorkspace } = options;
     if (guardWorkspace === undefined || (job.kind === "send" && job.send.target.kind === "draft")) {
       return null;
     }
     queue.guard ??= guardWorkspace(job.threadId);
     const reason = queue.guard.blockedReason();
+    if (!(reason instanceof Promise)) return gated(reason);
+    let cancelWait = () => {};
+    const timedOut = new Promise<undefined>((resolve) => {
+      cancelWait = options.schedule(() => resolve(undefined), GUARD_WAIT_MS);
+    });
+    return Promise.race([reason, timedOut]).then((answer) => {
+      cancelWait();
+      // The answer took a moment: anything that changed meanwhile wins.
+      if (disposed || !queue.jobs.includes(job)) return ABANDONED;
+      if (job.kind === "send" && (queue.held || queue.jobs[0] !== job)) return HELD;
+      return gated(answer);
+    });
+  };
+
+  const gated = (reason: WorkspaceBlock): Gated => {
     if (reason === undefined) return UNKNOWN;
     return reason === null ? null : { blocked: reason };
   };
@@ -327,7 +352,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
   ): Promise<ComposerCommandResult | typeof ABANDONED | typeof HELD | typeof UNKNOWN | Blocked> => {
     if (job.kind === "resume") {
       // A resume releases the server's held runs; they'd start in the project checkout.
-      const gated = gate(queue, job);
+      const checked = gate(queue, job);
+      const gated = checked instanceof Promise ? await checked : checked;
       if (gated !== null) return gated;
       mark(job, "sending");
       return attempt(job, () =>
@@ -339,7 +365,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
       if (stage === undefined) break;
       // Stop, or a resume that went ahead of it: it waits at this stage, before its message.
       if (queue.held || queue.jobs[0] !== job) return HELD;
-      const gated = gate(queue, job);
+      const checked = gate(queue, job);
+      const gated = checked instanceof Promise ? await checked : checked;
       if (gated !== null) return gated;
       mark(job, "sending");
       if (stage.kind === "start-turn") job.dispatched = true;

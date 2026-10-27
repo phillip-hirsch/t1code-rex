@@ -58,6 +58,7 @@ import {
   type SettleThreadInput,
   type StartThreadTurnInput,
   type StopThreadSessionInput,
+  ThreadSnapshotLoader,
   type ThreadSnapshotLoadResult,
   type UnarchiveThreadInput,
   type UnpinThreadInput,
@@ -99,12 +100,12 @@ import { branchRefsInput, mergeRefPages, type BranchRefPages } from "../branchPi
 import {
   deriveWorktreeLaunch,
   sameWorktreeLaunch,
-  worktreeBlockOf,
   type WorktreeLaunch,
 } from "../worktreeLaunch.ts";
 import type { TuiServerSession } from "../serverLauncher.ts";
 import * as Platform from "./platform.ts";
 import * as Runtime from "./runtime.ts";
+import { createWorkspaceGuard } from "./workspaceGuard.ts";
 
 export interface TuiConnectionOptions {
   readonly session: TuiServerSession;
@@ -252,6 +253,20 @@ export function createTuiConnection(options: TuiConnectionOptions) {
             Effect.succeed<ThreadSnapshotLoadResult>({ _tag: "missing" }),
         }),
       );
+    }),
+  });
+  // The thread as the server has it now, as client-runtime loads a cold thread: the bounded
+  // snapshot (every run, a recent window of items), or the full one from older servers.
+  const threadSnapshot = createEnvironmentCommand(runtime, {
+    label: "tr3x:thread:snapshot",
+    execute: Effect.fn("tr3x.threadSnapshot")(function* (threadId: ThreadId) {
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared)) {
+        return { _tag: "unavailable" } satisfies ThreadSnapshotLoadResult;
+      }
+      const loader = yield* ThreadSnapshotLoader;
+      return yield* loader.load(prepared.value, threadId);
     }),
   });
   // Upstream's thread commands, serialized per thread like web and mobile.
@@ -459,22 +474,23 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       worktreeLaunchAtom(threadId),
     /**
      * Keeps the thread's runs loaded until disposed, selected or not, and says why nothing
-     * may start on it now: its worktree isn't there. Undefined until its runs are live.
+     * may start on it now: its worktree isn't there. Undefined until the server's state is
+     * known; see `createWorkspaceGuard`.
      */
-    guardWorkspace: (threadId: ThreadId): WorkspaceGuard => {
-      const state = threadDetails.stateAtom({ environmentId, threadId });
-      const dispose = registry.mount(state);
-      return {
-        blockedReason: () => {
-          const current = registry.get(state);
-          // The server turns the send down itself.
-          if (current.status === "deleted") return null;
-          if (current.status !== "live") return undefined;
-          return Option.match(current.data, { onNone: () => undefined, onSome: worktreeBlockOf });
-        },
-        dispose,
-      };
-    },
+    guardWorkspace: (threadId: ThreadId): WorkspaceGuard =>
+      createWorkspaceGuard({
+        registry,
+        stateAtom: threadDetails.stateAtom({ environmentId, threadId }),
+        loadSnapshot: () =>
+          runAtomCommand(
+            registry,
+            threadSnapshot,
+            { environmentId, input: threadId },
+            { reportFailure: false },
+          ).then((result) =>
+            AsyncResult.isSuccess(result) ? result.value : { _tag: "unavailable" as const },
+          ),
+      }),
     /** Runs a failed worktree preparation again, for the message that started it. */
     retryWorkspacePreparation: (input: RetryWorkspacePreparationInput) =>
       runAction(threadCommands.retryWorkspacePreparation, input),

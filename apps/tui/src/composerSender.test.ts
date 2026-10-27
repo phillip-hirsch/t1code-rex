@@ -22,6 +22,7 @@ import {
   MAYBE_SENT_NOTICE,
   QUIT_NOTICE,
   type ComposerCommandResult,
+  type WorkspaceBlock,
 } from "./composerSender.ts";
 import type { ComposerSettings } from "./composerSettings.ts";
 import { createComposerStore, type ComposerStore } from "./composerStore.ts";
@@ -73,7 +74,7 @@ function setup(
   options: {
     readonly store?: ComposerStore;
     /** Why nothing may start on a thread; undefined while its runs aren't loaded. */
-    readonly blockedReason?: (threadId: string) => string | null | undefined;
+    readonly blockedReason?: (threadId: string) => WorkspaceBlock | Promise<WorkspaceBlock>;
   } = {},
 ) {
   const store = options.store ?? createComposerStore({ initialPrefs: {}, persist: null });
@@ -1207,6 +1208,51 @@ describe("composer sender, worktree setup", () => {
     expect(ids(calls)).toEqual(["cmd-1"]);
     expect(store.getDraft("t1").text).toBe("two");
     expect(store.snapshot("t1").notice).toBe("Worktree setup failed");
+  });
+
+  it("waits for an answer that takes a moment, then asks again later if none comes", async () => {
+    let answer: (value: WorkspaceBlock) => void = () => {};
+    let asks = 0;
+    const { store, sender, calls, timers, elapse } = setup([], {
+      blockedReason: () => {
+        asks += 1;
+        if (asks > 1) return null;
+        return new Promise<WorkspaceBlock>((resolve) => {
+          answer = resolve;
+        });
+      },
+    });
+    void sender.send(send());
+    await settle();
+    expect(ids(calls)).toEqual([]);
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["sending"]);
+    // No answer in time: it waits as if offline, and a late answer changes nothing.
+    elapse(timers[0]!.delayMs);
+    await settle();
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["waiting"]);
+    answer("Worktree setup failed");
+    await settle();
+    expect(store.snapshot("t1").notice).toBeNull();
+    elapse(retryDelayMs(0));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1"]);
+  });
+
+  it("lets a Stop that lands while the answer is on its way win", async () => {
+    let answer: (value: WorkspaceBlock) => void = () => {};
+    const { store, sender, calls } = setup([], {
+      blockedReason: () =>
+        new Promise<WorkspaceBlock>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    void sender.send(send());
+    await settle();
+    sender.hold("t1");
+    answer(null);
+    await settle();
+    expect(ids(calls)).toEqual([]);
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["held"]);
   });
 
   it("never holds back a draft's own launch, nor watches its thread before it exists", async () => {

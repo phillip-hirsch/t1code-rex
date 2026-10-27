@@ -48,6 +48,7 @@
     "ws": "catalog:"
   },
   "devDependencies": {
+    "@effect/vitest": "catalog:",
     "@t3tools/client-core": "workspace:*",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/shared": "workspace:*",

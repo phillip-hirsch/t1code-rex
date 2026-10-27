@@ -4,9 +4,11 @@ import {
   type OrchestrationV2ThreadProjection,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Option from "effect/Option";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  confirmedWorktreeBlock,
   deriveWorktreeLaunch,
   WORKTREE_FAILED_NOTICE,
   WORKTREE_PREPARING_NOTICE,
@@ -133,5 +135,57 @@ describe("worktreeSendBlock", () => {
         turnItems: [preparationFailure("r1")],
       }),
     ).toBe(WORKTREE_FAILED_NOTICE);
+  });
+});
+
+describe("confirmedWorktreeBlock", () => {
+  const view = (time: string, failed: boolean) => ({
+    thread: failed ? noWorktree : { worktreePath: "/wt" },
+    runs: [run("r1", 1, { status: failed ? "failed" : "completed" })],
+    turnItems: failed ? [preparationFailure("r1")] : [],
+    updatedAt: DateTime.makeUnsafe(`2026-10-27T10:${time}:00.000Z`),
+  });
+  const live = (projection: ReturnType<typeof view>, status = "live") => ({
+    status,
+    data: Option.some(projection),
+  });
+  const server = (projection: ReturnType<typeof view>) => ({
+    _tag: "present" as const,
+    projection,
+  });
+
+  it("knows nothing before the server's snapshot, or while the live state isn't live", () => {
+    expect(confirmedWorktreeBlock(live(view("01", false)), undefined)).toBeUndefined();
+    expect(
+      confirmedWorktreeBlock(live(view("01", false), "synchronizing"), server(view("01", false))),
+    ).toBeUndefined();
+    expect(
+      confirmedWorktreeBlock({ status: "live", data: Option.none() }, server(view("01", false))),
+    ).toBeUndefined();
+  });
+
+  it("waits while kept live state that predates the server's disagrees with it", () => {
+    expect(
+      confirmedWorktreeBlock(live(view("00", false)), server(view("01", true))),
+    ).toBeUndefined();
+    expect(
+      confirmedWorktreeBlock(live(view("00", true)), server(view("01", false))),
+    ).toBeUndefined();
+  });
+
+  it("answers from the live state once it agrees with the server, or has moved past it", () => {
+    expect(confirmedWorktreeBlock(live(view("01", true)), server(view("01", true)))).toBe(
+      WORKTREE_FAILED_NOTICE,
+    );
+    expect(confirmedWorktreeBlock(live(view("00", false)), server(view("01", false)))).toBeNull();
+    // A retry after the snapshot made the worktree.
+    expect(confirmedWorktreeBlock(live(view("02", false)), server(view("01", true)))).toBeNull();
+  });
+
+  it("lets the server turn down a send to a thread it doesn't have", () => {
+    expect(confirmedWorktreeBlock(live(view("00", true)), { _tag: "missing" })).toBeNull();
+    expect(
+      confirmedWorktreeBlock({ status: "deleted", data: Option.none() }, server(view("01", true))),
+    ).toBeNull();
   });
 });
