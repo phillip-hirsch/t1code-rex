@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  createEnterStopGuard,
-  ENTER_STOP_QUIET_MS,
-  resolveComposerKey,
-  type ComposerKeyState,
-} from "./composerKeys.ts";
+import { resolveComposerKey, type ComposerKeyState } from "./composerKeys.ts";
 
 const idle: ComposerKeyState = {
   hasText: false,
@@ -140,24 +135,5 @@ describe("resolveComposerKey with the @ file menu", () => {
     expect(resolveComposerKey({ name: "escape", repeated: true }, searching)).toEqual({
       type: "ignore",
     });
-  });
-});
-
-describe("createEnterStopGuard", () => {
-  it("lets Enter stop only once the composer sat empty after a send or taking focus", () => {
-    let clock = 10_000;
-    const guard = createEnterStopGuard(() => clock);
-    expect(guard.pressEmptyEnter()).toBe(true);
-
-    guard.arm();
-    // The second Enter of one input chunk, then quick presses: each re-arms the wait.
-    expect(guard.pressEmptyEnter()).toBe(false);
-    clock += ENTER_STOP_QUIET_MS - 1;
-    expect(guard.pressEmptyEnter()).toBe(false);
-    clock += ENTER_STOP_QUIET_MS - 1;
-    expect(guard.pressEmptyEnter()).toBe(false);
-
-    clock += ENTER_STOP_QUIET_MS;
-    expect(guard.pressEmptyEnter()).toBe(true);
   });
 });

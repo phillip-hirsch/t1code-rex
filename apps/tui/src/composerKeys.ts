@@ -96,30 +96,3 @@ export function resolveComposerKey(
   }
   return null;
 }
-
-/** How long the composer must sit empty, after a send or taking focus, before Enter stops a run. */
-export const ENTER_STOP_QUIET_MS = 750;
-
-/**
- * Enter on an empty composer stops a busy run, but never as the echo of an Enter that sent
- * or focused the composer: those arm the guard, and an Enter within ENTER_STOP_QUIET_MS
- * re-arms it instead. It reads the clock, not render state, so batching can't defeat it.
- */
-export function createEnterStopGuard(now: () => number = Date.now) {
-  let armedAt = Number.NEGATIVE_INFINITY;
-  return {
-    /** A send went out, or the composer took focus. */
-    arm(): void {
-      armedAt = now();
-    },
-    /** For Enter on the empty composer: whether it may stop the run. */
-    pressEmptyEnter(): boolean {
-      const at = now();
-      if (at - armedAt >= ENTER_STOP_QUIET_MS) return true;
-      armedAt = at;
-      return false;
-    },
-  };
-}
-
-export type EnterStopGuard = ReturnType<typeof createEnterStopGuard>;

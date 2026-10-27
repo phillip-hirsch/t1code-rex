@@ -12,7 +12,7 @@ import { ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import { act, createRef, type RefObject, useState } from "react";
 
 import { Composer, NO_MENTION_SEARCH_SOURCE, type ComposerHandle } from "../src/composer.tsx";
-import { ENTER_STOP_QUIET_MS, isEnterKey } from "../src/composerKeys.ts";
+import { isEnterKey } from "../src/composerKeys.ts";
 import { UNCONFIRMED_NOTICE } from "../src/composerRecovery.ts";
 import { createComposerSend, DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
 import {
@@ -162,7 +162,8 @@ function emitChunk(setup: Mounted["setup"], bytes: string): void {
 /**
  * A composer on a running thread, with text and one image, as two quick Enters find it:
  * in one input chunk, then as two presses a render apart. Neither second Enter may stop
- * the run the first one steered; Enter on a composer left empty for a moment still does.
+ * the run the first one steered. As upstream, Enter on an empty composer never stops a
+ * run; Esc does.
  */
 async function checkDoubleEnter(): Promise<void> {
   const store = createComposerStore({ initialPrefs: {}, persist: null });
@@ -180,7 +181,6 @@ async function checkDoubleEnter(): Promise<void> {
   draft("What color is this?");
   const { sent, sender } = recordingSender(store);
   const { setup, stops } = await mountComposer({ store, sender, running: true });
-  await sleep(ENTER_STOP_QUIET_MS);
   emitChunk(setup, "\r\r");
   await settle(setup.renderOnce);
   check("S1: two Enters in one chunk send one message", sent.length, 1);
@@ -189,7 +189,6 @@ async function checkDoubleEnter(): Promise<void> {
   check("S1: the composer is empty after", store.getDraft(threadId).attachments.length, 0);
 
   // Two presses, the composer rendered empty between them.
-  await sleep(ENTER_STOP_QUIET_MS);
   act(() => draft("And this?"));
   await settle(setup.renderOnce);
   act(() => setup.mockInput.pressEnter());
@@ -199,11 +198,14 @@ async function checkDoubleEnter(): Promise<void> {
   check("S1: two quick presses send one message", sent.length, 2);
   check("S1: the second quick press doesn't stop the run", stops(), 0);
 
-  // Control: Enter on a composer that sat empty during a run still stops it.
-  await sleep(ENTER_STOP_QUIET_MS);
+  // Enter on a composer that sat empty during a run does nothing; Esc stops it.
+  await sleep(1000);
   act(() => setup.mockInput.pressEnter());
   await settle(setup.renderOnce);
-  check("S1 control: Enter on an empty composer stops the run", stops(), 1);
+  check("parity: Enter on an empty composer doesn't stop the run", stops(), 0);
+  act(() => setup.mockInput.pressEscape());
+  await settle(setup.renderOnce);
+  check("control: Esc stops the run", stops(), 1);
   setup.renderer.destroy();
   sender.dispose();
 }
@@ -213,14 +215,12 @@ async function checkFocusEnter(): Promise<void> {
   const store = createComposerStore({ initialPrefs: {}, persist: null });
   const { sender } = recordingSender(store);
   const { setup, stops } = await mountComposer({ store, sender, running: true, focused: false });
-  await sleep(ENTER_STOP_QUIET_MS);
   emitChunk(setup, "\r\r");
   await settle(setup.renderOnce);
   check("S1: Enter, Enter from the thread doesn't stop the run", stops(), 0);
-  await sleep(ENTER_STOP_QUIET_MS);
   act(() => setup.mockInput.pressEnter());
   await settle(setup.renderOnce);
-  check("S1 control: the focused composer's next Enter stops it", stops(), 1);
+  check("S1: nor does a later Enter on the empty composer", stops(), 0);
   setup.renderer.destroy();
   sender.dispose();
 }
@@ -257,7 +257,7 @@ async function checkBusyEnter(): Promise<void> {
   sender.dispose();
 }
 
-/** N3: Stop holds unsent messages; Enter on the empty composer after the run stops sends them. */
+/** N3: Stop holds unsent messages; Enter leaves them held, and /resume sends them. */
 async function checkResumeHeld(): Promise<void> {
   const store = createComposerStore({ initialPrefs: {}, persist: null });
   let answerFirst: (result: ComposerCommandResult) => void = () => undefined;
@@ -289,9 +289,16 @@ async function checkResumeHeld(): Promise<void> {
     setup.captureCharFrame().includes("Held after Stop: second"),
     true,
   );
+  emitChunk(setup, "\r\r");
+  await settle(setup.renderOnce);
+  check("N3: Enter, Enter on the empty composer releases nothing", order.join(", "), "first");
+  await act(async () => {
+    await setup.mockInput.typeText("/resume");
+  });
+  await settle(setup.renderOnce);
   act(() => setup.mockInput.pressEnter());
   await settle(setup.renderOnce);
-  check("N3: Enter on the empty composer sends it", sent.at(-1)?.message.text, "second");
+  check("N3: /resume sends it", sent.at(-1)?.message.text, "second");
   check("N3: sent once", sent.filter((input) => input.message.text === "second").length, 1);
   check("N8: queue.resume goes out first", order.join(", "), "first, queue.resume, second");
   setup.renderer.destroy();
