@@ -13,10 +13,38 @@ export interface TuiShortcutEventLike {
   readonly keyName: string;
   readonly sequence?: string;
   readonly ctrl?: boolean;
-  readonly meta?: boolean;
+  /** Alt (Option on macOS). */
+  readonly alt?: boolean;
+  /** Cmd on macOS. Only kitty-protocol terminals send it. */
   readonly super?: boolean;
   readonly shift?: boolean;
-  readonly alt?: boolean;
+}
+
+/** The OpenTUI key fields a shortcut reads (KeyEvent has them all). */
+export interface TuiShortcutKeyLike {
+  readonly name: string;
+  readonly sequence?: string;
+  readonly ctrl: boolean;
+  /** OpenTUI's `meta` is Alt: an ESC-prefixed key, or kitty's alt or meta. Never Cmd. */
+  readonly meta: boolean;
+  readonly option?: boolean;
+  readonly shift: boolean;
+  readonly super?: boolean | undefined;
+}
+
+/**
+ * A key press as the shortcut resolver reads it: Alt stays Alt, and only `super` is Cmd. So
+ * Alt+B, Alt+D and Alt+Backspace stay the shell's and the composer's word keys on macOS too.
+ */
+export function tuiShortcutEvent(key: TuiShortcutKeyLike): TuiShortcutEventLike {
+  return {
+    keyName: key.name,
+    ...(key.sequence === undefined ? {} : { sequence: key.sequence }),
+    ctrl: key.ctrl,
+    alt: key.meta || key.option === true,
+    super: key.super === true,
+    shift: key.shift,
+  };
 }
 
 export interface TuiShortcutMatchContext {
@@ -42,15 +70,28 @@ function isMacPlatform(platform: NodeJS.Platform): boolean {
  */
 const RESERVED_CTRL_KEYS: ReadonlySet<string> = new Set(["d", "u"]);
 
-function yieldsToReservedCtrlKey(shortcut: KeybindingShortcut, platform: NodeJS.Platform): boolean {
+/**
+ * Whether Ctrl+<key> stays the TUI's or the shell's instead of a "mod+<key>" binding's. On
+ * Windows and Linux a focused terminal keeps every Ctrl+letter: Ctrl+N, Ctrl+W, Ctrl+J and
+ * the rest are readline's. Ctrl+] leaves the terminal, and the palette has its actions.
+ */
+function keepsCtrlKey(key: string, platform: NodeJS.Platform, terminalFocus: boolean): boolean {
+  if (isMacPlatform(platform)) return false;
+  return RESERVED_CTRL_KEYS.has(key) || (terminalFocus && /^[a-z]$/u.test(key));
+}
+
+function yieldsToReservedCtrlKey(
+  shortcut: KeybindingShortcut,
+  platform: NodeJS.Platform,
+  terminalFocus: boolean,
+): boolean {
   return (
-    !isMacPlatform(platform) &&
     shortcut.modKey &&
     !shortcut.ctrlKey &&
     !shortcut.metaKey &&
     !shortcut.shiftKey &&
     !shortcut.altKey &&
-    RESERVED_CTRL_KEYS.has(shortcut.key)
+    keepsCtrlKey(shortcut.key, platform, terminalFocus)
   );
 }
 
@@ -59,13 +100,19 @@ function currentPlatform(): NodeJS.Platform {
   return process.platform;
 }
 
-/** "⌘D" or "Ctrl+K" for a "mod+<key>" shortcut, or null where the TUI keeps that Ctrl key. */
+/**
+ * "⌘D" or "Ctrl+K" for a "mod+<key>" shortcut, or null where the TUI or a focused terminal
+ * keeps that Ctrl key.
+ */
 export function modShortcutLabel(
   key: string,
   platform: NodeJS.Platform = currentPlatform(),
+  options?: { readonly terminalFocus?: boolean },
 ): string | null {
   if (isMacPlatform(platform)) return `⌘${key.toUpperCase()}`;
-  return RESERVED_CTRL_KEYS.has(key) ? null : `Ctrl+${key.toUpperCase()}`;
+  return keepsCtrlKey(key, platform, options?.terminalFocus === true)
+    ? null
+    : `Ctrl+${key.toUpperCase()}`;
 }
 
 function controlKeyFromSequence(sequence: string | undefined): string | null {
@@ -80,7 +127,7 @@ function normalizeEventKey(event: TuiShortcutEventLike): string {
   const normalizedName = keyName.toLowerCase();
   if (normalizedName === "esc") return "escape";
   if (normalizedName === "space") return " ";
-  if (event.ctrl || event.meta || event.super || event.alt) return normalizedName;
+  if (event.ctrl || event.alt || event.super) return normalizedName;
   const controlKey = controlKeyFromSequence(sequence);
   if (controlKey) return controlKey;
   if (sequence && sequence.length === 1) return sequence.toLowerCase();
@@ -96,14 +143,13 @@ function matchesShortcut(
   if (key !== shortcut.key) return false;
 
   const useMetaForMod = isMacPlatform(platform);
-  const eventMeta = Boolean(event.meta || event.super);
   const eventCtrl = Boolean(
     event.ctrl || (!useMetaForMod && controlKeyFromSequence(event.sequence)),
   );
   const expectedMeta = shortcut.metaKey || (shortcut.modKey && useMetaForMod);
   const expectedCtrl = shortcut.ctrlKey || (shortcut.modKey && !useMetaForMod);
   return (
-    eventMeta === expectedMeta &&
+    Boolean(event.super) === expectedMeta &&
     eventCtrl === expectedCtrl &&
     Boolean(event.shift) === shortcut.shiftKey &&
     Boolean(event.alt) === shortcut.altKey
@@ -154,7 +200,7 @@ export function resolveTuiShortcutCommand(
     const binding = keybindings[index];
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
-    if (yieldsToReservedCtrlKey(binding.shortcut, platform)) continue;
+    if (yieldsToReservedCtrlKey(binding.shortcut, platform, context.terminalFocus)) continue;
     if (!matchesShortcut(event, binding.shortcut, platform)) continue;
     return binding.command;
   }

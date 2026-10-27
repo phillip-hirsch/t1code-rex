@@ -17,6 +17,7 @@ import {
 } from "@t3tools/client-runtime/state/shell";
 import { createServerEnvironmentAtoms } from "@t3tools/client-runtime/state/server";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
+import { createTerminalEnvironmentAtoms } from "@t3tools/client-runtime/state/terminal";
 import {
   ShellSnapshotLoader,
   createEnvironmentShellAtoms,
@@ -240,6 +241,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
   const filesystem = createFilesystemEnvironmentAtoms(runtime);
   const shellCommands = createShellEnvironmentAtoms(runtime);
   const orchestration = createOrchestrationEnvironmentAtoms(runtime);
+  const terminals = createTerminalEnvironmentAtoms(runtime);
   const archivedShellSnapshotAtom = orchestration.archivedShellSnapshot({
     environmentId,
     input: {},
@@ -363,6 +365,8 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     /** The archived threads as the server has them now, never from cache. */
     fetchArchivedShellSnapshot: () => runAction(archivedShellSnapshot, {}),
     retryNow: catalog.retryNow,
+    /** Upstream's terminal atoms: attach, write, resize and close server-side shells. */
+    terminals,
     dispose: () => {
       registry.dispose();
       options.session.stop();

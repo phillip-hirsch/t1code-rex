@@ -210,7 +210,7 @@ export function Composer(props: ComposerProps) {
   const attachments = snapshot.attachments;
 
   const heldCount = snapshot.sends.filter((entry) => entry.status === "held").length;
-  /** What the send button shows, and what Enter on an empty composer does. */
+  /** What the send button shows. */
   const primary =
     hasText || attachments.length > 0
       ? "send"
@@ -394,11 +394,8 @@ export function Composer(props: ComposerProps) {
     // Enters must find them already sent.
     const draftAttachments = store.getDraft(threadId).attachments;
     if (text.trim().length === 0 && draftAttachments.length === 0) {
-      // Like before, Enter on an empty composer stops a running turn, but only one that
-      // showed empty; a second quick Enter after a send must not stop the run. Once the
-      // run stopped, it sends what Stop held, like upstream's "Resume thread" button.
-      if (primary === "stop" && !stopRequested) props.onStop();
-      if (primary === "resume") resumeHeld();
+      // As upstream: Enter on an empty composer does nothing, so a doubled or stray Enter
+      // can't stop a run or release held messages. Esc, Ctrl+C, ■ and ▶ or /resume do that.
       return;
     }
     if (pasting) {
@@ -528,7 +525,7 @@ export function Composer(props: ComposerProps) {
             ? "Steer the run (⌘Enter or Alt+Enter queues)"
             : "Queue a follow-up (⌘Enter or Alt+Enter steers)"
           : heldCount > 0
-            ? "Enter sends held messages; /discard edits them"
+            ? "/resume or ▶ sends held messages; /discard edits them"
             : "Ask for follow-up changes or attach images";
 
   return (

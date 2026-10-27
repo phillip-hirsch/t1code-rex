@@ -2,8 +2,8 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import type { CliRenderer, KeyEvent } from "@opentui/core";
-import { useKeyboard, usePaste, useTerminalDimensions } from "@opentui/react";
+import { type CliRenderer, decodePasteBytes, type KeyEvent } from "@opentui/core";
+import { useTerminalDimensions } from "@opentui/react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   connectionProjectionPhase,
@@ -68,7 +68,7 @@ import {
   STOPPING,
   type FooterStatus,
 } from "./footerStatus.ts";
-import { modShortcutLabel, resolveTuiShortcutCommand } from "./keybindings.ts";
+import { modShortcutLabel, resolveTuiShortcutCommand, tuiShortcutEvent } from "./keybindings.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
 import {
@@ -108,6 +108,8 @@ import {
   type ThreadWindowLaunch,
   writeThreadWindowLaunch,
 } from "./threadWindowLaunch.ts";
+import { createServerTerminalBackend } from "./terminalConnection.ts";
+import { TERMINAL_FOCUS_HINTS, useTerminalDrawer } from "./terminalDrawerView.tsx";
 import { DEFAULT_THREAD_TITLE, truncateTitle } from "./threadTitle.ts";
 import { ThreadView, type ThreadViewHandle } from "./threadView.tsx";
 import { useMarkdownStyles } from "./messageMarkdownView.tsx";
@@ -120,6 +122,7 @@ import {
 } from "./modelPicker.ts";
 import { ModelPickerView } from "./modelPickerView.tsx";
 import { NewThreadView } from "./newThreadView.tsx";
+import { useSyncKeyboard, useSyncPaste } from "./syncKeyboard.ts";
 import { createRequestPanelStore } from "./requestPanelStore.ts";
 import { NO_PENDING_REQUESTS, type PendingRequest } from "./requestQueue.ts";
 import { createRedirectDecliner } from "./requestRedirect.ts";
@@ -201,8 +204,11 @@ function filterPaletteActions(
   });
 }
 
-/** "requests" is the request panel above the composer, reached with Tab or a click. */
-type FocusArea = "sidebar" | "thread" | "composer" | "requests";
+/**
+ * "requests" is the request panel above the composer, reached with Tab or a click;
+ * "terminal" is the drawer's active terminal, which gets every key but its own.
+ */
+type FocusArea = "sidebar" | "thread" | "composer" | "requests" | "terminal";
 
 function threadSettings(thread: SidebarThread): ComposerSettings {
   return {
@@ -251,8 +257,9 @@ function providerStatusLabel(provider: ServerProvider): string {
   return provider.status;
 }
 
+/** Ctrl+K, or Cmd+K where the terminal sends Cmd. Alt+K isn't Cmd+K. */
 function isPaletteShortcut(key: KeyEvent): boolean {
-  return key.name === "k" && Boolean(key.ctrl || key.meta || key.super);
+  return key.name === "k" && Boolean(key.ctrl || key.super);
 }
 
 function isEnter(name: string): boolean {
@@ -381,7 +388,7 @@ function Shell(props: AppProps) {
   const palette = theme.palette;
   const connectionResult = useAtomValue(connection.connectionStateAtom);
   const serverConfig = useAtomValue(connection.serverConfigAtom);
-  const { width: viewportColumns } = useTerminalDimensions();
+  const { width: viewportColumns, height: viewportRows } = useTerminalDimensions();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [paletteIndex, setPaletteIndex] = useState(0);
   const [paletteQuery, setPaletteQuery] = useState("");
@@ -652,6 +659,24 @@ function Shell(props: AppProps) {
     [connection.session, paths, projectsById, rex, threadsById],
   );
 
+  /** A shell in a native Rex split below this window, in the thread's folder. */
+  const openRexTerminal = useCallback(
+    async (cwd: string | null) => {
+      if (!rex) {
+        setStatus("Rex not detected");
+        return;
+      }
+      await rex.client.split({
+        label: "Terminal",
+        direction: "below",
+        ratio: 30,
+        cwd: cwd ?? undefined,
+      });
+      setStatus("Opened terminal in Rex split");
+    },
+    [rex],
+  );
+
   const copyToClipboard = useCallback((value: string, message: string) => {
     copyTextToClipboard(value)
       .then(() => setStatus(message))
@@ -779,6 +804,50 @@ function Shell(props: AppProps) {
     setStatus,
     openNewThread,
   });
+
+  // The thread's terminal drawer. A draft has no server thread to hold shells yet.
+  const terminalCwd =
+    composerTarget?.kind === "thread" && activeThread !== null
+      ? threadWorkspacePath(activeThread, activeProject ?? undefined)
+      : null;
+  const [terminalBackend] = useState(() =>
+    createServerTerminalBackend({
+      registry: connection.registry,
+      atoms: connection.terminals,
+      environmentId: connection.environmentId,
+    }),
+  );
+  const terminalDrawer = useTerminalDrawer({
+    backend: terminalBackend,
+    theme,
+    target:
+      terminalCwd === null || activeThread === null
+        ? null
+        : {
+            threadId: activeThread.id,
+            cwd: terminalCwd,
+            worktreePath: activeThread.worktreePath,
+            projectRoot: activeProject?.workspaceRoot ?? terminalCwd,
+          },
+    focused: focusArea === "terminal",
+    area: {
+      // The main column: the screen less the header, footer, padding and a docked sidebar.
+      cols: viewportColumns - (layout.showSidebar ? TUI_SIDEBAR_WIDTH : 0) - 2,
+      rows: viewportRows - 4,
+    },
+    onFocus: () => {
+      setContextMenu(null);
+      setFocusArea("terminal");
+    },
+    onLeave: () => setFocusArea(composerTarget === null ? "thread" : "composer"),
+    onTabOut: () => cycleFocus(),
+    onStatus: setStatus,
+  });
+  const terminalFocused = focusArea === "terminal" && terminalDrawer.open;
+  // A thread without its drawer open can't keep the terminal's focus.
+  if (focusArea === "terminal" && !terminalDrawer.open) {
+    setFocusArea(composerTarget === null ? "thread" : "composer");
+  }
 
   const threadPath = (threadId: string) => {
     const thread = threadsById.get(threadId);
@@ -1014,7 +1083,7 @@ function Shell(props: AppProps) {
         activeThread,
         held === 0
           ? STOPPING
-          : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. Enter or /resume sends, /discard edits`,
+          : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. /resume or ▶ sends, /discard edits`,
       ),
     );
     void connection
@@ -1152,6 +1221,17 @@ function Shell(props: AppProps) {
     disabled: composerTarget === null,
     run: toggleModelPicker,
   });
+  actions.push(...terminalDrawer.actions);
+  if (rex !== null) {
+    const cwd =
+      terminalCwd ?? activeProject?.workspaceRoot ?? (threadWindowLaunch ? null : props.cwd);
+    actions.push({
+      id: "rex:terminal",
+      label: "Open terminal in Rex split",
+      description: cwd ?? "Open a shell below tr3x",
+      run: () => openRexTerminal(cwd),
+    });
+  }
   if (rexTabs && activeThread === null) {
     actions.push({
       id: "rex:thread",
@@ -1213,6 +1293,7 @@ function Shell(props: AppProps) {
       ...(sidebarVisible ? (["sidebar"] as const) : []),
       ...(composerTarget !== null ? (["composer"] as const) : []),
       "thread",
+      ...(terminalDrawer.open ? (["terminal"] as const) : []),
     ];
     setFocusArea((area) => order[(order.indexOf(area) + 1) % order.length] ?? "thread");
   };
@@ -1281,17 +1362,12 @@ function Shell(props: AppProps) {
       return true;
     }
     const shortcut = resolveTuiShortcutCommand(
-      {
-        keyName: key.name,
-        sequence: key.sequence,
-        ctrl: key.ctrl,
-        meta: key.meta,
-        super: key.super ?? false,
-        shift: key.shift,
-      },
+      tuiShortcutEvent(key),
       serverConfig?.keybindings ?? [],
+      { context: { terminalFocus: terminalFocused, terminalOpen: terminalDrawer.open } },
     );
-    if (isPaletteShortcut(key) || shortcut === "commandPalette.toggle") {
+    // In the terminal, Ctrl+K is the shell's; the palette waits until focus leaves.
+    if ((!terminalFocused && isPaletteShortcut(key)) || shortcut === "commandPalette.toggle") {
       setContextMenu(null);
       setPaletteIndex(0);
       setPaletteQuery("");
@@ -1346,6 +1422,8 @@ function Shell(props: AppProps) {
       }
       return true;
     }
+    // The drawer's shortcuts work from anywhere; a focused terminal takes every other key.
+    if (terminalDrawer.handleKey(key, shortcut)) return true;
     if (key.ctrl && key.name === "b") {
       toggleSidebar();
       return true;
@@ -1409,19 +1487,27 @@ function Shell(props: AppProps) {
     return false;
   };
 
-  useKeyboard((key) => {
+  useSyncKeyboard((key) => {
     if (handleKey(key)) key.preventDefault();
   });
   // A bracketed paste is one event, not keys: with the sidebar focused it goes to the
-  // composer too. Dialogs, menus and the palette keep theirs (their inputs take pastes).
-  usePaste((event) => {
+  // composer too, and the focus it moves there holds for an Enter in the same input chunk.
+  // Dialogs, menus and the palette keep theirs (their inputs take pastes).
+  useSyncPaste((event) => {
     const overlayOpen =
       modelPickerRef.current !== null ||
       management.dialogOpen ||
       archivedSelected !== null ||
       paletteOpen ||
       contextMenu !== null;
-    if (!sidebarFocused || overlayOpen) return;
+    if (overlayOpen) return;
+    if (terminalFocused) {
+      event.preventDefault();
+      event.stopPropagation();
+      terminalDrawer.paste(decodePasteBytes(event.bytes));
+      return;
+    }
+    if (!sidebarFocused) return;
     event.preventDefault();
     event.stopPropagation();
     writeToComposer((dock) => dock.paste(event));
@@ -1444,17 +1530,19 @@ function Shell(props: AppProps) {
   const statusText = resolveFooterStatus(status, activeThread);
   const footerHints = modelPicker
     ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
-    : sidebarFocused
-      ? sidebar.multiSelection.threadIds.size > 0
-        ? `${sidebar.multiSelection.threadIds.size} selected  ⇧↑↓ extend  ⇧F10 menu  del delete  esc clear`
-        : "↑↓ move  ⏎ open  ⇧↑↓ select  ⇧F10 menu  F2 rename  del delete  type to compose  ⌘K palette"
-      : requestsFocused
-        ? panelHints
-        : composerFocused
-          ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
-          : diffShown
-            ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
-            : `↑↓ scroll  PgUp/PgDn page  End bottom  d diff  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
+    : terminalFocused
+      ? TERMINAL_FOCUS_HINTS
+      : sidebarFocused
+        ? sidebar.multiSelection.threadIds.size > 0
+          ? `${sidebar.multiSelection.threadIds.size} selected  ⇧↑↓ extend  ⇧F10 menu  del delete  esc clear`
+          : "↑↓ move  ⏎ open  ⇧↑↓ select  ⇧F10 menu  F2 rename  del delete  type to compose  ⌘K palette"
+        : requestsFocused
+          ? panelHints
+          : composerFocused
+            ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
+            : diffShown
+              ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
+              : `↑↓ scroll  PgUp/PgDn page  End bottom  d diff  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -1639,6 +1727,7 @@ function Shell(props: AppProps) {
                 onFocus={setFocusArea}
                 onPanelShown={setRequestsShown}
               />
+              {terminalDrawer.element}
             </>
           ) : (
             <ServerSummary

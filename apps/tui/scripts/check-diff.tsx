@@ -6,7 +6,6 @@
  */
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { RegistryContext } from "@effect/atom-react";
-import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import { ThreadId } from "@t3tools/contracts";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
@@ -27,6 +26,7 @@ import {
 } from "../src/diffTurns.ts";
 import { useMarkdownStyles } from "../src/messageMarkdownView.tsx";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
+import { useSyncKeyboard } from "../src/syncKeyboard.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -129,7 +129,7 @@ function Harness(props: { source: DiffSource; initialScope?: DiffScope }) {
   const [view, setView] = useState<DiffViewMode>("unified");
   const [wordWrap, setWordWrap] = useState(false);
   const panel = useRef<DiffPanelHandle | null>(null);
-  useKeyboard((key: KeyEvent) => {
+  useSyncKeyboard((key: KeyEvent) => {
     panel.current?.handleKey(key);
   });
   return (
