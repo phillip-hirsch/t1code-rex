@@ -7,12 +7,13 @@ import {
   currentProcessStartedAt,
   type DaemonState,
   ensurePrivateDir,
+  isDaemonAlive,
   readLiveDaemonState,
   readRecordedServer,
   removeDaemonState,
   writeDaemonState,
 } from "./daemonState.ts";
-import { describeServer, fetchEnvironmentSummary, isProcessAlive } from "./health.ts";
+import { describeServer, fetchEnvironmentSummary } from "./health.ts";
 import { type ManagedServer, StateDirOwnedError, startManagedServer } from "./serverLauncher.ts";
 
 export interface DaemonOptions {
@@ -111,7 +112,7 @@ async function runOwner(
   let fatal: string | undefined;
   let stopHealth = () => {};
   try {
-    let written = await publishState(paths, server);
+    let written = publishState(paths, server);
     log(
       `started ${describeServer(server.environment, server.httpBaseUrl)} (server pid ${server.process.pid}, daemon pid ${process.pid})`,
     );
@@ -125,12 +126,9 @@ async function runOwner(
         resolve();
       });
     });
-    stopHealth = reportHealth(options, server.httpBaseUrl, async () => {
-      // A restarted server has a new pid and may need a new bearer.
-      if (server.process.pid !== written.serverPid) written = await publishState(paths, server);
-      else if ((await server.getBearerToken()) !== written.bearerToken) {
-        written = await publishState(paths, server);
-      }
+    stopHealth = reportHealth(options, server.httpBaseUrl, () => {
+      // A restarted server has a new pid.
+      if (server.process.pid !== written.serverPid) written = publishState(paths, server);
     });
     await Promise.race([abortPromise(signal), fatalSignal]);
   } finally {
@@ -144,7 +142,7 @@ async function runOwner(
   return fatal === undefined ? 0 : 1;
 }
 
-async function publishState(paths: Tr3xPaths, server: ManagedServer): Promise<DaemonState> {
+function publishState(paths: Tr3xPaths, server: ManagedServer): DaemonState {
   const state: DaemonState = {
     version: 1,
     pid: process.pid,
@@ -153,7 +151,6 @@ async function publishState(paths: Tr3xPaths, server: ManagedServer): Promise<Da
     httpBaseUrl: server.httpBaseUrl,
     wsBaseUrl: server.wsBaseUrl,
     environmentId: server.environment.environmentId,
-    bearerToken: await server.getBearerToken(),
   };
   writeDaemonState(paths.daemonStatePath, state);
   return state;
@@ -172,24 +169,35 @@ async function watchOwner(options: DaemonOptions, owner: DaemonState): Promise<v
   log(
     `this daemon doesn't own the server and won't stop it; it takes over if daemon ${owner.pid} exits`,
   );
-  const ownerGone = new Promise<void>((resolve) => {
+  const stopHealth = reportHealth(options, owner.httpBaseUrl);
+  await Promise.race([abortPromise(signal), waitForOwnerExit(owner, signal)]);
+  stopHealth();
+}
+
+/**
+ * Resolves once the owner exits. Checks its start time on every poll, not just
+ * at attach, so a pid reused by another process counts as the owner exiting.
+ */
+export function waitForOwnerExit(
+  owner: DaemonState,
+  signal: AbortSignal,
+  intervalMs = 500,
+): Promise<void> {
+  return new Promise((resolve) => {
     const timer = setInterval(() => {
-      if (isProcessAlive(owner.pid)) return;
+      if (isDaemonAlive(owner)) return;
       clearInterval(timer);
       resolve();
-    }, 500);
+    }, intervalMs);
     signal.addEventListener("abort", () => clearInterval(timer), { once: true });
   });
-  const stopHealth = reportHealth(options, owner.httpBaseUrl);
-  await Promise.race([abortPromise(signal), ownerGone]);
-  stopHealth();
 }
 
 /** Checks the server on an interval and logs only when its health changes. */
 function reportHealth(
   options: DaemonOptions,
   httpBaseUrl: string,
-  onHealthy?: () => Promise<void>,
+  onHealthy?: () => void,
 ): () => void {
   let healthy = true;
   let running = false;
@@ -200,7 +208,7 @@ function reportHealth(
       await fetchEnvironmentSummary(httpBaseUrl);
       if (!healthy) options.log("server healthy again");
       healthy = true;
-      await onHealthy?.();
+      onHealthy?.();
     } catch (error) {
       if (healthy) options.log(`server not responding: ${describeError(error)}`);
       healthy = false;

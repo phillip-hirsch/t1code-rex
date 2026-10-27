@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { readDaemonState } from "./daemon/daemonState.ts";
 import { isProcessAlive } from "./daemon/health.ts";
+import { resolveServerCommand } from "./daemon/serverLauncher.ts";
 import { resolveTr3xPaths } from "./paths.ts";
 
 const CLI = NodeURL.fileURLToPath(new URL("./cli.ts", import.meta.url));
@@ -76,6 +77,22 @@ function trackServer(pid: number): number {
   return pid;
 }
 
+/** Revokes every session in the base dir through upstream's control plane, as expiry would. */
+function revokeAllSessions(home: string): number {
+  const { command, args, cwd } = resolveServerCommand({ TR3X_NODE_BIN: process.execPath });
+  const run = (...rest: string[]) =>
+    NodeChildProcess.execFileSync(command, [...args, "auth", "session", ...rest], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  const sessions: Array<{ sessionId: string }> = JSON.parse(
+    run("list", "--base-dir", home, "--json"),
+  );
+  for (const { sessionId } of sessions) run("revoke", "--base-dir", home, sessionId);
+  return sessions.length;
+}
+
 function argvOf(pids: ReadonlyArray<number>): string {
   return NodeChildProcess.execFileSync("ps", ["-ww", "-o", "args=", "-p", pids.join(",")], {
     encoding: "utf8",
@@ -108,15 +125,20 @@ describe("tr3x daemon", () => {
       ),
     );
     expect(doctor.output()).toMatch(/ok\s+server\s+T3 \S+, orchestration protocol 2/u);
-    expect(doctor.output()).toMatch(/(ok|fail)\s+providers\s+(\d+|none) of \d+ usable/u);
+    const providersReadable = /(ok|fail)\s+providers\s+(\d+|none) of \d+ usable/u;
+    expect(doctor.output()).toMatch(providersReadable);
 
-    const secrets = [state.bearerToken];
+    // Discovery holds no bearer, and secrets stay out of argv.
+    expect(NodeFS.readFileSync(paths.daemonStatePath, "utf8")).not.toMatch(/token|bearer/iu);
     const argv = argvOf([first.child.pid!, second.child.pid!, firstServer]);
     expect(argv).toContain("--bootstrap-fd 0");
-    for (const secret of secrets) {
-      expect(argv).not.toContain(secret);
-      expect(first.output() + second.output() + doctor.output()).not.toContain(secret);
-    }
+    expect(argv).not.toContain("--auth-token");
+
+    // Every session the server knows expires or is revoked; doctor still gets in.
+    expect(revokeAllSessions(home)).toBeGreaterThan(0);
+    const afterRevoke = startCli(home, "doctor");
+    await afterRevoke.exited;
+    expect(afterRevoke.output()).toMatch(providersReadable);
 
     first.child.kill("SIGTERM");
     expect(await first.exited).toBe(0);

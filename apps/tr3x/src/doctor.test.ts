@@ -2,9 +2,11 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import { ServerProvider } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { runDoctor } from "./doctor.ts";
+import { runDoctor, summarizeProviders } from "./doctor.ts";
 import { resolveTr3xPaths } from "./paths.ts";
 
 const dirs: string[] = [];
@@ -63,9 +65,66 @@ describe("tr3x doctor", () => {
     expect(lines).toContainEqual(expect.stringMatching(/rex session\s+not inside Rex/u));
   });
 
+  it("refuses a daemon state file other users can read", async () => {
+    const home = NodePath.join(tempDir(), "home");
+    const paths = resolveTr3xPaths({ TR3X_HOME: home });
+    NodeFS.mkdirSync(paths.daemonDir, { recursive: true, mode: 0o700 });
+    NodeFS.writeFileSync(paths.daemonStatePath, "{}", { mode: 0o644 });
+    NodeFS.chmodSync(paths.daemonStatePath, 0o644);
+    const { code, lines } = await doctor({ TR3X_HOME: home, PATH: "" });
+    expect(code).toBe(1);
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /fail\s+daemon\s+refusing its state file: .*daemon\.json is accessible to other users \(mode 644\)/u,
+      ),
+    );
+  });
+
   it("refuses T3 Code's own home as TR3X_HOME", () => {
     expect(() => resolveTr3xPaths({ TR3X_HOME: "/Users/me/.t3/" }, "/Users/me")).toThrow(
       "TR3X_HOME points at T3 Code's own data",
     );
+  });
+});
+
+const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
+
+function provider(name: string, overrides: Record<string, unknown> = {}): ServerProvider {
+  return decodeProvider({
+    instanceId: name,
+    driver: name,
+    displayName: name,
+    enabled: true,
+    installed: true,
+    version: "1.0.0",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-10-27T00:00:00.000Z",
+    models: [],
+    ...overrides,
+  });
+}
+
+describe("summarizeProviders", () => {
+  it("counts a provider as usable only when it is signed in, as upstream web does", () => {
+    const signedOut = provider("pi", {
+      status: "warning",
+      auth: { status: "unauthenticated" },
+    });
+    expect(summarizeProviders([signedOut])).toMatchObject({
+      status: "fail",
+      detail: expect.stringMatching(/^none of 1 usable/u),
+      lines: [
+        expect.stringMatching(/^pi\s+installed\s+enabled\s+warning\s+0 models\s+not signed in$/u),
+      ],
+    });
+
+    const check = summarizeProviders([
+      signedOut,
+      provider("codex", { auth: { status: "unknown" } }),
+      provider("claude", { status: "error" }),
+    ]);
+    expect(check).toMatchObject({ status: "ok", detail: "1 of 3 usable" });
+    expect(check.lines?.[1]).not.toContain("not signed in");
   });
 });

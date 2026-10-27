@@ -83,7 +83,6 @@ describe("startManagedServer", () => {
         reservePort: async () => 43111,
         waitUntilReady: ready,
         randomToken: () => "bootstrap-secret",
-        exchangeBearerToken: async ({ credential }) => `bearer-for-${credential}`,
         env: { TR3X_NODE_BIN: "/opt/node", T3CODE_HOME: "/home/me/.t3", PATH: "/usr/bin" },
       },
     );
@@ -112,7 +111,6 @@ describe("startManagedServer", () => {
       }),
     );
 
-    await expect(server.getBearerToken()).resolves.toBe("bearer-for-bootstrap-secret");
     await server.stop();
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
@@ -135,92 +133,6 @@ describe("startManagedServer", () => {
     await stopping;
     expect(child.kill).toHaveBeenCalledWith("SIGKILL");
     expect(child.signalCode).toBe("SIGKILL");
-  });
-
-  it("keeps the bearer across a restart while the server accepts it", async () => {
-    vi.useFakeTimers();
-    const { children, spawnImpl } = fakeSpawn();
-    const exchangeBearerToken = vi.fn(async ({ credential }: { credential: string }) => {
-      return `bearer:${credential}`;
-    });
-    let accepted = true;
-    const isBearerAccepted = vi.fn(async () => accepted);
-    let tokenIndex = 0;
-    const server = await startManagedServer(
-      { baseDir: "/tmp/.tr3x", port: 43114, restartDelayMs: 25 },
-      {
-        spawnImpl,
-        waitUntilReady: ready,
-        randomToken: () => `token-${(tokenIndex += 1)}`,
-        exchangeBearerToken,
-        isBearerAccepted,
-        env: {},
-      },
-    );
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
-
-    children[0]!.exit(1);
-    await vi.advanceTimersByTimeAsync(25);
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
-    expect(exchangeBearerToken).toHaveBeenCalledTimes(1);
-
-    // A failed check while the new server boots keeps the bearer and retries.
-    children[1]!.exit(1);
-    await vi.advanceTimersByTimeAsync(25);
-    isBearerAccepted.mockRejectedValueOnce(new Error("connection refused"));
-    await expect(server.getBearerToken()).rejects.toThrow("connection refused");
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
-    expect(exchangeBearerToken).toHaveBeenCalledTimes(1);
-
-    accepted = false;
-    children[2]!.exit(1);
-    await vi.advanceTimersByTimeAsync(25);
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-4");
-    expect(exchangeBearerToken).toHaveBeenCalledTimes(2);
-    await server.stop();
-  });
-
-  it("recovers when checks from overlapping server generations fail", async () => {
-    vi.useFakeTimers();
-    const { children, spawnImpl } = fakeSpawn();
-    const exchangeBearerToken = vi.fn(async ({ credential }: { credential: string }) => {
-      return `bearer:${credential}`;
-    });
-    let rejectPending: (error: Error) => void = () => {};
-    const isBearerAccepted = vi.fn(async () => true);
-    let tokenIndex = 0;
-    const server = await startManagedServer(
-      { baseDir: "/tmp/.tr3x", port: 43116, restartDelayMs: 25 },
-      {
-        spawnImpl,
-        waitUntilReady: ready,
-        randomToken: () => `token-${(tokenIndex += 1)}`,
-        exchangeBearerToken,
-        isBearerAccepted,
-        env: {},
-      },
-    );
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
-
-    // Generation 2's check hangs, then generation 3 starts and its check fails too.
-    children[0]!.exit(1);
-    await vi.advanceTimersByTimeAsync(25);
-    isBearerAccepted.mockImplementationOnce(
-      () => new Promise<boolean>((_resolve, reject) => (rejectPending = reject)),
-    );
-    const generation2 = server.getBearerToken();
-    children[1]!.exit(1);
-    await vi.advanceTimersByTimeAsync(25);
-    isBearerAccepted.mockRejectedValueOnce(new Error("still booting"));
-    await expect(server.getBearerToken()).rejects.toThrow("still booting");
-    rejectPending(new Error("connection refused"));
-    await expect(generation2).rejects.toThrow("connection refused");
-
-    // The next call checks the server again and keeps the last good bearer.
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
-    expect(isBearerAccepted).toHaveBeenCalledTimes(3);
-    expect(exchangeBearerToken).toHaveBeenCalledTimes(1);
-    await server.stop();
   });
 
   it("stops the server process when it never becomes ready", async () => {
@@ -266,12 +178,31 @@ describe("startManagedServer", () => {
     expect(children[0]!.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
-  it("exchanges the bearer once per server generation and again after a restart it rejects", async () => {
+  it("stops before spawning when the signal aborts while the port is reserved", async () => {
+    const { calls, spawnImpl } = fakeSpawn();
+    const controller = new AbortController();
+    const waitUntilReady = vi.fn(ready);
+    const started = startManagedServer(
+      { baseDir: "/tmp/.tr3x", signal: controller.signal },
+      {
+        spawnImpl,
+        env: {},
+        waitUntilReady,
+        reservePort: async () => {
+          await Promise.resolve();
+          controller.abort();
+          return 43120;
+        },
+      },
+    );
+    await expect(started).rejects.toThrow("Aborted while the server started.");
+    expect(calls).toHaveLength(0);
+    expect(waitUntilReady).not.toHaveBeenCalled();
+  });
+
+  it("restarts a crashed server with a fresh bootstrap credential", async () => {
     vi.useFakeTimers();
     const { children, calls, spawnImpl } = fakeSpawn();
-    const exchangeBearerToken = vi.fn(async ({ credential }: { credential: string }) => {
-      return `bearer:${credential}`;
-    });
     let tokenIndex = 0;
     const server = await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43112, restartDelayMs: 25 },
@@ -279,17 +210,11 @@ describe("startManagedServer", () => {
         spawnImpl,
         waitUntilReady: ready,
         randomToken: () => `token-${(tokenIndex += 1)}`,
-        exchangeBearerToken,
-        isBearerAccepted: async () => false,
         env: {},
       },
     );
     const restarts: number[] = [];
     server.events.on("restart", (attempt) => restarts.push(attempt));
-
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-1");
-    expect(exchangeBearerToken).toHaveBeenCalledTimes(1);
 
     children[0]!.exit(1);
     await vi.advanceTimersByTimeAsync(25);
@@ -297,7 +222,6 @@ describe("startManagedServer", () => {
     expect(calls).toHaveLength(2);
     expect(server.process).toBe(children[1]);
     expect(JSON.parse(children[1]!.stdinChunks.join("")).desktopBootstrapToken).toBe("token-2");
-    await expect(server.getBearerToken()).resolves.toBe("bearer:token-2");
 
     await server.stop();
     await vi.advanceTimersByTimeAsync(25);

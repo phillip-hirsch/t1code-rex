@@ -9,7 +9,8 @@ import { isProcessAlive } from "./health.ts";
 /**
  * How a second tr3x process finds the daemon that owns the server. The owner
  * writes this after its server is ready and removes it when it stops. It holds
- * the daemon's bearer, so the file is 0600 inside a 0700 directory.
+ * no secrets, but clients trust its endpoints, so it is 0600 inside a 0700
+ * directory and readers refuse anything else.
  */
 export const DaemonState = Schema.Struct({
   version: Schema.Literal(1),
@@ -20,7 +21,6 @@ export const DaemonState = Schema.Struct({
   httpBaseUrl: Schema.String,
   wsBaseUrl: Schema.String,
   environmentId: Schema.String,
-  bearerToken: Schema.String,
 });
 export type DaemonState = typeof DaemonState.Type;
 
@@ -31,9 +31,29 @@ export function currentProcessStartedAt(): string {
   return new Date(Date.now() - process.uptime() * 1_000).toISOString();
 }
 
+/** The state file or its directory could be swapped or read by someone else. */
+export class UnsafeDaemonStateError extends Error {}
+
+function assertPrivate(stats: NodeFS.Stats, path: string, kind: "directory" | "file"): void {
+  const isKind = kind === "directory" ? stats.isDirectory() : stats.isFile();
+  if (!isKind) throw new UnsafeDaemonStateError(`${path} is not a ${kind}.`);
+  if (stats.uid !== process.getuid?.()) {
+    throw new UnsafeDaemonStateError(`${path} is owned by uid ${stats.uid}, not this user.`);
+  }
+  if ((stats.mode & 0o077) !== 0) {
+    throw new UnsafeDaemonStateError(
+      `${path} is accessible to other users (mode ${(stats.mode & 0o777).toString(8)}).`,
+    );
+  }
+}
+
+/** Creates the directory if needed, then requires a real 0700 directory owned by this user. */
 export function ensurePrivateDir(dir: string): void {
   NodeFS.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  NodeFS.chmodSync(dir, 0o700);
+  // lstat: a symlink fails the directory check instead of being followed.
+  const stats = NodeFS.lstatSync(dir);
+  if (stats.isDirectory() && stats.uid === process.getuid?.()) NodeFS.chmodSync(dir, 0o700);
+  assertPrivate(NodeFS.lstatSync(dir), dir, "directory");
 }
 
 export function writeDaemonState(path: string, state: DaemonState): void {
@@ -44,13 +64,37 @@ export function writeDaemonState(path: string, state: DaemonState): void {
   NodeFS.renameSync(temp, path);
 }
 
-/** Reads the state file as written. `undefined` when it's missing or unreadable. */
+/**
+ * Reads the state file as written. `undefined` when it's missing or corrupt.
+ * Throws `UnsafeDaemonStateError` when the directory or file isn't private to
+ * this user, or either is a symlink.
+ */
 export function readDaemonState(path: string): DaemonState | undefined {
-  let contents: string;
+  const dir = NodePath.dirname(path);
+  let dirStats: NodeFS.Stats;
   try {
-    contents = NodeFS.readFileSync(path, "utf8");
+    dirStats = NodeFS.lstatSync(dir);
   } catch {
     return undefined;
+  }
+  assertPrivate(dirStats, dir, "directory");
+  let fd: number;
+  try {
+    fd = NodeFS.openSync(path, NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    if ((error as NodeJS.ErrnoException).code === "ELOOP") {
+      throw new UnsafeDaemonStateError(`${path} is a symlink.`);
+    }
+    throw error;
+  }
+  let contents: string;
+  try {
+    // Check what was opened, not the path, so a swap after the check can't slip through.
+    assertPrivate(NodeFS.fstatSync(fd), path, "file");
+    contents = NodeFS.readFileSync(fd, "utf8");
+  } finally {
+    NodeFS.closeSync(fd);
   }
   try {
     return decodeDaemonState(contents.trim());
@@ -61,7 +105,13 @@ export function readDaemonState(path: string): DaemonState | undefined {
 
 /** Removes the state file only if `pid` wrote it, so a stopping daemon never deletes its successor's. */
 export function removeDaemonState(path: string, pid: number): void {
-  if (readDaemonState(path)?.pid === pid) NodeFS.rmSync(path, { force: true });
+  let owner: number | undefined;
+  try {
+    owner = readDaemonState(path)?.pid;
+  } catch {
+    return;
+  }
+  if (owner === pid) NodeFS.rmSync(path, { force: true });
 }
 
 /**

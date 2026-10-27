@@ -2,11 +2,21 @@
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-import { ORCHESTRATION_PROTOCOL_VERSION, type ServerProvider } from "@t3tools/contracts";
+import {
+  AuthOrchestrationReadScope,
+  ORCHESTRATION_PROTOCOL_VERSION,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
-import { isDaemonAlive, readDaemonState, readRecordedServer } from "./daemon/daemonState.ts";
+import {
+  type DaemonState,
+  isDaemonAlive,
+  readDaemonState,
+  readRecordedServer,
+} from "./daemon/daemonState.ts";
 import { type EnvironmentSummary, fetchEnvironmentSummary } from "./daemon/health.ts";
+import { issueLocalSession } from "./daemon/localSession.ts";
 import type { Tr3xPaths } from "./paths.ts";
 import { describeError } from "./redact.ts";
 import { fetchServerConfig } from "./serverConfig.ts";
@@ -18,7 +28,7 @@ export const REX_APP_BUNDLE_CLIS = [
 
 type Status = "ok" | "fail" | "info";
 
-interface Check {
+export interface Check {
   readonly status: Status;
   readonly name: string;
   readonly detail: string;
@@ -36,23 +46,31 @@ export interface DoctorOptions {
 export async function runDoctor(options: DoctorOptions): Promise<number> {
   const { paths, env } = options;
   const checks: Check[] = [];
-  const state = readDaemonState(paths.daemonStatePath);
+  let state: DaemonState | undefined;
+  let refused: string | undefined;
+  try {
+    state = readDaemonState(paths.daemonStatePath);
+  } catch (error) {
+    refused = describeError(error);
+  }
   const daemon = state !== undefined && isDaemonAlive(state) ? state : undefined;
   checks.push(
-    daemon !== undefined
-      ? {
-          status: "ok",
-          name: "daemon",
-          detail: `running (pid ${daemon.pid}, server pid ${daemon.serverPid ?? "unknown"})`,
-        }
-      : {
-          status: "fail",
-          name: "daemon",
-          detail:
-            state === undefined
-              ? "not running. Start it with `tr3x daemon`."
-              : `not running (daemon ${state.pid} exited without cleaning up; the next \`tr3x daemon\` replaces its state). Start it with \`tr3x daemon\`.`,
-        },
+    refused !== undefined
+      ? { status: "fail", name: "daemon", detail: `refusing its state file: ${refused}` }
+      : daemon !== undefined
+        ? {
+            status: "ok",
+            name: "daemon",
+            detail: `running (pid ${daemon.pid}, server pid ${daemon.serverPid ?? "unknown"})`,
+          }
+        : {
+            status: "fail",
+            name: "daemon",
+            detail:
+              state === undefined
+                ? "not running. Start it with `tr3x daemon`."
+                : `not running (daemon ${state.pid} exited without cleaning up; the next \`tr3x daemon\` replaces its state). Start it with \`tr3x daemon\`.`,
+          },
   );
 
   const serverUrl = daemon?.httpBaseUrl ?? readRecordedServer(paths.serverRuntimeStatePath)?.origin;
@@ -61,7 +79,7 @@ export async function runDoctor(options: DoctorOptions): Promise<number> {
       ? undefined
       : await fetchEnvironmentSummary(serverUrl).catch(() => undefined);
   checks.push(serverCheck(serverUrl, environment, daemon !== undefined));
-  checks.push(await providersCheck(daemon, environment));
+  checks.push(await providersCheck(paths, env, daemon, environment));
   checks.push(rexCliCheck(env, options.rexAppBundleClis ?? REX_APP_BUNDLE_CLIS));
   const session = env.REX_SESSION?.trim();
   checks.push({
@@ -106,7 +124,9 @@ function serverCheck(
 }
 
 async function providersCheck(
-  daemon: { httpBaseUrl: string; wsBaseUrl: string; bearerToken: string } | undefined,
+  paths: Tr3xPaths,
+  env: NodeJS.ProcessEnv,
+  daemon: DaemonState | undefined,
   environment: EnvironmentSummary | undefined,
 ): Promise<Check> {
   if (daemon === undefined || environment === undefined) {
@@ -114,7 +134,18 @@ async function providersCheck(
   }
   let providers: ReadonlyArray<ServerProvider>;
   try {
-    providers = (await Effect.runPromise(fetchServerConfig(daemon))).providers;
+    // Its own read-only session, so nothing long-lived is stored or can go stale.
+    const session = await issueLocalSession({
+      baseDir: paths.home,
+      scopes: [AuthOrchestrationReadScope],
+      ttl: "2m",
+      label: "tr3x doctor",
+      env,
+    });
+    const config = await Effect.runPromise(
+      fetchServerConfig({ ...daemon, bearerToken: session.token }),
+    );
+    providers = config.providers;
   } catch (error) {
     return {
       status: "fail",
@@ -122,6 +153,10 @@ async function providersCheck(
       detail: `could not read the server config: ${describeError(error)}`,
     };
   }
+  return summarizeProviders(providers);
+}
+
+export function summarizeProviders(providers: ReadonlyArray<ServerProvider>): Check {
   const usable = providers.filter(isUsableProvider);
   const nameWidth = Math.max(0, ...providers.map((provider) => providerName(provider).length));
   return {
@@ -137,8 +172,11 @@ async function providersCheck(
         (provider.installed ? "installed" : "not installed").padEnd(13),
         (provider.enabled ? "enabled" : "disabled").padEnd(8),
         provider.status.padEnd(8),
-        `${provider.models.length} model${provider.models.length === 1 ? "" : "s"}`,
-      ].join("  "),
+        `${provider.models.length} model${provider.models.length === 1 ? "" : "s"}`.padEnd(9),
+        ...(provider.auth.status === "unauthenticated" ? ["not signed in"] : []),
+      ]
+        .join("  ")
+        .trimEnd(),
     ),
   };
 }
@@ -147,11 +185,13 @@ function providerName(provider: ServerProvider): string {
   return provider.displayName ?? provider.instanceId;
 }
 
+/** Upstream web's rule for a provider it will route a new thread to (`useDraftEnvironmentRouting`). */
 function isUsableProvider(provider: ServerProvider): boolean {
   return (
     provider.enabled &&
     provider.installed &&
     (provider.status === "ready" || provider.status === "warning") &&
+    provider.auth.status !== "unauthenticated" &&
     provider.availability !== "unavailable"
   );
 }

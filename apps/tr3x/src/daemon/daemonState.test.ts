@@ -11,6 +11,7 @@ import {
   readDaemonState,
   readLiveDaemonState,
   removeDaemonState,
+  UnsafeDaemonStateError,
   writeDaemonState,
 } from "./daemonState.ts";
 
@@ -35,7 +36,6 @@ function state(overrides: Partial<DaemonState> = {}): DaemonState {
     httpBaseUrl: "http://127.0.0.1:43111",
     wsBaseUrl: "ws://127.0.0.1:43111",
     environmentId: "env-1",
-    bearerToken: "bearer-secret",
     ...overrides,
   };
 }
@@ -79,9 +79,39 @@ describe("daemon state", () => {
   it("ignores a missing or corrupt file", () => {
     const path = statePath();
     expect(readDaemonState(path)).toBeUndefined();
-    NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true });
-    NodeFS.writeFileSync(path, '{"version":1,"pid":');
+    NodeFS.mkdirSync(NodePath.dirname(path), { recursive: true, mode: 0o700 });
+    NodeFS.writeFileSync(path, '{"version":1,"pid":', { mode: 0o600 });
     expect(readDaemonState(path)).toBeUndefined();
+  });
+
+  it("refuses a symlinked directory or file", () => {
+    const path = statePath();
+    writeDaemonState(path, state());
+    const dir = NodePath.dirname(path);
+
+    const linkedFile = NodePath.join(NodePath.dirname(dir), "linked-file", "daemon.json");
+    NodeFS.mkdirSync(NodePath.dirname(linkedFile), { mode: 0o700 });
+    NodeFS.symlinkSync(path, linkedFile);
+    expect(() => readDaemonState(linkedFile)).toThrow(UnsafeDaemonStateError);
+    expect(() => readDaemonState(linkedFile)).toThrow("is a symlink");
+
+    const linkedDir = NodePath.join(NodePath.dirname(dir), "linked-dir");
+    NodeFS.symlinkSync(dir, linkedDir);
+    const viaLinkedDir = NodePath.join(linkedDir, "daemon.json");
+    expect(() => readDaemonState(viaLinkedDir)).toThrow("is not a directory");
+    expect(() => writeDaemonState(viaLinkedDir, state())).toThrow("is not a directory");
+  });
+
+  it("refuses a file or directory other users can access", () => {
+    const path = statePath();
+    writeDaemonState(path, state());
+    NodeFS.chmodSync(path, 0o640);
+    expect(() => readDaemonState(path)).toThrow("accessible to other users (mode 640)");
+    expect(() => readLiveDaemonState(path)).toThrow(UnsafeDaemonStateError);
+
+    NodeFS.chmodSync(path, 0o600);
+    NodeFS.chmodSync(NodePath.dirname(path), 0o755);
+    expect(() => readDaemonState(path)).toThrow("accessible to other users (mode 755)");
   });
 
   it("is removed only by the daemon that wrote it", () => {
