@@ -1,9 +1,7 @@
 // @effect-diagnostics globalConsole:off globalTimers:off -- A Bun check script; it runs outside the Effect runtime.
 /**
- * Drives the real diff panel under OpenTUI's renderer (which needs Bun; Vitest runs on
- * Node), fed by fixed atoms instead of a server: files and hunks, unified and split, keyboard
- * navigation, the line cap, and a new checkpoint arriving while it is open.
- *
+ * Drives the real diff panel under OpenTUI (Bun only), fed by fixed atoms: hunks, views, keys,
+ * the line cap, new checkpoints, a run with no diff, and invisible whitespace changes.
  *   bun apps/tui/scripts/check-diff.tsx
  */
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
@@ -21,7 +19,12 @@ import {
   type DiffSource,
   type DiffViewMode,
 } from "../src/diffPanel.tsx";
-import { LATEST_DIFF_SCOPE, type DiffScope, type DiffTurn } from "../src/diffTurns.ts";
+import {
+  LATEST_DIFF_SCOPE,
+  type DiffScope,
+  type DiffTurn,
+  type DiffTurns,
+} from "../src/diffTurns.ts";
 import { useMarkdownStyles } from "../src/messageMarkdownView.tsx";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
 
@@ -76,12 +79,24 @@ function turn(turnCount: number, runId: string): DiffTurn {
   return { turnCount, runId, fileCount: 2, additions: 1, deletions: 0 };
 }
 
+function diffTurns(
+  turns: ReadonlyArray<DiffTurn>,
+  undiffable: DiffTurns["undiffable"] = new Map(),
+): DiffTurns {
+  return { turns, undiffable };
+}
+
+const defaultDiffText = (to: number) =>
+  to === 1 ? TURN_1 : to === 2 ? TURN_2 : `${TURN_1}${TURN_2}`;
+
 /** The panel's data as fixed atoms: diffs by range, and the thread's diffable turns. */
-function createSource() {
+function createSource(
+  initialTurns: DiffTurns = diffTurns([turn(1, "run-1")]),
+  diffText: (toTurnCount: number) => string = defaultDiffText,
+) {
   const registry = AtomRegistry.make();
-  const turnsAtom = Atom.make<ReadonlyArray<DiffTurn>>([turn(1, "run-1")]);
+  const turnsAtom = Atom.make<DiffTurns>(initialTurns);
   const diffs = new Map<string, CheckpointDiffAtom>();
-  const diffText = (to: number) => (to === 1 ? TURN_1 : to === 2 ? TURN_2 : `${TURN_1}${TURN_2}`);
   const source: DiffSource = {
     registry,
     diffTurnsAtom: () => turnsAtom,
@@ -108,9 +123,9 @@ function createSource() {
 }
 
 /** The panel with its owner's state, and the app's key path: every key goes to handleKey. */
-function Harness(props: { source: DiffSource }) {
+function Harness(props: { source: DiffSource; initialScope?: DiffScope }) {
   const styles = useMarkdownStyles(DEFAULT_TUI_THEME);
-  const [scope, setScope] = useState<DiffScope>(LATEST_DIFF_SCOPE);
+  const [scope, setScope] = useState<DiffScope>(props.initialScope ?? LATEST_DIFF_SCOPE);
   const [view, setView] = useState<DiffViewMode>("unified");
   const [wordWrap, setWordWrap] = useState(false);
   const panel = useRef<DiffPanelHandle | null>(null);
@@ -234,7 +249,7 @@ check("D5: m draws 400 more", scrollbox.scrollHeight - cappedHeight, 400);
 // D6: a new checkpoint while on the latest turn shows it, keeping the selected file by path.
 act(() => setup.mockInput.pressKey("["));
 await settle(setup.renderOnce);
-act(() => data.registry.set(data.turnsAtom, [turn(1, "run-1"), turn(2, "run-2")]));
+act(() => data.registry.set(data.turnsAtom, diffTurns([turn(1, "run-1"), turn(2, "run-2")])));
 await settle(setup.renderOnce);
 frame = setup.captureCharFrame();
 check("D6: the panel moves to the new turn", frame.includes("Turn 2 of 2 (latest)"), true);
@@ -254,6 +269,72 @@ await settle(setup.renderOnce);
 check("D7: , steps back to turn 1", setup.captureCharFrame().includes("Turn 1 of 2"), true);
 
 setup.renderer.destroy();
+
+// D8: "View diff" on an interrupted run's row keeps that run: it says why there's no diff,
+// and never shows (or asks for) another run's.
+const WHITESPACE_TURN = [
+  "diff --git a/notes.txt b/notes.txt",
+  "--- a/notes.txt",
+  "+++ b/notes.txt",
+  "@@ -1,3 +1,3 @@",
+  " one",
+  "-two",
+  "+two   ",
+  " three",
+  "@@ -9,2 +9,2 @@",
+  " nine",
+  "-last",
+  "\\ No newline at end of file",
+  "+last",
+  "",
+].join("\n");
+const runData = createSource(
+  diffTurns(
+    [turn(1, "run-1")],
+    new Map([
+      ["run-2", { turnCount: 2, reason: "it was interrupted, and only completed runs have diffs" }],
+    ]),
+  ),
+  () => WHITESPACE_TURN,
+);
+const runSetup = await testRender(
+  <Harness source={runData.source} initialScope={{ kind: "run", runId: "run-2", turnCount: 2 }} />,
+  { width: 120, height: 30, kittyKeyboard: true },
+);
+await settle(runSetup.renderOnce);
+frame = runSetup.captureCharFrame();
+check(
+  "D8: an interrupted run says why it has no diff",
+  frame.includes("No diff for this run: it was interrupted, and only completed runs have diffs."),
+  true,
+);
+check("D8: the header names the run, not a turn", frame.includes("This run"), true);
+check("D8: and no other run's diff is asked for", runData.requested().join(","), "");
+
+// D9: , steps to the nearest diffable turn; trailing spaces of a changed line show as dots.
+act(() => runSetup.mockInput.pressKey(","));
+await settle(runSetup.renderOnce);
+frame = runSetup.captureCharFrame();
+check("D9: , steps back to turn 1", frame.includes("Turn 1 of 1 (latest)"), true);
+check("D9: trailing spaces show", /\+ two··· /.test(frame), true);
+
+// D10: a newline-only change says which side has no final newline, in both views.
+check(
+  "D10: unified names the side missing its final newline",
+  frame.includes("↵ No newline at end of file in the old version"),
+  true,
+);
+check("D10: without counting it as a line", frame.includes("@@ -9,2 +9,2 @@"), true);
+act(() => runSetup.mockInput.pressKey("v"));
+await settle(runSetup.renderOnce);
+frame = runSetup.captureCharFrame();
+check(
+  "D10: split does too",
+  frame.includes("↵ No newline at end of file in the old version"),
+  true,
+);
+runSetup.renderer.destroy();
+
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed`);
   process.exit(1);

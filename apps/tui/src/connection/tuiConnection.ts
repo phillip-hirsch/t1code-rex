@@ -76,7 +76,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import type { ComposerCommandResult } from "../composerSender.ts";
-import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurn } from "../diffTurns.ts";
+import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurns } from "../diffTurns.ts";
 import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
 import type { TuiServerSession } from "../serverLauncher.ts";
 import * as Platform from "./platform.ts";
@@ -160,7 +160,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
   // The turns the diff panel can show; a new list only when checkpoints or runs change.
   const diffTurnsAtom = Atom.family((threadId: ThreadId) => {
     let previous: { checkpoints: unknown; runs: unknown } | null = null;
-    let value: ReadonlyArray<DiffTurn> = NO_DIFF_TURNS;
+    let value: DiffTurns = NO_DIFF_TURNS;
     return Atom.make((get) => {
       const projection = Option.getOrNull(
         get(threadDetails.stateAtom({ environmentId, threadId })).data,

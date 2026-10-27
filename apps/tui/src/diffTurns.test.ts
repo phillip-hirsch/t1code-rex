@@ -8,6 +8,7 @@ import {
   resolveDiffRange,
   scopeForRun,
   stepDiffScope,
+  undiffableRunMessage,
   type DiffScope,
 } from "./diffTurns.ts";
 
@@ -50,18 +51,29 @@ describe("deriveDiffTurns", () => {
       ],
       runs,
     });
-    expect(turns).toEqual([
+    expect(turns.turns).toEqual([
       { turnCount: 1, runId: "r1", fileCount: 2, additions: 5, deletions: 1 },
       { turnCount: 3, runId: "r3", fileCount: 2, additions: 5, deletions: 1 },
     ]);
+    expect(Object.fromEntries(turns.undiffable)).toEqual({
+      r1: { turnCount: null, reason: "its checkpoint has no turn" },
+      r2: { turnCount: 2, reason: "it was interrupted, and only completed runs have diffs" },
+      r4: { turnCount: 4, reason: "its checkpoint is missing" },
+    });
   });
 });
 
 describe("diff scopes", () => {
-  const turns = deriveDiffTurns({
-    checkpoints: [checkpoint(1, "r1"), checkpoint(3, "r3"), checkpoint(4, "r4")],
+  const diffTurns = deriveDiffTurns({
+    checkpoints: [
+      checkpoint(1, "r1"),
+      checkpoint(2, "r2"),
+      checkpoint(3, "r3"),
+      checkpoint(4, "r4"),
+    ],
     runs,
   });
+  const turns = diffTurns.turns;
 
   it("asks for a turn's own range, or the whole thread up to the latest", () => {
     expect(resolveDiffRange(LATEST_DIFF_SCOPE, turns)).toEqual({
@@ -82,7 +94,7 @@ describe("diff scopes", () => {
     const later = deriveDiffTurns({
       checkpoints: [checkpoint(1, "r1"), checkpoint(3, "r3"), checkpoint(4, "r4")],
       runs,
-    });
+    }).turns;
     const earlier = later.slice(0, 2);
     expect(resolveDiffRange(LATEST_DIFF_SCOPE, earlier)?.toTurnCount).toBe(3);
     expect(resolveDiffRange(LATEST_DIFF_SCOPE, later)?.toTurnCount).toBe(4);
@@ -100,9 +112,35 @@ describe("diff scopes", () => {
   });
 
   it("opens a run's own turn from its changed-files row", () => {
-    expect(scopeForRun("r1", turns)).toEqual({ kind: "turn", turnCount: 1 });
-    expect(scopeForRun("r4", turns)).toBe(LATEST_DIFF_SCOPE);
-    expect(scopeForRun("unknown", turns)).toBe(LATEST_DIFF_SCOPE);
+    expect(scopeForRun("r1", diffTurns)).toEqual({ kind: "turn", turnCount: 1 });
+    expect(scopeForRun("r4", diffTurns)).toBe(LATEST_DIFF_SCOPE);
+  });
+
+  it("keeps an interrupted run's own scope instead of falling back to another run", () => {
+    const interrupted = scopeForRun("r2", diffTurns);
+    expect(interrupted).toEqual({ kind: "run", runId: "r2", turnCount: 2 });
+    expect(resolveDiffRange(interrupted, turns)).toBeNull();
+    expect(describeDiffScope(interrupted, turns)).toBe("This run");
+    expect(undiffableRunMessage(interrupted, diffTurns)).toBe(
+      "No diff for this run: it was interrupted, and only completed runs have diffs.",
+    );
+    const unknown = scopeForRun("unknown", diffTurns);
+    expect(resolveDiffRange(unknown, turns)).toBeNull();
+    expect(undiffableRunMessage(unknown, diffTurns)).toBe("No diff for this run.");
+    // Steps go to the nearest diffable turn on that side.
+    expect(stepDiffScope(interrupted, turns, -1)).toEqual({ kind: "turn", turnCount: 1 });
+    expect(stepDiffScope(interrupted, turns, 1)).toEqual({ kind: "turn", turnCount: 3 });
+  });
+
+  it("shows a run's diff once it has one", () => {
+    const scope: DiffScope = { kind: "run", runId: "r2", turnCount: 2 };
+    const finished = deriveDiffTurns({
+      checkpoints: [checkpoint(1, "r1"), checkpoint(2, "r2")],
+      runs: runs.map((run) => (run.id === "r2" ? { ...run, status: "completed" as const } : run)),
+    });
+    expect(resolveDiffRange(scope, finished.turns)).toEqual({ fromTurnCount: 1, toTurnCount: 2 });
+    expect(undiffableRunMessage(scope, finished)).toBeNull();
+    expect(describeDiffScope(scope, finished.turns)).toBe("Turn 2 of 2");
   });
 
   it("labels turns by position", () => {

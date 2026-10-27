@@ -15,7 +15,11 @@ export interface DiffHunk {
   readonly lines: ReadonlyArray<string>;
   readonly additions: number;
   readonly deletions: number;
+  /** Which side's file ends in this hunk without a final newline ("\ No newline at end of file"). */
+  readonly missingFinalNewline: MissingFinalNewline | null;
 }
+
+export type MissingFinalNewline = "old" | "new" | "both";
 
 export interface DiffFile {
   /** Unique within one diff, stable while the diff is unchanged. */
@@ -44,7 +48,7 @@ export const EMPTY_PARSED_DIFF: ParsedDiff = {
   truncated: false,
 };
 
-const TRUNCATED_MARKER = "[truncated]";
+const TRUNCATED_MARKER = /\n*\[truncated\]\n*$/;
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@ ?(.*)$/;
 const ESCAPES: Readonly<Record<string, string>> = {
   a: "\x07",
@@ -141,17 +145,30 @@ function newDraft(): FileDraft {
   };
 }
 
+/** Which sides lack a final newline once a "\" line follows `line` (the side's last line). */
+function withMissingNewline(
+  current: MissingFinalNewline | null,
+  line: string | undefined,
+): MissingFinalNewline | null {
+  const side = line?.startsWith("+") ? "new" : line?.startsWith("-") ? "old" : "both";
+  if (current === null || current === side) return side;
+  return "both";
+}
+
 export function parseUnifiedDiff(text: string): ParsedDiff {
-  let body = text.trimEnd();
-  const truncated = body.endsWith(TRUNCATED_MARKER);
-  if (truncated) body = body.slice(0, -TRUNCATED_MARKER.length).trimEnd();
-  if (body.length === 0) return truncated ? { ...EMPTY_PARSED_DIFF, truncated } : EMPTY_PARSED_DIFF;
+  // Only the patch's own final newline goes: a body line's trailing whitespace is content.
+  const truncated = TRUNCATED_MARKER.test(text);
+  const body = truncated ? text.replace(TRUNCATED_MARKER, "") : text.replace(/\r?\n$/, "");
+  if (body.trim().length === 0) {
+    return truncated ? { ...EMPTY_PARSED_DIFF, truncated } : EMPTY_PARSED_DIFF;
+  }
 
   const files: DiffFile[] = [];
   let draft: FileDraft | null = null;
   let hunk: {
-    header: Omit<DiffHunk, "lines" | "additions" | "deletions">;
+    header: Omit<DiffHunk, "lines" | "additions" | "deletions" | "missingFinalNewline">;
     lines: string[];
+    missingFinalNewline: MissingFinalNewline | null;
   } | null = null;
   let oldLeft = 0;
   let newLeft = 0;
@@ -164,7 +181,13 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
       if (line.startsWith("+")) additions += 1;
       else if (line.startsWith("-")) deletions += 1;
     }
-    draft.hunks.push({ ...hunk.header, lines: hunk.lines, additions, deletions });
+    draft.hunks.push({
+      ...hunk.header,
+      lines: hunk.lines,
+      additions,
+      deletions,
+      missingFinalNewline: hunk.missingFinalNewline,
+    });
     hunk = null;
   };
   const closeFile = () => {
@@ -204,11 +227,15 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
   };
 
   for (const line of body.split("\n")) {
+    // "\ No newline at end of file" follows its side's last line, even the hunk's very last.
+    if (hunk !== null && line.startsWith("\\")) {
+      hunk.missingFinalNewline = withMissingNewline(hunk.missingFinalNewline, hunk.lines.at(-1));
+      continue;
+    }
     if (hunk !== null && (oldLeft > 0 || newLeft > 0)) {
       const marker = line[0];
       // Some tools strip the space from empty context lines.
       const bodyLine = line.length === 0 ? " " : line;
-      if (marker === "\\") continue;
       if (marker === "+") newLeft -= 1;
       else if (marker === "-") oldLeft -= 1;
       else {
@@ -241,6 +268,7 @@ export function parseUnifiedDiff(text: string): ParsedDiff {
           context: (hunkMatch[5] ?? "").trim(),
         },
         lines: [],
+        missingFinalNewline: null,
       };
       continue;
     }
@@ -295,6 +323,8 @@ export interface DiffChunk {
   readonly header: string;
   /** A one-hunk patch for OpenTUI's <diff>, with counts matching the lines it holds. */
   readonly patch: string;
+  /** Drawn under the hunk: which side has no newline at the end of the file. */
+  readonly eofNote: string | null;
 }
 
 export interface DiffFileLayout {
@@ -314,6 +344,24 @@ function hunkHeader(hunk: DiffHunk, lines: ReadonlyArray<string>): string {
     }
   }
   return `@@ -${hunk.oldStart},${oldCount} +${hunk.newStart},${newCount} @@`;
+}
+
+const EOF_NOTES: Record<MissingFinalNewline, string> = {
+  old: "↵ No newline at end of file in the old version",
+  new: "↵ No newline at end of file in the new version",
+  both: "↵ No newline at end of file",
+};
+
+/**
+ * Trailing spaces and tabs of a changed line drawn as "·" and "→", so a whitespace change
+ * is visible (on a highlighted row they'd look like nothing).
+ */
+export function showTrailingWhitespace(line: string): string {
+  if (!line.startsWith("+") && !line.startsWith("-")) return line;
+  const trailing = /[ \t]+$/.exec(line.slice(1));
+  if (trailing === null) return line;
+  const marks = trailing[0].replaceAll(" ", "·").replaceAll("\t", "→");
+  return line.slice(0, line.length - trailing[0].length) + marks;
 }
 
 /** Index of the first body line of each hunk, counted across the file. */
@@ -345,7 +393,11 @@ export function layoutDiffFile(file: DiffFile, lineLimit: number): DiffFileLayou
       key: `${file.key}:${hunkIndex}`,
       hunkIndex,
       header: hunk.context.length > 0 ? `${label} ${hunk.context}` : label,
-      patch: `--- a/${file.path}\n+++ b/${file.path}\n${hunkHeader(hunk, lines)}\n${lines.join("\n")}`,
+      patch: `--- a/${file.path}\n+++ b/${file.path}\n${hunkHeader(hunk, lines)}\n${lines.map(showTrailingWhitespace).join("\n")}`,
+      eofNote:
+        hunk.missingFinalNewline === null || lines.length < hunk.lines.length
+          ? null
+          : EOF_NOTES[hunk.missingFinalNewline],
     });
   }
   return { chunks, hiddenLines: Math.max(0, file.lineCount - shown) };

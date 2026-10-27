@@ -6,6 +6,7 @@ import {
   layoutDiffFile,
   lineLimitShowingHunk,
   parseUnifiedDiff,
+  showTrailingWhitespace,
   type DiffFile,
 } from "./diffPatch.ts";
 
@@ -98,6 +99,37 @@ describe("parseUnifiedDiff", () => {
     expect(parsed.files).toHaveLength(2);
     expect(parseUnifiedDiff("")).toMatchObject({ files: [], truncated: false });
   });
+
+  it("keeps trailing whitespace on the last line; only the patch's final newline goes", () => {
+    const patch = "--- a/x.ts\n+++ b/x.ts\n@@ -1 +1 @@\n-before\n+after   \t\n";
+    expect(parseUnifiedDiff(patch).files[0]?.hunks[0]?.lines).toEqual(["-before", "+after   \t"]);
+    expect(parseUnifiedDiff(`${patch}\n\n[truncated]`).files[0]?.hunks[0]?.lines.at(-1)).toBe(
+      "+after   \t",
+    );
+  });
+
+  it("keeps which side has no final newline, without counting the marker as a line", () => {
+    const hunks = (lines: ReadonlyArray<string>) =>
+      parseUnifiedDiff(["--- a/x", "+++ b/x", "@@ -1 +1 @@", ...lines].join("\n")).files[0]?.hunks;
+    // A newline-only change: the text is the same, the end of the file is not.
+    const added = hunks(["-last", "\\ No newline at end of file", "+last"]);
+    expect(added?.[0]).toMatchObject({
+      lines: ["-last", "+last"],
+      additions: 1,
+      deletions: 1,
+      missingFinalNewline: "old",
+    });
+    expect(
+      hunks(["-last", "+last", "\\ No newline at end of file"])?.[0]?.missingFinalNewline,
+    ).toBe("new");
+    expect(
+      hunks(["-a", "\\ No newline at end of file", "+b", "\\ No newline at end of file"])?.[0]
+        ?.missingFinalNewline,
+    ).toBe("both");
+    expect(hunks([" same", "\\ No newline at end of file"])?.[0]?.missingFinalNewline).toBe("both");
+    expect(parseUnifiedDiff(TWO_FILES).files[1]?.hunks[0]?.missingFinalNewline).toBe("new");
+    expect(parseUnifiedDiff(TWO_FILES).files[0]?.hunks[0]?.missingFinalNewline).toBeNull();
+  });
 });
 
 function bigFile(hunkSizes: ReadonlyArray<number>): DiffFile {
@@ -112,6 +144,15 @@ function bigFile(hunkSizes: ReadonlyArray<number>): DiffFile {
   if (file === undefined) throw new Error("no file");
   return file;
 }
+
+describe("showTrailingWhitespace", () => {
+  it("marks trailing spaces and tabs of changed lines only", () => {
+    expect(showTrailingWhitespace("+after  \t")).toBe("+after··→");
+    expect(showTrailingWhitespace("-a b ")).toBe("-a b·");
+    expect(showTrailingWhitespace(" context  ")).toBe(" context  ");
+    expect(showTrailingWhitespace("+")).toBe("+");
+  });
+});
 
 describe("layoutDiffFile", () => {
   it("draws every hunk of a small file, each as a patch OpenTUI can parse", () => {
@@ -135,6 +176,17 @@ describe("layoutDiffFile", () => {
         " export {};",
       ].join("\n"),
     );
+  });
+
+  it("notes a missing final newline under its hunk, unless the hunk is cut short", () => {
+    const doc = parseUnifiedDiff(TWO_FILES).files[1];
+    if (doc === undefined) throw new Error("no file");
+    expect(layoutDiffFile(doc, DIFF_FILE_LINE_BUDGET).chunks[0]?.eofNote).toBe(
+      "↵ No newline at end of file in the new version",
+    );
+    expect(layoutDiffFile(doc, 1).chunks[0]?.eofNote).toBeNull();
+    const app = parseUnifiedDiff(TWO_FILES).files[0];
+    expect(app && layoutDiffFile(app, DIFF_FILE_LINE_BUDGET).chunks[0]?.eofNote).toBeNull();
   });
 
   it("caps a huge file, cutting the hunk that crosses the limit with matching counts", () => {

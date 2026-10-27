@@ -39,8 +39,9 @@ import {
   resolveDiffRange,
   scopeForRun,
   stepDiffScope,
+  undiffableRunMessage,
   type DiffScope,
-  type DiffTurn,
+  type DiffTurns,
 } from "./diffTurns.ts";
 import type { MarkdownStyles } from "./messageMarkdownView.tsx";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
@@ -127,8 +128,8 @@ export function useDiffPanelControls(options: {
     setWordWrap,
     setScope,
     /** Opens on one run's turn, e.g. from its changed-files row. */
-    openForRun: (runId: string, turns: ReadonlyArray<DiffTurn>) => {
-      setScope(scopeForRun(runId, turns));
+    openForRun: (runId: string, diffTurns: DiffTurns) => {
+      setScope(scopeForRun(runId, diffTurns));
       setOpen(true);
     },
   };
@@ -175,7 +176,8 @@ type PendingScroll = { readonly kind: "top" } | { readonly kind: "hunk"; readonl
 export function DiffPanel(props: DiffPanelProps) {
   const { ref, connection, threadId, scope, view, wordWrap, theme, styles } = props;
   const palette = theme.palette;
-  const turns = useAtomValue(connection.diffTurnsAtom(threadId));
+  const diffTurns = useAtomValue(connection.diffTurnsAtom(threadId));
+  const turns = diffTurns.turns;
   const range = resolveDiffRange(scope, turns);
   const diffAtom =
     range === null
@@ -331,18 +333,21 @@ export function DiffPanel(props: DiffPanelProps) {
     files.length === 0
       ? ""
       : `${files.length} file${files.length === 1 ? "" : "s"}  ${stat(parsed.additions, parsed.deletions)}`;
+  const runMessage = undiffableRunMessage(scope, diffTurns);
   const emptyMessage =
-    turns.length === 0
-      ? props.running
-        ? "No checkpoints yet. Changes show here when the run finishes."
-        : "No changes yet. Each finished run's changes show here."
-      : range === null
-        ? `${scopeLabel} has no checkpoint to diff.`
-        : loading
-          ? "Loading diff…"
-          : error !== null
-            ? `Diff unavailable: ${error}`
-            : "No changes in this turn.";
+    runMessage !== null
+      ? runMessage
+      : turns.length === 0
+        ? props.running
+          ? "No checkpoints yet. Changes show here when the run finishes."
+          : "No changes yet. Each finished run's changes show here."
+        : range === null
+          ? `${scopeLabel} has no checkpoint to diff.`
+          : loading
+            ? "Loading diff…"
+            : error !== null
+              ? `Diff unavailable: ${error}`
+              : "No changes in this turn.";
 
   return (
     <box
@@ -717,6 +722,14 @@ const DiffHunkView = memo(function DiffHunkView(props: {
         lineNumberBg={palette.surface}
         lineNumberFg={palette.subtle}
       />
+      {chunk.eofNote === null ? null : (
+        <text
+          wrapMode="none"
+          truncate
+          content={chunk.eofNote}
+          style={{ fg: palette.warning, bg: palette.surface }}
+        />
+      )}
     </box>
   );
 });
