@@ -7,6 +7,11 @@ This repository is tr3x, a terminal UI fork of T3 Code. The rest of this file is
 - The roadmap is `docs/rex-parity-plan.md`: a herdr-style agent multiplexer on orchestration v2, with Rex tabs for threads.
 - This fork does not publish to npm and has no upstream release or deploy workflows.
 - Use conventional commit messages, e.g. `fix(tui): reduce premature sidebar collapse`.
+- Write PR bodies with the `pr` skill's template (Summary, Evidence, Merge Danger). For any change you can see in the TUI, the Evidence section shows before and after screenshots in a markdown table:
+  1. Start tr3x at a fixed size in a detached tmux session, with throwaway data dirs: `node apps/tui/scripts/screenshot.mjs start shot -- env TR3X_HOME=/tmp/x/home TR3X_CONFIG_HOME=/tmp/x/config bun apps/tui/src/index.tsx` (140x40 by default; `--size 160x45` before `--` changes it). Use the base branch's checkout for "before" and the PR's for "after".
+  2. Drive it with `tmux -L tr3x-shot send-keys -t shot …` until the screen shows the change. The script runs its own tmux server (`-L tr3x-shot`, no config), so it never touches your tmux sessions.
+  3. Capture with `node apps/tui/scripts/screenshot.mjs shot ./after.png` (headless Chrome, Nerd Font icons), then `tmux -L tr3x-shot kill-server`.
+  4. Reference the files from the body (`![after](./after.png)`) and upload them with `gh pr create --attach` or `gh pr edit <n> --body-file body.md --attach ./after.png`.
 
 # T3 Code
 
