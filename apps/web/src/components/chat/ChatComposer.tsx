@@ -811,7 +811,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);
   const removeComposerDraftFile = useComposerDraftStore((store) => store.removeFile);
-  const setComposerDraftFileUpload = useComposerDraftStore((store) => store.setFileUpload);
   const insertComposerDraftTerminalContext = useComposerDraftStore(
     (store) => store.insertTerminalContext,
   );
@@ -878,37 +877,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     environmentId,
     maxFileAttachmentBytes,
     supportsAttachmentUploads,
-  ]);
-
-  useEffect(() => {
-    for (const file of composerFiles) {
-      if (
-        !attachmentUploadsCapabilityKnown ||
-        !supportsAttachmentUploads ||
-        maxFileAttachmentBytes === null ||
-        file.sizeBytes > maxFileAttachmentBytes
-      ) {
-        continue;
-      }
-      const upload = uploadsByImageId[file.id];
-      if (upload?.status === "ready" && upload.environmentId === environmentId) {
-        setComposerDraftFileUpload(
-          attachmentDraftTarget,
-          file.id,
-          environmentId,
-          upload.attachmentId,
-        );
-      }
-    }
-  }, [
-    attachmentUploadsCapabilityKnown,
-    attachmentDraftTarget,
-    composerFiles,
-    environmentId,
-    maxFileAttachmentBytes,
-    setComposerDraftFileUpload,
-    supportsAttachmentUploads,
-    uploadsByImageId,
   ]);
 
   const {
@@ -2380,16 +2348,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     settings.composerCollapseOnScroll &&
     !hasMultilinePrompt &&
     !composerHasExpandedChrome;
+  // Clear rather than mask: once eligibility drops, the composer stays expanded until the next
+  // scroll gesture even if it becomes eligible again.
+  if (!canScrollCollapseComposer && isComposerScrollCollapsed) {
+    setIsComposerScrollCollapsed(false);
+  }
   const composerScrollCollapseEligible = canScrollCollapseComposer && !isComposerResting;
   useLayoutEffect(() => {
     composerScrollCollapseEligibleRef.current = composerScrollCollapseEligible;
   });
-
-  useEffect(() => {
-    if (!canScrollCollapseComposer) {
-      setIsComposerScrollCollapsed(false);
-    }
-  }, [canScrollCollapseComposer, setIsComposerScrollCollapsed]);
 
   // Window activation re-fires focus; ignore that frame to keep the composer collapsed.
   useEffect(() => {
@@ -3658,7 +3625,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     className={cn(
                       showMobilePendingAnswerActions && "max-sm:pb-12",
                       isComposerResting &&
-                        "my-0 max-h-8 min-h-8 redesign:min-h-8 overflow-hidden py-0 whitespace-pre! leading-8",
+                        "my-0 max-h-8 min-h-8 overflow-hidden py-0 whitespace-pre! leading-8",
                     )}
                     placeholderClassName={cn(
                       isComposerResting &&

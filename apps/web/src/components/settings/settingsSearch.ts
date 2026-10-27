@@ -404,12 +404,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["usage quota rate limit reset recover continue"],
   },
   {
-    id: "new-design",
-    title: "New design",
-    to: "/settings/appearance",
-    searchTerms: ["redesign look style sidebar composer black quieter classic"],
-  },
-  {
     id: "working-shelf",
     title: "Working section",
     to: "/settings/general",
@@ -546,7 +540,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "provider-update-checks",
     title: "Provider update checks",
     to: "/settings/maintenance",
-    searchTerms: ["installed cli versions newer available codex claude cursor grok opencode"],
+    searchTerms: ["installed cli versions newer available codex claude cursor grok fx opencode"],
     scope: "environment-defaults",
   },
   {
@@ -754,7 +748,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Providers",
     to: "/settings/providers",
     searchTerms: [
-      "agents cli codex claude cursor grok opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory endpoint arguments environment variables display name accent color custom favorite hidden auto compact",
+      "agents cli codex claude cursor grok fx opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory endpoint arguments environment variables display name accent color custom favorite hidden auto compact",
     ],
   },
   {
