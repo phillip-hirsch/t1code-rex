@@ -20,6 +20,7 @@ describe("buildThreadMenuItems", () => {
     });
     expect(items.map((item) => item.id)).toEqual([
       "open-rex-tab",
+      "open-rex-diff",
       "rename",
       "mark-unread",
       "open-editor",

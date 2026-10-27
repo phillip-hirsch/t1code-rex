@@ -58,6 +58,8 @@ import {
   type ComposerSettingsPatch,
 } from "./composerSettings.ts";
 import { createComposerStore } from "./composerStore.ts";
+import { DiffPanel, useDiffPanelControls, type DiffPanelHandle } from "./diffPanel.tsx";
+import { DIFF_KEY_HINTS } from "./diffNavigation.ts";
 import type { TuiPaths } from "./config.ts";
 import type { TuiConnection } from "./connection/tuiConnection.ts";
 import {
@@ -134,6 +136,7 @@ const PALETTE_ROWS_MAX = 14;
 /** The thread menu's items as palette rows, which have no thread row to point at. */
 const THREAD_PALETTE_LABELS: Partial<Record<string, string>> = {
   "open-rex-tab": "Open thread in Rex tab",
+  "open-rex-diff": "Open diff in Rex tab",
   "mark-unread": "Mark thread unread",
   "open-editor": "Open thread in Editor",
   "open-folder": "Open thread folder",
@@ -415,6 +418,14 @@ function Shell(props: AppProps) {
     cwd: props.cwd,
   });
   const { activeThread, activeProject, selection } = sidebar;
+  const diff = useDiffPanelControls({
+    initialPrefs: props.initialPrefs,
+    prefsWriter: props.prefsWriter,
+    // A thread tab opens on its transcript unless it is a Rex diff tab.
+    ...(threadWindowLaunch ? { initiallyOpen: threadWindowLaunch.view === "diff" } : {}),
+    threadId: selection.threadId,
+  });
+  const diffPanelRef = useRef<DiffPanelHandle | null>(null);
   const settingsOfThread = useEventCallback((threadId: string) => {
     const thread = sidebar.threadsById.get(threadId);
     return thread ? threadSettings(thread) : null;
@@ -594,7 +605,7 @@ function Shell(props: AppProps) {
   const threadsById = sidebar.threadsById;
   const projectsById = sidebar.projectsById;
   const openThreadInRexTab = useCallback(
-    async (threadId: string | null) => {
+    async (threadId: string | null, view?: "diff") => {
       const thread = threadId === null ? undefined : threadsById.get(threadId);
       if (!rex || !thread) {
         setStatus(rex ? "Select a thread first" : "Rex not detected");
@@ -602,33 +613,41 @@ function Shell(props: AppProps) {
       }
       const bearerToken = await connection.session.getBearerToken();
       const cwd = threadWorkspacePath(thread, projectsById.get(thread.projectId)) ?? undefined;
-      const { reused } = await rex.windows.openOrFocus(`thread:${thread.id}`, async () => {
-        const launchFile = await writeThreadWindowLaunch(
-          NodePath.join(paths.stateHomeDir, "thread-windows"),
-          {
-            server: {
-              httpBaseUrl: connection.session.httpBaseUrl,
-              wsBaseUrl: connection.session.wsBaseUrl,
-              bearerToken,
+      const { reused } = await rex.windows.openOrFocus(
+        `${view ?? "thread"}:${thread.id}`,
+        async () => {
+          const launchFile = await writeThreadWindowLaunch(
+            NodePath.join(paths.stateHomeDir, "thread-windows"),
+            {
+              server: {
+                httpBaseUrl: connection.session.httpBaseUrl,
+                wsBaseUrl: connection.session.wsBaseUrl,
+                bearerToken,
+              },
+              projectId: thread.projectId,
+              threadId: thread.id,
+              ...(view === undefined ? {} : { view }),
             },
-            projectId: thread.projectId,
-            threadId: thread.id,
-          },
-        );
-        try {
-          return await rex.client.openWindow({
-            label: rexTabLabel(thread.title || DEFAULT_THREAD_TITLE),
-            cwd,
-            command: buildThreadWindowCommand(launchFile, paths),
-          });
-        } catch (error) {
-          await NodeFSP.rm(launchFile, { force: true });
-          throw error;
-        } finally {
-          expireThreadWindowLaunch(launchFile);
-        }
-      });
-      setStatus(reused ? "Focused Rex tab" : "Opened thread in Rex tab");
+          );
+          try {
+            return await rex.client.openWindow({
+              label: rexTabLabel(
+                `${view === "diff" ? "Diff: " : ""}${thread.title || DEFAULT_THREAD_TITLE}`,
+              ),
+              cwd,
+              command: buildThreadWindowCommand(launchFile, paths),
+            });
+          } catch (error) {
+            await NodeFSP.rm(launchFile, { force: true });
+            throw error;
+          } finally {
+            expireThreadWindowLaunch(launchFile);
+          }
+        },
+      );
+      setStatus(
+        reused ? "Focused Rex tab" : `Opened ${view === "diff" ? "diff" : "thread"} in Rex tab`,
+      );
     },
     [connection.session, paths, projectsById, rex, threadsById],
   );
@@ -669,7 +688,7 @@ function Shell(props: AppProps) {
       setContextMenu({
         target,
         // The tallest menu (a thread's) fits; shorter ones only sit higher than they must.
-        top: Math.max(0, Math.min(top, renderer.height - 15)),
+        top: Math.max(0, Math.min(top, renderer.height - 16)),
         left: Math.max(0, Math.min(left, renderer.width - CONTEXT_MENU_WIDTH - 1)),
         index: 0,
       });
@@ -713,6 +732,25 @@ function Shell(props: AppProps) {
   const running = threadRuntimeIsActive(activeThread?.runtime);
   const activeRunId = activeThread?.runtime?.activeRunId ?? null;
   const stopRequested = running && stopRequestedRunId === (activeRunId ?? "unknown");
+  const diffShown = diff.open && composerTarget?.kind === "thread";
+  const toggleDiff = () => {
+    if (!diff.open && composerTarget?.kind !== "thread") {
+      setStatus("Select a thread first");
+      return;
+    }
+    diff.setOpen(!diff.open);
+    setContextMenu(null);
+    setPaletteOpen(false);
+    setFocusArea("thread");
+  };
+  const openDiffForRun = useEventCallback((runId: string) => {
+    if (composerTarget?.kind !== "thread") return;
+    diff.openForRun(
+      runId,
+      connection.registry.get(connection.diffTurnsAtom(composerTarget.threadId)),
+    );
+    setFocusArea("thread");
+  });
 
   const openNewThread = (projectId: string | null) => {
     const target = projectId ?? sidebar.groups[0]?.project.id ?? null;
@@ -806,6 +844,9 @@ function Shell(props: AppProps) {
       switch (item.id) {
         case "open-rex-tab":
           await openThreadInRexTab(threadId);
+          return;
+        case "open-rex-diff":
+          await openThreadInRexTab(threadId, "diff");
           return;
         case "rename":
           management.renameThread(threadId);
@@ -1055,6 +1096,13 @@ function Shell(props: AppProps) {
     }
   }
   actions.push({
+    id: "diff:toggle",
+    label: diff.open ? "Hide diff" : "Show diff",
+    description: activeThread === null ? "Select a thread first" : "d in the thread  ⌘D",
+    disabled: !diff.open && composerTarget?.kind !== "thread",
+    run: toggleDiff,
+  });
+  actions.push({
     id: "archive:open",
     label: "Archived threads",
     description: "Restore or delete archived threads",
@@ -1251,6 +1299,10 @@ function Shell(props: AppProps) {
       toggleModelPicker();
       return true;
     }
+    if (shortcut === "diff.toggle") {
+      toggleDiff();
+      return true;
+    }
     if (shortcut === "chat.new" || shortcut === "chat.newLocal") {
       openNewThread(newThreadProjectId);
       return true;
@@ -1308,11 +1360,9 @@ function Shell(props: AppProps) {
       setFocusArea(composerTarget === null ? "thread" : "composer");
       return true;
     }
-    // Paging the transcript works from any pane.
-    if (
-      (key.name === "pageup" || key.name === "pagedown") &&
-      threadViewRef.current?.handleKey(key)
-    ) {
+    // Paging the transcript (or the diff in its place) works from any pane.
+    const mainPane = diffShown ? diffPanelRef.current : threadViewRef.current;
+    if ((key.name === "pageup" || key.name === "pagedown") && mainPane?.handleKey(key)) {
       return true;
     }
     if (dockFocused && dockRef.current?.handleKey(key)) return true;
@@ -1344,7 +1394,11 @@ function Shell(props: AppProps) {
       }
       return outcome !== null;
     }
-    if (threadViewRef.current?.handleKey(key)) return true;
+    if (mainPane?.handleKey(key)) return true;
+    if (composerTarget?.kind === "thread" && key.name === "d" && !key.ctrl && !key.meta) {
+      toggleDiff();
+      return true;
+    }
     if (composerTarget !== null && (key.name === "i" || isEnter(key.name))) {
       setFocusArea("composer");
       return true;
@@ -1395,7 +1449,9 @@ function Shell(props: AppProps) {
         ? panelHints
         : composerFocused
           ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
-          : `↑↓ scroll  PgUp/PgDn page  End bottom  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
+          : diffShown
+            ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
+            : `↑↓ scroll  PgUp/PgDn page  End bottom  d diff  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -1474,6 +1530,26 @@ function Shell(props: AppProps) {
             <>
               {composerTarget.kind === "draft" ? (
                 <NewThreadView project={activeProject} theme={theme} />
+              ) : diffShown ? (
+                <DiffPanel
+                  key={`diff:${composerTarget.threadId}`}
+                  ref={diffPanelRef}
+                  connection={connection}
+                  threadId={composerTarget.threadId}
+                  scope={diff.scope}
+                  view={diff.view}
+                  wordWrap={diff.wordWrap}
+                  ignoreWhitespace={diff.ignoreWhitespace}
+                  showFileList={viewportColumns - (layout.showSidebar ? sidebarWidth : 0) >= 100}
+                  running={running}
+                  theme={theme}
+                  styles={markdownStyles}
+                  onScopeChange={diff.setScope}
+                  onViewChange={diff.setView}
+                  onWordWrapChange={diff.setWordWrap}
+                  onClose={() => diff.setOpen(false)}
+                  onActivate={activateThreadView}
+                />
               ) : (
                 <ThreadView
                   key={`thread:${composerTarget.threadId}`}
@@ -1488,9 +1564,10 @@ function Shell(props: AppProps) {
                   timestampFormat={sidebar.settings.timestampFormat}
                   onActivate={activateThreadView}
                   onCopy={copyToClipboard}
+                  onOpenDiff={openDiffForRun}
                 />
               )}
-              {composerTarget.kind === "thread" ? (
+              {composerTarget.kind === "thread" && !diffShown ? (
                 <QueuedMessages
                   key={`queue:${composerTarget.threadId}`}
                   queueAtom={connection.thread(composerTarget.threadId).queueAtom}
@@ -1519,6 +1596,7 @@ function Shell(props: AppProps) {
                   onSetRuntimeMode: setRuntimeMode,
                   onStatus: setStatus,
                   onClone: management.clone,
+                  onToggleDiff: toggleDiff,
                   mentionSearch: {
                     cwd: activeThread
                       ? threadWorkspacePath(activeThread, activeProject ?? undefined)

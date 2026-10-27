@@ -59,6 +59,7 @@ import type {
   EnvironmentId,
   FilesystemBrowseInput,
   LaunchEditorInput,
+  OrchestrationGetTurnDiffResult,
   OrchestrationProjectShell,
   OrchestrationV2ShellSnapshot,
   ProjectCloneStartInput,
@@ -75,6 +76,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import type { ComposerCommandResult } from "../composerSender.ts";
+import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurn } from "../diffTurns.ts";
 import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
 import type { TuiServerSession } from "../serverLauncher.ts";
 import * as Platform from "./platform.ts";
@@ -87,6 +89,11 @@ export interface TuiConnectionOptions {
 }
 
 const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
+
+/** Turn and full-thread diffs share one result shape. */
+export type CheckpointDiffAtom = Atom.Atom<
+  AsyncResult.AsyncResult<OrchestrationGetTurnDiffResult, unknown>
+>;
 
 /** A management action's outcome: its value, or the failure to show. */
 export type TuiActionResult<A> =
@@ -149,6 +156,27 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     return Atom.make((get): ReadonlyArray<PendingRequest> =>
       select(Option.getOrNull(get(threadDetails.stateAtom({ environmentId, threadId })).data)),
     ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-requests:${threadId}`));
+  });
+  // The turns the diff panel can show; a new list only when checkpoints or runs change.
+  const diffTurnsAtom = Atom.family((threadId: ThreadId) => {
+    let previous: { checkpoints: unknown; runs: unknown } | null = null;
+    let value: ReadonlyArray<DiffTurn> = NO_DIFF_TURNS;
+    return Atom.make((get) => {
+      const projection = Option.getOrNull(
+        get(threadDetails.stateAtom({ environmentId, threadId })).data,
+      );
+      if (projection === null) {
+        previous = null;
+        value = NO_DIFF_TURNS;
+      } else if (
+        projection.checkpoints !== previous?.checkpoints ||
+        projection.runs !== previous?.runs
+      ) {
+        previous = { checkpoints: projection.checkpoints, runs: projection.runs };
+        value = deriveDiffTurns(projection);
+      }
+      return value;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:diff-turns:${threadId}`));
   });
   // One page request per thread at a time; repeats while it runs share its result.
   const loadEarlierHistory = createRuntimeCommand(runtime, {
@@ -264,6 +292,23 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         queueAtom: threadDetails.queueWorkflowAtom(ref),
       };
     },
+    /** The turns a thread's diff panel can show, live from its subscription. */
+    diffTurnsAtom: (threadId: ThreadId) => diffTurnsAtom(threadId),
+    /** A checkpoint range's unified diff; from turn 0 it is the full thread diff, as on web. */
+    checkpointDiffAtom: (
+      threadId: ThreadId,
+      range: DiffRange,
+      ignoreWhitespace: boolean,
+    ): CheckpointDiffAtom =>
+      range.fromTurnCount === 0
+        ? orchestration.fullThreadDiff({
+            environmentId,
+            input: { threadId, toTurnCount: range.toTurnCount, ignoreWhitespace },
+          })
+        : orchestration.turnDiff({
+            environmentId,
+            input: { threadId, ...range, ignoreWhitespace },
+          }),
     loadEarlierHistory,
     /** A failed request reads as "unavailable": nothing is decided from it. */
     fetchFullThreadSnapshot: (threadId: ThreadId): Promise<ThreadSnapshotLoadResult> =>

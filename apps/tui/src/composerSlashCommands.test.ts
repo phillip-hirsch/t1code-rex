@@ -59,6 +59,12 @@ describe("composer slash commands", () => {
   });
 });
 
+describe("/diff", () => {
+  it("toggles the diff panel instead of reaching the agent", () => {
+    expect(resolveComposerSlashAction("/diff")).toEqual({ type: "toggle-diff" });
+  });
+});
+
 describe("/clone", () => {
   it("passes its arguments on, and needs a source", () => {
     expect(resolveComposerSlashAction("/clone octo/hello ~/src/hello")).toEqual({
