@@ -255,13 +255,15 @@ packages/contracts, client-runtime, shared, provider-*   upstream
 - **Status in tab labels only.** It works from outside Rex, but it's free text that clobbers user renames and doesn't feed the session picker. Kept for titles only.
 - **Connecting the daemon as a Rex client that declares actions** (`client.keymap`/`client.perform`). [A] those actions appear only in that client's own palette, not the app's, so `init.lua` stays the way into the palette.
 
-## Open questions
+## Decisions (2026-10-27)
 
-1. **Base dir.** A separate `~/.tr3x`, or share `~/.t3` with T3 Code desktop? Two servers can't share one dir, and a forked server might not match the desktop's version.
-2. **Closing a tab.** Hide only (recommended), or archive the thread?
-3. **Rex sessions.** One per project (recommended), or one `tr3x` session holding every thread?
-4. **Subagents.** Child status records plus on-demand panes (recommended), or full tabs for app-owned delegated threads?
-5. **Upstream apps.** Keep upstream's web, desktop, mobile, and marketing in the tree, unbuilt (recommended for cheap merges), or prune them and pay for it in merge conflicts?
-6. **Merge cadence.** How often should we merge `t3up/main`?
-7. **Rex setup.** Is a one-line `require("tr3x")` in `init.lua` acceptable as the setup step?
-8. **Notifications.** Are opt-in macOS notifications from the daemon fine until Rex ships its own?
+The user answered questions 1–4. Questions 5–8 take the suggested defaults unless the user says otherwise.
+
+1. **Base dir:** tr3x keeps its own server and data in `~/.tr3x`, separate from T3 Code desktop's `~/.t3`.
+2. **Closing a tab:** hides the thread; it doesn't archive it. The thread's tab can be reopened.
+3. **Rex sessions:** one Rex session per project.
+4. **Subagents:** shown as status on the parent tab, with a pane opened on demand.
+5. **Upstream apps:** web, desktop, mobile, and marketing stay in the tree, unbuilt, so upstream merges stay cheap.
+6. **Merge cadence:** merge `t3up/main` when needed, not on a schedule.
+7. **Rex setup:** one `require("tr3x")` line in `init.lua`.
+8. **Notifications:** the daemon's macOS notifications are opt-in until Rex ships its own.
