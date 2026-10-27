@@ -525,7 +525,7 @@ export function Composer(props: ComposerProps) {
             ? "Steer the run (⌘Enter or Alt+Enter queues)"
             : "Queue a follow-up (⌘Enter or Alt+Enter steers)"
           : heldCount > 0
-            ? "Enter sends held messages; /discard edits them"
+            ? "/resume or ▶ sends held messages; /discard edits them"
             : "Ask for follow-up changes or attach images";
 
   return (

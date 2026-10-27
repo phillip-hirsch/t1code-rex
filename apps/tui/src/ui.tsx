@@ -1083,7 +1083,7 @@ function Shell(props: AppProps) {
         activeThread,
         held === 0
           ? STOPPING
-          : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. Enter or /resume sends, /discard edits`,
+          : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. /resume or ▶ sends, /discard edits`,
       ),
     );
     void connection
