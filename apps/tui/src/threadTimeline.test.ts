@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { buildTimelineRows, presentTurnItem, rowHasGapAfter } from "./threadTimeline.ts";
+import { subagentItem } from "./subagentTestFixtures.ts";
 import { assistantMessage, command, turnItem, userMessage } from "./turnItemTestFixtures.ts";
 
 describe("presentTurnItem", () => {
@@ -213,5 +214,17 @@ describe("rowHasGapAfter", () => {
     expect(rowHasGapAfter(user!, one)).toBe(true);
     expect(rowHasGapAfter(one!, two)).toBe(false);
     expect(rowHasGapAfter(two!, undefined)).toBe(false);
+  });
+});
+
+describe("subagent items", () => {
+  it("become subagent rows that sit flush with work rows", () => {
+    const row = presentTurnItem(subagentItem("s1"));
+    expect(row).toMatchObject({ kind: "subagent", threadId: "parent" });
+    expect(row?.kind === "subagent" ? row.item.subagentId : null).toBe("sub-s1");
+    const work = presentTurnItem(command("c1", "ls"));
+    if (row === null || work === null) throw new Error("rows expected");
+    expect(rowHasGapAfter(row, work)).toBe(false);
+    expect(rowHasGapAfter(work, row)).toBe(false);
   });
 });

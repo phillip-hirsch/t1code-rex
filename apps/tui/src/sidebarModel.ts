@@ -16,6 +16,9 @@ export interface SidebarProjectGroup {
   readonly threads: ReadonlyArray<SidebarThread>;
 }
 
+/** Whether a thread's subagent children show; null when it has none the sidebar knows of. */
+export type SubagentDisclosure = "open" | "closed" | null;
+
 export type SidebarRow =
   | { readonly kind: "project"; readonly key: string; readonly projectId: string }
   | {
@@ -23,6 +26,18 @@ export type SidebarRow =
       readonly key: string;
       readonly projectId: string;
       readonly threadId: string;
+      readonly subagents?: SubagentDisclosure;
+    }
+  | {
+      /** A subagent child under its parent. Its key is the thread's, so selection follows it. */
+      readonly kind: "subagent";
+      readonly key: string;
+      readonly projectId: string;
+      readonly threadId: string;
+      readonly parentThreadId: string;
+      /** 1 under a top-level thread, 2 under one of its subagents, and so on. */
+      readonly depth: number;
+      readonly subagents: SubagentDisclosure;
     }
   | {
       readonly kind: "more";
@@ -131,14 +146,55 @@ export function visibleThreads<T extends Pick<SidebarThread, "id">>(input: {
   return active === undefined ? preview : [...preview, active];
 }
 
+/** Subagent children per parent, and whether a parent shows them; see `subagentTree.ts`. */
+export interface SidebarSubagents {
+  readonly childrenByParent: ReadonlyMap<string, ReadonlyArray<Pick<SidebarThread, "id">>>;
+  readonly isOpen: (parentId: string) => boolean;
+  /** The open thread's ancestors, nearest first: the preview keeps its top-level thread. */
+  readonly activeAncestors: ReadonlyArray<string>;
+}
+
+const NO_SUBAGENTS: SidebarSubagents = {
+  childrenByParent: new Map(),
+  isOpen: () => false,
+  activeAncestors: [],
+};
+
 export function buildSidebarRows(input: {
   readonly groups: ReadonlyArray<SidebarProjectGroup>;
   readonly expandedProjectIds: ReadonlySet<string>;
   readonly showAllProjectIds: ReadonlySet<string>;
   readonly previewCount: number;
   readonly activeThreadId: string | null;
+  readonly subagents?: SidebarSubagents;
 }): ReadonlyArray<SidebarRow> {
+  const subagents = input.subagents ?? NO_SUBAGENTS;
+  const disclosure = (threadId: string): SubagentDisclosure => {
+    const open = subagents.isOpen(threadId);
+    // Opened by hand before its family loaded: shown open so the note under it reads right.
+    if ((subagents.childrenByParent.get(threadId)?.length ?? 0) === 0) return open ? "open" : null;
+    return open ? "open" : "closed";
+  };
   const rows: SidebarRow[] = [];
+  const pushChildren = (projectId: string, parentId: string, depth: number, seen: Set<string>) => {
+    for (const child of subagents.childrenByParent.get(parentId) ?? []) {
+      if (seen.has(child.id)) continue;
+      seen.add(child.id);
+      const childDisclosure = disclosure(child.id);
+      rows.push({
+        kind: "subagent",
+        key: threadRowKey(child.id),
+        projectId,
+        threadId: child.id,
+        parentThreadId: parentId,
+        depth,
+        subagents: childDisclosure,
+      });
+      if (childDisclosure === "open") pushChildren(projectId, child.id, depth + 1, seen);
+    }
+  };
+  // A subagent is listed under its top-level thread, which the preview keeps in view.
+  const activeTopId = subagents.activeAncestors.at(-1) ?? input.activeThreadId;
   for (const { project, threads } of input.groups) {
     rows.push({ kind: "project", key: projectRowKey(project.id), projectId: project.id });
     if (!input.expandedProjectIds.has(project.id)) continue;
@@ -147,15 +203,18 @@ export function buildSidebarRows(input: {
       threads,
       previewCount: input.previewCount,
       showAll,
-      activeThreadId: input.activeThreadId,
+      activeThreadId: activeTopId,
     });
     for (const thread of listed) {
+      const threadDisclosure = disclosure(thread.id);
       rows.push({
         kind: "thread",
         key: threadRowKey(thread.id),
         projectId: project.id,
         threadId: thread.id,
+        ...(threadDisclosure === null ? {} : { subagents: threadDisclosure }),
       });
+      if (threadDisclosure === "open") pushChildren(project.id, thread.id, 1, new Set([thread.id]));
     }
     const hiddenCount = threads.length - listed.length;
     if (hiddenCount > 0 || (showAll && threads.length > input.previewCount)) {
@@ -174,7 +233,19 @@ function sameRow(left: SidebarRow, right: SidebarRow): boolean {
   if (left.kind !== right.kind || left.key !== right.key || left.projectId !== right.projectId) {
     return false;
   }
-  if (left.kind === "thread" && right.kind === "thread") return left.threadId === right.threadId;
+  if (left.kind === "thread" && right.kind === "thread") {
+    return (
+      left.threadId === right.threadId && (left.subagents ?? null) === (right.subagents ?? null)
+    );
+  }
+  if (left.kind === "subagent" && right.kind === "subagent") {
+    return (
+      left.threadId === right.threadId &&
+      left.parentThreadId === right.parentThreadId &&
+      left.depth === right.depth &&
+      left.subagents === right.subagents
+    );
+  }
   if (left.kind === "more" && right.kind === "more") return left.hiddenCount === right.hiddenCount;
   return true;
 }

@@ -14,6 +14,7 @@ import { at, presentedThread, projectShell } from "./shellTestFixtures.ts";
 import { useSidebarController } from "./sidebarController.ts";
 import { resolveSidebarKey } from "./sidebarKeys.ts";
 import { projectRowKey, threadRowKey } from "./sidebarModel.ts";
+import { childThread } from "./subagentTestFixtures.ts";
 import { MAX_TRACKED_VISITS } from "./threadVisits.ts";
 
 function finishedRun(completedAt: string): Partial<OrchestrationV2ThreadShell> {
@@ -295,5 +296,70 @@ describe("useSidebarController multi-selection", () => {
       threads[2]!,
     ]);
     expect(selected(sidebar)).toEqual(["t1"]);
+  });
+});
+
+describe("useSidebarController subagents", () => {
+  const projects = [projectShell("p")];
+  const parent = presentedThread("parent", "p", { updatedAt: at("2026-06-20T03:00:00.000Z") });
+  const done = childThread("done", "p", "parent", { status: "completed" });
+
+  it("folds idle subagents, opens them on →, and selects one as the cursor lands on it", () => {
+    const sidebar = setup({
+      projects,
+      threads: [parent, done],
+      prefs: { selectedThreadId: "parent", expandedProjectIds: ["p"] },
+    });
+    expect(sidebar.hook.current.rows.map((row) => row.key)).toEqual([
+      projectRowKey("p"),
+      threadRowKey("parent"),
+    ]);
+
+    expect(sidebar.key("right")).toBe("handled");
+    expect(sidebar.hook.current.openedSubagentParents).toEqual(["parent"]);
+    expect(sidebar.hook.current.rows.map((row) => row.key)).toEqual([
+      projectRowKey("p"),
+      threadRowKey("parent"),
+      threadRowKey("done"),
+    ]);
+
+    sidebar.key("down");
+    expect(sidebar.hook.current.selection).toEqual({ projectId: "p", threadId: "done" });
+    expect(sidebar.hook.current.cursorRow?.kind).toBe("subagent");
+
+    // ← climbs to the parent without opening it, then folds its subagents.
+    sidebar.key("left");
+    expect(sidebar.hook.current.cursorKey).toBe(threadRowKey("parent"));
+    expect(sidebar.hook.current.selection.threadId).toBe("done");
+  });
+
+  it("keeps subagents out of bulk selections", () => {
+    const live = childThread("live", "p", "parent", {
+      status: "running",
+      activeRunId: RunId.make("run-live"),
+    });
+    const sidebar = setup({
+      projects,
+      threads: [parent, live],
+      prefs: { selectedThreadId: "parent", expandedProjectIds: ["p"] },
+    });
+    sidebar.press(threadRowKey("live"), { ctrl: true });
+    expect(sidebar.hook.current.multiSelection.threadIds.size).toBe(0);
+    expect(sidebar.hook.current.selection.threadId).toBe("live");
+  });
+
+  it("toggles a parent's subagents from its fold glyph without opening it", () => {
+    const sidebar = setup({
+      projects,
+      threads: [parent, done, presentedThread("other", "p")],
+      prefs: { selectedThreadId: "other", expandedProjectIds: ["p"] },
+    });
+    const row = sidebar.hook.current.rows.find((candidate) => candidate.key === "thread:parent");
+    if (!row) throw new Error("no parent row");
+    sidebar.hook.act(() => sidebar.hook.current.pressRow(row, { toggleSubagents: true }));
+    expect(sidebar.hook.current.selection.threadId).toBe("other");
+    expect(sidebar.hook.current.rows.some((candidate) => candidate.key === "thread:done")).toBe(
+      true,
+    );
   });
 });

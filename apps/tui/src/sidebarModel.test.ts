@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { RunId, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import { at, presentedThread, projectShell } from "./shellTestFixtures.ts";
@@ -9,6 +9,8 @@ import {
   shareSidebarRows,
   visibleThreads,
 } from "./sidebarModel.ts";
+import { childThread } from "./subagentTestFixtures.ts";
+import { groupSubagentChildren, subagentsOpen } from "./subagentTree.ts";
 
 const alpha = projectShell("alpha", { title: "Alpha" });
 const beta = projectShell("beta", { title: "Beta" });
@@ -241,5 +243,120 @@ describe("pinned threads", () => {
       threadSortOrder: "updated_at",
     });
     expect(groups[0]?.threads.map((entry) => entry.id)).toEqual(["pinned-old", "newest", "middle"]);
+  });
+});
+
+describe("buildSidebarRows subagents", () => {
+  const parent = thread("parent", "alpha", "2026-06-09T00:00:00.000Z");
+  const other = thread("other", "alpha", "2026-06-08T00:00:00.000Z");
+  const done = childThread("done", "alpha", "parent", { status: "completed" });
+  const live = childThread("live", "alpha", "parent", {
+    status: "running",
+    activeRunId: RunId.make("run-live"),
+  });
+  const grandchild = childThread("grand", "alpha", "done", { status: "completed" });
+  const groups = buildSidebarGroups({
+    projects: [alpha],
+    threads: [parent, other, done, live, grandchild],
+    projectSortOrder: "manual",
+    threadSortOrder: "updated_at",
+  });
+  const childrenByParent = groupSubagentChildren([parent, other, done, live, grandchild]);
+  const build = (input: {
+    readonly folds?: ReadonlyMap<string, boolean>;
+    readonly activeThreadId?: string | null;
+    readonly activeAncestors?: ReadonlyArray<string>;
+    readonly previewCount?: number;
+  }) =>
+    buildSidebarRows({
+      groups,
+      expandedProjectIds: new Set(["alpha"]),
+      showAllProjectIds: new Set(),
+      previewCount: input.previewCount ?? 5,
+      activeThreadId: input.activeThreadId ?? null,
+      subagents: {
+        childrenByParent,
+        isOpen: (id) =>
+          subagentsOpen(
+            id,
+            childrenByParent.get(id) ?? [],
+            input.folds ?? new Map(),
+            input.activeAncestors?.includes(id) ?? false,
+          ),
+        activeAncestors: input.activeAncestors ?? [],
+      },
+    });
+
+  it("lists subagents under a parent with a live child, and folds idle grandchildren", () => {
+    const rows = build({});
+    expect(rows.map((row) => row.key)).toEqual([
+      "project:alpha",
+      "thread:parent",
+      "thread:done",
+      "thread:live",
+      "thread:other",
+    ]);
+    expect(rows[1]).toMatchObject({ kind: "thread", subagents: "open" });
+    expect(rows[2]).toMatchObject({
+      kind: "subagent",
+      parentThreadId: "parent",
+      depth: 1,
+      subagents: "closed",
+    });
+    expect(rows[3]).toMatchObject({ kind: "subagent", subagents: null });
+    expect(rows[4]).toMatchObject({ kind: "thread" });
+    expect(rows[4]).not.toHaveProperty("subagents");
+  });
+
+  it("folds a parent the user closed, and opens a nested one the user opened", () => {
+    expect(build({ folds: new Map([["parent", false]]) }).map((row) => row.key)).toEqual([
+      "project:alpha",
+      "thread:parent",
+      "thread:other",
+    ]);
+    const rows = build({ folds: new Map([["done", true]]) });
+    expect(rows.find((row) => row.key === "thread:grand")).toMatchObject({
+      kind: "subagent",
+      parentThreadId: "done",
+      depth: 2,
+    });
+  });
+
+  it("marks a thread opened before its family loads, so the note under it reads right", () => {
+    const rows = build({ folds: new Map([["other", true]]) });
+    expect(rows.find((row) => row.key === "thread:other")).toMatchObject({ subagents: "open" });
+  });
+
+  it("opens the open subagent's ancestors and keeps its top-level thread in the preview", () => {
+    const rows = build({
+      activeThreadId: "grand",
+      activeAncestors: ["done", "parent"],
+      previewCount: 1,
+    });
+    expect(rows.map((row) => row.key)).toEqual([
+      "project:alpha",
+      "thread:parent",
+      "thread:done",
+      "thread:grand",
+      "thread:live",
+      "more:alpha",
+    ]);
+    // Folding an ancestor by hand still folds it.
+    const folded = build({
+      folds: new Map([["parent", false]]),
+      activeThreadId: "grand",
+      activeAncestors: ["done", "parent"],
+      previewCount: 1,
+    });
+    expect(folded.map((row) => row.key)).toEqual(["project:alpha", "thread:parent", "more:alpha"]);
+  });
+
+  it("shares unchanged subagent rows and swaps one whose fold changed", () => {
+    const previous = build({});
+    expect(shareSidebarRows(previous, build({}))).toBe(previous);
+    const shared = shareSidebarRows(previous, build({ folds: new Map([["done", true]]) }));
+    expect(shared[1]).toBe(previous[1]);
+    expect(shared[2]).not.toBe(previous[2]);
+    expect(shared[2]).toMatchObject({ subagents: "open" });
   });
 });

@@ -107,6 +107,9 @@ import {
   type MenuItem,
 } from "./sidebarContextMenu.ts";
 import { useSidebarController } from "./sidebarController.ts";
+import { useSubagentControls } from "./subagentController.ts";
+import { SubagentComposerBar } from "./subagentViews.tsx";
+import { subagentShellState } from "./subagentTree.ts";
 import { printableText, resolveSidebarKey } from "./sidebarKeys.ts";
 import type { SidebarRow, SidebarThread } from "./sidebarModel.ts";
 import type { TuiTheme } from "./theme.ts";
@@ -195,6 +198,7 @@ interface PaletteAction {
 /** What a context menu acts on: one thread, the multi-selection, or a project. */
 type MenuTarget =
   | { readonly kind: "thread"; readonly threadId: string }
+  | { readonly kind: "subagent"; readonly threadId: string }
   | { readonly kind: "threads"; readonly threadIds: ReadonlyArray<string> }
   | { readonly kind: "project"; readonly projectId: string };
 
@@ -712,12 +716,22 @@ function Shell(props: AppProps) {
     [logger],
   );
 
+  const subagents = useSubagentControls({
+    connection,
+    sidebar,
+    rexTabs,
+    openInRex: (threadId) => openThreadInRexTab(threadId),
+    runTask,
+    setStatus,
+    onOpened: () => setFocusArea("thread"),
+  });
+
   const openContextMenu = useCallback(
     (target: MenuTarget, anchor: { x: number; y: number } | null) => {
       const rowKey =
         target.kind === "project"
           ? `project:${target.projectId}`
-          : `thread:${target.kind === "thread" ? target.threadId : (target.threadIds[0] ?? "")}`;
+          : `thread:${target.kind === "threads" ? (target.threadIds[0] ?? "") : target.threadId}`;
       const rowY = renderer.root.findDescendantById(sidebarRowId(rowKey))?.y;
       const top = anchor?.y ?? (rowY === undefined ? 2 : rowY + 1);
       const left = anchor?.x ?? 2;
@@ -749,6 +763,8 @@ function Shell(props: AppProps) {
             threadId: ThreadId.make(selectedThreadId),
             projectId: ProjectId.make(activeThread?.projectId ?? selection.projectId ?? ""),
           };
+  // A provider-native subagent takes no messages: its composer gives way to a status bar.
+  const composerLocked = composerTarget?.kind === "thread" && subagents.readOnlyReason !== null;
   const pickerProviders = useMemo(() => buildModelPickerProviders(providers), [providers]);
   const baseSettings = activeThread
     ? threadSettings(activeThread)
@@ -908,6 +924,7 @@ function Shell(props: AppProps) {
 
   const menuItemsFor = (target: MenuTarget): ReadonlyArray<MenuItem<string>> => {
     if (target.kind === "threads") return buildMultiThreadMenuItems(target.threadIds.length);
+    if (target.kind === "subagent") return subagents.menuItems(target.threadId);
     if (target.kind === "project") return buildProjectMenuItems();
     const thread = threadsById.get(target.threadId);
     return buildThreadMenuItems({
@@ -961,6 +978,7 @@ function Shell(props: AppProps) {
         return;
       }
       const { threadId } = target;
+      if (target.kind === "subagent" && subagents.runMenuItem(threadId, item.id)) return;
       switch (item.id) {
         case "open-rex-tab":
           await openThreadInRexTab(threadId);
@@ -1008,6 +1026,10 @@ function Shell(props: AppProps) {
   /** The menu for a sidebar row: a project's, the selection's when the row is in it, else the thread's. */
   const menuTargetForRow = (row: SidebarRow): MenuTarget | null => {
     if (row.kind === "project") return { kind: "project", projectId: row.projectId };
+    if (row.kind === "subagent") {
+      if (sidebar.multiSelection.threadIds.size > 0) sidebar.clearMultiSelection();
+      return { kind: "subagent", threadId: row.threadId };
+    }
     if (row.kind !== "thread") return null;
     const selected = sidebar.multiSelection.threadIds;
     if (selected.size > 0 && selected.has(row.threadId)) {
@@ -1207,6 +1229,7 @@ function Shell(props: AppProps) {
       });
     }
   }
+  actions.push(...subagents.paletteActions(paletteOpen));
   if (sidebar.multiSelection.threadIds.size > 0) {
     const target: MenuTarget = {
       kind: "threads",
@@ -1394,13 +1417,13 @@ function Shell(props: AppProps) {
     wasDocked.current = layout.showSidebar;
   }, [layout.showSidebar]);
 
-  const composerFocused = focusArea === "composer" && composerTarget !== null;
-  const requestsFocused = focusArea === "requests" && composerTarget !== null;
+  const composerFocused = focusArea === "composer" && composerTarget !== null && !composerLocked;
+  const requestsFocused = focusArea === "requests" && composerTarget !== null && !composerLocked;
   const dockFocused = composerFocused || requestsFocused;
   const cycleFocus = () => {
     const order: FocusArea[] = [
       ...(sidebarVisible ? (["sidebar"] as const) : []),
-      ...(composerTarget !== null ? (["composer"] as const) : []),
+      ...(composerTarget !== null && !composerLocked ? (["composer"] as const) : []),
       "thread",
       ...(terminalDrawer.open ? (["terminal"] as const) : []),
     ];
@@ -1412,6 +1435,10 @@ function Shell(props: AppProps) {
    * and the rest follow focus.
    */
   const writeToComposer = (write: (dock: ComposerDockHandle) => void): boolean => {
+    if (composerLocked && subagents.readOnlyReason !== null) {
+      setStatus(subagents.readOnlyReason);
+      return true;
+    }
     if (composerTarget === null || dockRef.current === null) {
       setStatus("Select a thread to type a message");
       return true;
@@ -1587,6 +1614,7 @@ function Shell(props: AppProps) {
     }
     const paneKey = routeThreadPaneKey(key, {
       composer: composerTarget?.kind ?? null,
+      parent: subagents.context !== null,
       pane: mainPane === null ? null : (paneKeyEvent) => mainPane.handleKey(paneKeyEvent),
     });
     switch (paneKey) {
@@ -1604,8 +1632,12 @@ function Shell(props: AppProps) {
         git.openBranchPicker();
         return true;
       case "compose":
-        setFocusArea("composer");
+        if (composerLocked && subagents.readOnlyReason !== null)
+          setStatus(subagents.readOnlyReason);
+        else setFocusArea("composer");
         return true;
+      case "parent":
+        return subagents.openParent();
     }
   };
 
@@ -1691,6 +1723,7 @@ function Shell(props: AppProps) {
       cursorKey={sidebar.cursorKey}
       multiSelectedThreadIds={sidebar.multiSelection.threadIds}
       emptyLabel={emptyLabel}
+      subagentSource={subagents.sidebarSource}
       onPress={pressSidebarRow}
     />
   ) : null;
@@ -1785,6 +1818,8 @@ function Shell(props: AppProps) {
                   onActivate={activateThreadView}
                   onCopy={copyToClipboard}
                   onOpenDiff={openDiffForRun}
+                  subagentActions={subagents.actions}
+                  subagentContext={subagents.context}
                 />
               )}
               {git.setupThreadId !== null && !diffShown ? (
@@ -1803,77 +1838,90 @@ function Shell(props: AppProps) {
                   theme={theme}
                 />
               ) : null}
-              <ComposerDock
-                key={`composer:${composerTarget.threadId}`}
-                ref={dockRef}
-                composer={{
-                  target: composerTarget,
-                  store: composerStore,
-                  theme,
-                  baseSettings,
-                  modelLabel,
-                  providerBadge,
-                  running,
-                  stopRequested,
-                  followUpBehavior,
-                  clipboardDir: NodePath.join(paths.stateHomeDir, "clipboard"),
-                  onStop: stopRun,
-                  onExit: requestExit,
-                  onNewThread: () => openNewThread(composerTarget.projectId),
-                  onOpenModelPicker: toggleModelPicker,
-                  onSetInteractionMode: setInteractionMode,
-                  onSetRuntimeMode: setRuntimeMode,
-                  onStatus: setStatus,
-                  onClone: management.clone,
-                  onToggleDiff: toggleDiff,
-                  git: {
-                    openMenu: git.openMenu,
-                    openBranchPicker: git.openBranchPicker,
-                    toggleWorktree: git.toggleWorktree,
-                    retrySetup: git.retrySetup,
-                    launchWorktree: git.launchWorktree,
-                    sendBlockedReason: git.sendBlockedReason,
-                  },
-                  mentionSearch: {
-                    cwd: activeThread
-                      ? threadWorkspacePath(activeThread, activeProject ?? undefined)
-                      : (activeProject?.workspaceRoot ?? null),
-                    searchAtom: connection.searchEntriesAtom,
-                  },
-                }}
-                sender={sender}
-                requests={
-                  composerTarget.kind === "thread"
-                    ? {
-                        queue: requestQueue,
-                        store: requestPanelStore,
-                        responder,
-                        cwd: activeThread
-                          ? threadWorkspacePath(activeThread, activeProject ?? undefined)
-                          : null,
-                        stopSentRunId: stopRequestedRunId,
-                        onHints: setPanelHints,
-                      }
-                    : null
-                }
-                focus={
-                  // Overlays with their own text box take OpenTUI's focus; releasing the
-                  // dock's here makes it take focus back when they close.
-                  modelPicker !== null ||
-                  paletteOpen ||
-                  git.overlay !== null ||
-                  management.dialogOpen ||
-                  archivedSelected !== null
-                    ? null
-                    : composerFocused
-                      ? "composer"
-                      : requestsFocused
-                        ? "requests"
-                        : null
-                }
-                onFocus={setFocusArea}
-                onPanelShown={setRequestsShown}
-              />
+              {composerLocked && subagents.context !== null && activeThread !== null ? (
+                <SubagentComposerBar
+                  key={`subagent-bar:${composerTarget.threadId}`}
+                  threadId={composerTarget.threadId}
+                  context={subagents.context}
+                  modelLabel={modelLabel(threadSettings(activeThread))}
+                  fallbackState={subagentShellState(activeThread)}
+                  reason={subagents.readOnlyReason ?? ""}
+                  theme={theme}
+                  actions={subagents.actions}
+                />
+              ) : (
+                <ComposerDock
+                  key={`composer:${composerTarget.threadId}`}
+                  ref={dockRef}
+                  composer={{
+                    target: composerTarget,
+                    store: composerStore,
+                    theme,
+                    baseSettings,
+                    modelLabel,
+                    providerBadge,
+                    running,
+                    stopRequested,
+                    followUpBehavior,
+                    clipboardDir: NodePath.join(paths.stateHomeDir, "clipboard"),
+                    onStop: stopRun,
+                    onExit: requestExit,
+                    onNewThread: () => openNewThread(composerTarget.projectId),
+                    onOpenModelPicker: toggleModelPicker,
+                    onSetInteractionMode: setInteractionMode,
+                    onSetRuntimeMode: setRuntimeMode,
+                    onStatus: setStatus,
+                    onClone: management.clone,
+                    onToggleDiff: toggleDiff,
+                    git: {
+                      openMenu: git.openMenu,
+                      openBranchPicker: git.openBranchPicker,
+                      toggleWorktree: git.toggleWorktree,
+                      retrySetup: git.retrySetup,
+                      launchWorktree: git.launchWorktree,
+                      sendBlockedReason: git.sendBlockedReason,
+                    },
+                    mentionSearch: {
+                      cwd: activeThread
+                        ? threadWorkspacePath(activeThread, activeProject ?? undefined)
+                        : (activeProject?.workspaceRoot ?? null),
+                      searchAtom: connection.searchEntriesAtom,
+                    },
+                  }}
+                  sender={sender}
+                  requests={
+                    composerTarget.kind === "thread"
+                      ? {
+                          queue: requestQueue,
+                          store: requestPanelStore,
+                          responder,
+                          cwd: activeThread
+                            ? threadWorkspacePath(activeThread, activeProject ?? undefined)
+                            : null,
+                          stopSentRunId: stopRequestedRunId,
+                          onHints: setPanelHints,
+                        }
+                      : null
+                  }
+                  focus={
+                    // Overlays with their own text box take OpenTUI's focus; releasing the
+                    // dock's here makes it take focus back when they close.
+                    modelPicker !== null ||
+                    paletteOpen ||
+                    git.overlay !== null ||
+                    management.dialogOpen ||
+                    archivedSelected !== null
+                      ? null
+                      : composerFocused
+                        ? "composer"
+                        : requestsFocused
+                          ? "requests"
+                          : null
+                  }
+                  onFocus={setFocusArea}
+                  onPanelShown={setRequestsShown}
+                />
+              )}
               {git.cwd !== null ? (
                 <BranchToolbar
                   source={connection}

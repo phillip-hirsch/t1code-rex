@@ -83,3 +83,35 @@ describe("scrollbarThumb", () => {
     expect(scrollbarThumb(1000, 10, 0)).toEqual({ start: 0, size: 1 });
   });
 });
+
+describe("subagent notes", () => {
+  it("puts a note under an opened thread with no subagent rows, and none under one with them", () => {
+    const groups = buildSidebarGroups({
+      projects: [projectShell("a")],
+      threads: [presentedThread("a1", "a"), presentedThread("a2", "a")],
+      projectSortOrder: "manual",
+      threadSortOrder: "updated_at",
+    });
+    const rows = buildSidebarRows({
+      groups,
+      expandedProjectIds: new Set(["a"]),
+      showAllProjectIds: new Set(),
+      previewCount: 5,
+      activeThreadId: null,
+      subagents: {
+        childrenByParent: new Map(),
+        isOpen: (id) => id === "a1",
+        activeAncestors: [],
+      },
+    });
+    const lines = buildSidebarLines({
+      rows,
+      expandedProjectIds: new Set(["a"]),
+      threadCountByProject: new Map([["a", 2]]),
+      olderSettledByProject: new Map(),
+    });
+    const note = lines.find((line) => line.key === "subagents:a1");
+    expect(note).toMatchObject({ kind: "note", subagentsOf: "a1", depth: 1 });
+    expect(lines.some((line) => line.key === "subagents:a2")).toBe(false);
+  });
+});

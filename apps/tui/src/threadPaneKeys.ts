@@ -1,5 +1,5 @@
 /** What a key in the thread pane does once the transcript (or the diff) passed on it. */
-export type ThreadPaneShortcut = "diff" | "git-menu" | "branch-picker" | "compose";
+export type ThreadPaneShortcut = "diff" | "git-menu" | "branch-picker" | "compose" | "parent";
 
 export interface ThreadPaneKey {
   readonly name: string;
@@ -16,7 +16,11 @@ export const THREAD_PANE_SHORTCUT_HINTS = "d diff  c git  b branch  i compose";
 
 export function resolveThreadPaneShortcut(
   key: ThreadPaneKey,
-  context: { readonly composer: "thread" | "draft" | null },
+  context: {
+    readonly composer: "thread" | "draft" | null;
+    /** The thread is a subagent: p opens its parent. */
+    readonly parent?: boolean;
+  },
 ): ThreadPaneShortcut | null {
   if (context.composer === null || key.ctrl === true || key.meta === true) return null;
   switch (key.name) {
@@ -26,6 +30,8 @@ export function resolveThreadPaneShortcut(
       return "git-menu";
     case "b":
       return "branch-picker";
+    case "p":
+      return context.parent === true ? "parent" : null;
     case "i":
     case "return":
     case "enter":
@@ -45,6 +51,7 @@ export function routeThreadPaneKey<K extends ThreadPaneKey>(
   key: K,
   context: {
     readonly composer: "thread" | "draft" | null;
+    readonly parent?: boolean;
     readonly pane: ((key: K) => boolean) | null;
   },
 ): ThreadPaneShortcut | "pane" | null {

@@ -64,3 +64,10 @@ export function useTicker(ticker: Ticker): TickerSnapshot {
 
 export const PULSE_TICKER = createTicker(260);
 export const RELATIVE_TIME_TICKER = createTicker(30_000);
+
+const WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+
+/** The spinner frame for a pulse tick. */
+export function workingFrame(tick: number): string {
+  return WORKING_FRAMES[tick % WORKING_FRAMES.length] ?? "⠋";
+}

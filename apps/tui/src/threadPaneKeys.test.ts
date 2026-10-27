@@ -39,3 +39,16 @@ describe("routeThreadPaneKey", () => {
     expect(route("i")).toBe("compose");
   });
 });
+
+describe("the parent shortcut", () => {
+  it("opens a subagent's parent on p, and leaves p alone elsewhere", () => {
+    expect(
+      routeThreadPaneKey({ name: "p" }, { composer: "thread", parent: true, pane: transcript }),
+    ).toBe("parent");
+    expect(route("p")).toBeNull();
+    // The diff's own p (previous file) wins while it is open.
+    expect(
+      routeThreadPaneKey({ name: "p" }, { composer: "thread", parent: true, pane: diff }),
+    ).toBe("pane");
+  });
+});

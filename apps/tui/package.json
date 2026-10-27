@@ -33,6 +33,7 @@
     "check:git": "bun scripts/check-git.tsx",
     "check:worktree-guard": "bun scripts/check-worktree-guard.ts",
     "check:keys": "bun scripts/check-keys.tsx",
+    "check:subagents": "bun scripts/check-subagents.tsx",
     "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {

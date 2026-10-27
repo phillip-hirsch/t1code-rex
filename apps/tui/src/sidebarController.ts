@@ -42,6 +42,7 @@ import {
   resolveThreadStatus,
   type ThreadStatusPill,
 } from "./sidebarStatus.ts";
+import { groupSubagentChildren, subagentsOpen, threadAncestors } from "./subagentTree.ts";
 import type { ThreadWindowLaunch } from "./threadWindowLaunch.ts";
 import {
   clearThreadUnread,
@@ -101,6 +102,8 @@ export function useSidebarController(options: SidebarControllerOptions) {
     () => new Set(initialPrefs.locallyUnreadThreadIds ?? []),
   );
   const [multiSelection, setMultiSelection] = useState<ThreadMultiSelection>(EMPTY_MULTI_SELECTION);
+  /** Subagent folds the user chose, by parent thread; the rest follow `subagentsOpen`. */
+  const [subagentFolds, setSubagentFolds] = useState<ReadonlyMap<string, boolean>>(() => new Map());
 
   const groups = useMemo(
     () =>
@@ -112,6 +115,29 @@ export function useSidebarController(options: SidebarControllerOptions) {
       }),
     [projects, threads, settings],
   );
+  const threadsById = useMemo(
+    () => new Map<string, SidebarThread>(threads.map((thread) => [thread.id, thread])),
+    [threads],
+  );
+  const subagentChildren = useMemo(() => groupSubagentChildren(threads), [threads]);
+  const activeAncestors = useMemo(
+    () => (selection.threadId === null ? [] : threadAncestors(selection.threadId, threadsById)),
+    [selection.threadId, threadsById],
+  );
+  const subagentTree = useMemo(
+    () => ({
+      childrenByParent: subagentChildren,
+      isOpen: (parentId: string) =>
+        subagentsOpen(
+          parentId,
+          subagentChildren.get(parentId) ?? [],
+          subagentFolds,
+          activeAncestors.includes(parentId),
+        ),
+      activeAncestors,
+    }),
+    [activeAncestors, subagentChildren, subagentFolds],
+  );
   const builtRows = useMemo(
     () =>
       buildSidebarRows({
@@ -120,8 +146,9 @@ export function useSidebarController(options: SidebarControllerOptions) {
         showAllProjectIds,
         previewCount: settings.sidebarThreadPreviewCount,
         activeThreadId: selection.threadId,
+        subagents: subagentTree,
       }),
-    [groups, expandedProjectIds, showAllProjectIds, settings, selection.threadId],
+    [groups, expandedProjectIds, showAllProjectIds, settings, selection.threadId, subagentTree],
   );
   // Rebuilt rows reuse the previous objects they repeat, so a selection change or shell
   // update re-renders only the rows it touches.
@@ -134,10 +161,6 @@ export function useSidebarController(options: SidebarControllerOptions) {
   const projectsById = useMemo(
     () => new Map<string, OrchestrationProjectShell>(projects.map((p) => [p.id, p])),
     [projects],
-  );
-  const threadsById = useMemo(
-    () => new Map<string, SidebarThread>(threads.map((thread) => [thread.id, thread])),
-    [threads],
   );
   /** Threads the sidebar lists, for keeping the multi-selection on live rows. */
   const listedThreadIds = useMemo(
@@ -263,6 +286,11 @@ export function useSidebarController(options: SidebarControllerOptions) {
     });
   }, []);
 
+  /** Shows or hides a thread's subagents; opening one asks for its idle children too. */
+  const toggleSubagents = useCallback((threadId: string, open: boolean) => {
+    setSubagentFolds((current) => new Map(current).set(threadId, !open));
+  }, []);
+
   /** Moves the cursor without selecting, as a right-click does before its menu opens. */
   const focusRow = useCallback((row: SidebarRow) => setCursorKey(row.key), []);
 
@@ -274,9 +302,24 @@ export function useSidebarController(options: SidebarControllerOptions) {
   const pressRow = useCallback(
     (
       row: SidebarRow,
-      modifiers: { readonly ctrl?: boolean | undefined; readonly shift?: boolean | undefined } = {},
+      modifiers: {
+        readonly ctrl?: boolean | undefined;
+        readonly shift?: boolean | undefined;
+        /** The row's fold glyph: show or hide its subagents. */
+        readonly toggleSubagents?: boolean | undefined;
+      } = {},
     ) => {
       setCursorKey(row.key);
+      if (modifiers.toggleSubagents && (row.kind === "thread" || row.kind === "subagent")) {
+        toggleSubagents(row.threadId, row.subagents === "open");
+        return;
+      }
+      if (row.kind === "subagent") {
+        // Subagents open on their own; they take no part in bulk selections.
+        setMultiSelection(EMPTY_MULTI_SELECTION);
+        selectThread(row.projectId, row.threadId);
+        return;
+      }
       if (row.kind === "thread") {
         if (modifiers.ctrl) {
           setMultiSelection((current) => toggleThreadInSelection(current, row.threadId));
@@ -296,7 +339,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
         toggleShowAll(row.projectId);
       }
     },
-    [rows, selectThread, toggleShowAll],
+    [rows, selectThread, toggleShowAll, toggleSubagents],
   );
 
   /**
@@ -312,7 +355,9 @@ export function useSidebarController(options: SidebarControllerOptions) {
           const next = moveCursor(rows, cursorKey, action.delta);
           if (next === null) return "handled";
           setCursorKey(next.key);
-          if (next.kind === "thread") selectThread(next.projectId, next.threadId);
+          if (next.kind === "thread" || next.kind === "subagent") {
+            selectThread(next.projectId, next.threadId);
+          }
           return "handled";
         }
         case "extend-selection": {
@@ -341,8 +386,28 @@ export function useSidebarController(options: SidebarControllerOptions) {
           if (action.direction === "left") {
             if (cursorRow.kind === "project") {
               setExpandedProjectIds((current) => collapseProject(current, cursorRow.projectId));
+            } else if (
+              (cursorRow.kind === "thread" || cursorRow.kind === "subagent") &&
+              cursorRow.subagents === "open"
+            ) {
+              toggleSubagents(cursorRow.threadId, true);
+            } else if (cursorRow.kind === "subagent") {
+              setCursorKey(threadRowKey(cursorRow.parentThreadId));
             } else {
               setCursorKey(projectRowKey(cursorRow.projectId));
+            }
+            return "handled";
+          }
+          if (cursorRow.kind === "thread" || cursorRow.kind === "subagent") {
+            // → shows a thread's subagents, loading idle ones; again steps into them.
+            if (cursorRow.subagents !== "open") {
+              toggleSubagents(cursorRow.threadId, false);
+              return "handled";
+            }
+            const child = moveCursor(rows, cursorRow.key, 1);
+            if (child?.kind === "subagent" && child.parentThreadId === cursorRow.threadId) {
+              setCursorKey(child.key);
+              selectThread(child.projectId, child.threadId);
             }
             return "handled";
           }
@@ -360,7 +425,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
         }
         case "open": {
           if (cursorRow === null) return "handled";
-          if (cursorRow.kind === "thread") {
+          if (cursorRow.kind === "thread" || cursorRow.kind === "subagent") {
             setMultiSelection(EMPTY_MULTI_SELECTION);
             selectThread(cursorRow.projectId, cursorRow.threadId);
             return "open";
@@ -376,7 +441,16 @@ export function useSidebarController(options: SidebarControllerOptions) {
           return null;
       }
     },
-    [cursorKey, cursorRow, expandedProjectIds, multiSelection, rows, selectThread, toggleShowAll],
+    [
+      cursorKey,
+      cursorRow,
+      expandedProjectIds,
+      multiSelection,
+      rows,
+      selectThread,
+      toggleShowAll,
+      toggleSubagents,
+    ],
   );
 
   const clearMultiSelection = useCallback(() => setMultiSelection(EMPTY_MULTI_SELECTION), []);
@@ -396,6 +470,12 @@ export function useSidebarController(options: SidebarControllerOptions) {
       return marked;
     },
     [threadsById, unread],
+  );
+
+  /** Threads whose subagents the user opened; their families load while they stay open. */
+  const openedSubagentParents = useMemo(
+    () => [...subagentFolds].flatMap(([threadId, open]) => (open ? [threadId] : [])),
+    [subagentFolds],
   );
 
   return {
@@ -418,6 +498,9 @@ export function useSidebarController(options: SidebarControllerOptions) {
     cursorKey,
     cursorRow,
     multiSelection,
+    subagentChildren,
+    openedSubagentParents,
+    toggleSubagents,
     applyKey,
     pressRow,
     focusRow,

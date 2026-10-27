@@ -12,6 +12,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type Ref,
 } from "react";
 
@@ -35,16 +36,13 @@ import {
   type TimelineRow,
   type WorkAccent,
 } from "./threadTimeline.ts";
+import type { SubagentThreadContext } from "./subagentPresentation.ts";
+import { SubagentParentLine, SubagentTimelineRow, type SubagentActions } from "./subagentViews.tsx";
 import { DEFAULT_THREAD_TITLE } from "./threadTitle.ts";
-import { PULSE_TICKER, RELATIVE_TIME_TICKER, useTicker } from "./ticker.ts";
+import { PULSE_TICKER, RELATIVE_TIME_TICKER, useTicker, workingFrame } from "./ticker.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 
 const WORK_ROW_MAX_WIDTH = "88%";
-const WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
-
-function workingFrame(tick: number): string {
-  return WORKING_FRAMES[tick % WORKING_FRAMES.length] ?? "⠋";
-}
 
 export interface ThreadViewHandle {
   /** Scroll keys while the thread has focus; true when the key was used. */
@@ -65,6 +63,10 @@ export interface ThreadViewProps {
   readonly onCopy: (value: string, message: string) => void;
   /** Opens a run's diff from its changed-files row. */
   readonly onOpenDiff?: (runId: string) => void;
+  /** Subagent rows' and the child header's actions. */
+  readonly subagentActions?: SubagentActions;
+  /** Set when this thread is a subagent: its parent, and whether it takes messages. */
+  readonly subagentContext?: SubagentThreadContext | null;
   readonly ref?: Ref<ThreadViewHandle>;
 }
 
@@ -94,6 +96,8 @@ export function ThreadView(props: ThreadViewProps) {
     onActivate,
     onCopy,
     onOpenDiff,
+    subagentActions,
+    subagentContext,
   } = props;
   const palette = theme.palette;
   const atoms = useMemo(() => connection.thread(threadId), [connection, threadId]);
@@ -175,7 +179,16 @@ export function ThreadView(props: ThreadViewProps) {
 
   return (
     <box style={{ flexDirection: "column", flexGrow: 1, minHeight: 0 }}>
-      <ThreadHeader thread={thread} project={project} statusPill={statusPill} theme={theme} />
+      <ThreadHeader thread={thread} project={project} statusPill={statusPill} theme={theme}>
+        {subagentContext && subagentActions ? (
+          <SubagentParentLine
+            threadId={threadId}
+            context={subagentContext}
+            theme={theme}
+            actions={subagentActions}
+          />
+        ) : null}
+      </ThreadHeader>
       <scrollbox
         ref={scrollRef}
         stickyScroll
@@ -210,6 +223,7 @@ export function ThreadView(props: ThreadViewProps) {
             bubbleWidth={bubbleWidth}
             onCopyCode={copyCode}
             onOpenDiff={onOpenDiff}
+            subagentActions={subagentActions}
           />
         ))}
       </scrollbox>
@@ -254,6 +268,8 @@ function ThreadHeader(props: {
   project: OrchestrationProjectShell | null;
   statusPill: ThreadStatusPill | null;
   theme: TuiTheme;
+  /** A line under the title's, such as a subagent's parent. */
+  children?: ReactNode;
 }) {
   const { thread, project, statusPill, theme } = props;
   const clock = useTicker(RELATIVE_TIME_TICKER);
@@ -281,6 +297,7 @@ function ThreadHeader(props: {
           />
         ) : null}
       </box>
+      {props.children}
     </box>
   );
 }
@@ -320,6 +337,7 @@ interface TimelineRowViewProps {
   readonly bubbleWidth: `${number}%`;
   readonly onCopyCode: (value: string) => void;
   readonly onOpenDiff: ((runId: string) => void) | undefined;
+  readonly subagentActions: SubagentActions | undefined;
 }
 
 /** One row; rows keep their identity until their item changes, so memo skips the rest. */
@@ -458,6 +476,18 @@ const TimelineRowView = memo(function TimelineRowView(props: TimelineRowViewProp
         </box>
       );
     }
+    case "subagent":
+      return (
+        <SubagentTimelineRow
+          id={id}
+          threadId={row.threadId}
+          item={row.item}
+          marginBottom={marginBottom}
+          maxWidth={WORK_ROW_MAX_WIDTH}
+          theme={theme}
+          actions={props.subagentActions}
+        />
+      );
     case "plan":
       return (
         <box

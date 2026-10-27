@@ -44,12 +44,15 @@ import {
   createEnvironmentThreadShellAtoms,
   createEnvironmentThreadStateAtoms,
   createThreadEnvironmentAtoms,
+  createThreadFamilyAtoms,
+  threadFamilyRead,
   type ArchiveThreadInput,
   type DeleteThreadInput,
   type DismissThreadUserInputInput,
   fetchEnvironmentThreadSnapshot,
   type InterruptThreadTurnInput,
   type PinThreadInput,
+  type ThreadFamilyRead,
   type RespondToThreadApprovalInput,
   type RespondToThreadUserInputInput,
   type RetryWorkspacePreparationInput,
@@ -70,8 +73,10 @@ import type {
   FilesystemBrowseInput,
   LaunchEditorInput,
   OrchestrationGetTurnDiffResult,
+  NodeId,
   OrchestrationProjectShell,
   OrchestrationV2ShellSnapshot,
+  OrchestrationV2Subagent,
   ProjectCloneStartInput,
   ProjectSearchEntriesInput,
   ServerSettingsPatch,
@@ -94,6 +99,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import type { ComposerCommandResult, WorkspaceGuard } from "../composerSender.ts";
+import { findSubagentForChild } from "../subagentPresentation.ts";
 import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurns } from "../diffTurns.ts";
 import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
 import { branchRefsInput, mergeRefPages, type BranchRefPages } from "../branchPicker.ts";
@@ -114,6 +120,7 @@ export interface TuiConnectionOptions {
 }
 
 const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
+const NO_SUBAGENTS: ReadonlyArray<OrchestrationV2Subagent> = [];
 
 /** Turn and full-thread diffs share one result shape. */
 export type CheckpointDiffAtom = Atom.Atom<
@@ -174,9 +181,9 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     initialConfigValueAtom: sessionAtoms.initialConfigValueAtom,
   });
   const shell = createEnvironmentShellAtoms(runtime);
-  const snapshotAtom = Atom.family((id: EnvironmentId) =>
-    Atom.make((get) => Option.getOrNull(get(shell.stateValueAtom(id)).snapshot)),
-  );
+  // The shell leaves idle subagent children out; mounted families add them back, as on web.
+  const threadFamilies = createThreadFamilyAtoms(runtime, shell.stateAtom);
+  const snapshotAtom = threadFamilies.snapshotAtom;
   const threadShells = createEnvironmentThreadShellAtoms({
     catalogValueAtom: catalog.catalogValueAtom,
     snapshotAtom,
@@ -189,6 +196,29 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     return Atom.make((get): ReadonlyArray<PendingRequest> =>
       select(Option.getOrNull(get(threadDetails.stateAtom({ environmentId, threadId })).data)),
     ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-requests:${threadId}`));
+  });
+  // The thread's subagent records; the same array until one of them changes.
+  const subagentsAtom = Atom.family((threadId: ThreadId) =>
+    Atom.make(
+      (get): ReadonlyArray<OrchestrationV2Subagent> =>
+        Option.getOrNull(get(threadDetails.stateAtom({ environmentId, threadId })).data)
+          ?.subagents ?? NO_SUBAGENTS,
+    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-subagents:${threadId}`)),
+  );
+  // One subagent record, so its transcript row re-renders only when that record changes.
+  const subagentAtom = Atom.family((key: string) => {
+    const [threadId, subagentId] = JSON.parse(key) as [ThreadId, string];
+    return Atom.make(
+      (get): OrchestrationV2Subagent | null =>
+        get(subagentsAtom(threadId)).find((subagent) => subagent.id === subagentId) ?? null,
+    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-subagent:${key}`));
+  });
+  // The parent's record for one child thread, for that child's sidebar row and view.
+  const subagentForChildAtom = Atom.family((key: string) => {
+    const [threadId, childThreadId] = JSON.parse(key) as [ThreadId, string];
+    return Atom.make((get) =>
+      findSubagentForChild(get(subagentsAtom(threadId)), childThreadId),
+    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-subagent-child:${key}`));
   });
   // The turns the diff panel can show; a new list only when checkpoints or runs change.
   const diffTurnsAtom = Atom.family((threadId: ThreadId) => {
@@ -269,6 +299,11 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       return yield* loader.load(prepared.value, threadId);
     }),
   });
+  const threadFamilyReadAtom = Atom.family((threadId: ThreadId) =>
+    Atom.make((get) =>
+      threadFamilyRead(get(threadFamilies.familyAtom(environmentId, threadId))),
+    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-family-read:${threadId}`)),
+  );
   // Upstream's thread commands, serialized per thread like web and mobile.
   const threadCommands = createThreadEnvironmentAtoms(runtime, snapshotAtom);
   const runThreadCommand = <Input, A, E>(
@@ -388,6 +423,26 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         queueAtom: threadDetails.queueWorkflowAtom(ref),
       };
     },
+    /** A thread's subagent records, from its subscription while something reads them. */
+    subagentsAtom: (threadId: ThreadId) => subagentsAtom(threadId),
+    /** One subagent record of a thread, or null until its subscription has it. */
+    subagentAtom: (threadId: ThreadId, subagentId: string) =>
+      subagentAtom(JSON.stringify([threadId, subagentId])),
+    /** The parent's record for one of its child threads, or null until it is loaded. */
+    subagentForChildAtom: (threadId: ThreadId, childThreadId: string) =>
+      subagentForChildAtom(JSON.stringify([threadId, childThreadId])),
+    /**
+     * Keeps a thread's whole family (its root, forks and subagent trees, idle children too)
+     * in the thread list until the returned release runs.
+     */
+    mountThreadFamily: (threadId: ThreadId): (() => void) =>
+      threadFamilies.mount(registry, environmentId, threadId),
+    /** Whether a family read for the thread is still pending, failed, or settled. */
+    threadFamilyReadAtom: (threadId: ThreadId): Atom.Atom<ThreadFamilyRead> =>
+      threadFamilyReadAtom(threadId),
+    /** Stops one subagent of `threadId`, as web's stop button does (`subagent.stop`). */
+    stopSubagent: (threadId: ThreadId, subagentId: NodeId) =>
+      runAction(threadCommands.interruptTurn, { threadId, subagentId }),
     /** The turns a thread's diff panel can show, live from its subscription. */
     diffTurnsAtom: (threadId: ThreadId) => diffTurnsAtom(threadId),
     /** A checkpoint range's unified diff; from turn 0 it is the full thread diff, as on web. */

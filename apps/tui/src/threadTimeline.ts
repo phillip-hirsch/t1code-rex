@@ -72,6 +72,12 @@ export type TimelineRow =
       readonly explanation: string | null;
     })
   | (RowBase & {
+      /** A subagent the turn started; its view reads the live record by `subagentId`. */
+      readonly kind: "subagent";
+      readonly threadId: string;
+      readonly item: ItemOf<"subagent">;
+    })
+  | (RowBase & {
       readonly kind: "notice";
       readonly tone: NoticeTone;
       readonly text: string;
@@ -208,12 +214,6 @@ function workParts(item: TurnItem): WorkParts | null {
       };
     case "dynamic_tool":
       return dynamicToolParts(item, running);
-    case "subagent":
-      return {
-        entryKind: "agent",
-        heading: itemTitle(item) ?? "Subagent",
-        preview: firstLine(item.progress ?? item.prompt),
-      };
     case "checkpoint": {
       // A checkpoint with no changed files says nothing worth a row.
       if (item.files.length === 0) return null;
@@ -386,6 +386,8 @@ export function presentTurnItem(row: OrchestrationV2ProjectedTurnItem): Timeline
       return noticeRow(key, createdAtMs, "info", "Thread forked");
     case "thread_created":
       return noticeRow(key, createdAtMs, "info", `Thread created on ${item.targetModel}`);
+    case "subagent":
+      return { kind: "subagent", key, createdAtMs, threadId: item.threadId, item };
     default:
       break;
   }
@@ -435,5 +437,6 @@ export function buildTimelineRows(
 /** Work rows sit flush against each other, as in the old work log; others get a gap. */
 export function rowHasGapAfter(row: TimelineRow, next: TimelineRow | undefined): boolean {
   if (next === undefined) return false;
-  return !(row.kind === "work" && next.kind === "work");
+  const compact = (kind: TimelineRowKind) => kind === "work" || kind === "subagent";
+  return !(compact(row.kind) && compact(next.kind));
 }

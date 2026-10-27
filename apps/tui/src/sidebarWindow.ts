@@ -10,6 +10,10 @@ export interface SidebarNote {
   readonly kind: "note";
   readonly key: string;
   readonly text: string;
+  /** Extra indent, for a note under a thread's subagents. */
+  readonly depth?: number;
+  /** Set on the note under an opened thread with no subagent rows: its family read's state. */
+  readonly subagentsOf?: string;
 }
 
 export type SidebarLine = SidebarRow | SidebarNote;
@@ -36,13 +40,26 @@ export function buildSidebarLines(input: {
     }
   };
   let openProjectId: string | null = null;
-  for (const row of input.rows) {
+  input.rows.forEach((row, index) => {
     if (row.kind === "project") {
       closeProject(openProjectId);
       openProjectId = row.projectId;
     }
     lines.push(row);
-  }
+    if ((row.kind === "thread" || row.kind === "subagent") && row.subagents === "open") {
+      const next = input.rows[index + 1];
+      const hasChild = next?.kind === "subagent" && next.parentThreadId === row.threadId;
+      if (!hasChild) {
+        lines.push({
+          kind: "note",
+          key: `subagents:${row.threadId}`,
+          text: "No subagents",
+          depth: row.kind === "subagent" ? row.depth + 1 : 1,
+          subagentsOf: row.threadId,
+        });
+      }
+    }
+  });
   closeProject(openProjectId);
   return lines;
 }
