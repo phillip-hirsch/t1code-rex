@@ -1028,4 +1028,29 @@ describe("composer sender, Sol audit round 5", () => {
     expect(recoverOrphanedSends(store, ThreadId.make("t9"))).toBe(1);
     expect(store.getDraft("t9").text).toBe("lost");
   });
+  it("N15: an older launch record without a project id is checked against its draft's project", async () => {
+    const prefs: { current: TuiPrefs } = { current: {} };
+    const never = new Promise<ComposerCommandResult>(() => undefined);
+    const first = setup([never], { store: savingStore(prefs) });
+    first.server.settings = null;
+    const draft = first.store.openNewThreadDraft(ProjectId.make("p"), () => ThreadId.make("new-1"));
+    void first.sender.send(send({ target: { kind: "draft", ...draft }, text: "old" }));
+    await settle();
+    first.sender.handOff();
+    first.store.flush();
+    // As written before records carried a project id.
+    prefs.current = {
+      ...prefs.current,
+      composerUnconfirmedSends: prefs.current.composerUnconfirmedSends?.map(
+        ({ projectId: _projectId, ...record }) => record,
+      ),
+    };
+
+    const store = savingStore(prefs);
+    const check = recovery(store, { "new-1": { _tag: "missing" } }, { projects: ["q"] });
+    await settle();
+    expect(check.orphaned).toEqual(["old"]);
+    expect(recoverOrphanedSends(store, ThreadId.make("t9"))).toBe(1);
+    expect(store.getDraft("t9").text).toBe("old");
+  });
 });

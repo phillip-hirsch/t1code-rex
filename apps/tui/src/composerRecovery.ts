@@ -43,7 +43,8 @@ export function decideUnconfirmedSend(
   context: {
     /** Null until the shell lists projects. */
     readonly projectExists: (projectId: ProjectId) => boolean | null;
-    readonly draftOpen: (threadId: ThreadId) => boolean;
+    /** The project of the thread's open new-thread draft, or undefined if none is open. */
+    readonly draftProject: (threadId: ThreadId) => ProjectId | undefined;
   },
 ): UnconfirmedSendOutcome {
   if (lookup._tag === "unavailable") return { kind: "retry" };
@@ -56,8 +57,11 @@ export function decideUnconfirmedSend(
   }
   // A launch that never landed goes back into its draft while that's still open, as long
   // as the draft's project still exists (otherwise the draft can't be reached).
-  if (projection === null && record.launch && context.draftOpen(record.threadId)) {
-    const exists = record.projectId === undefined ? true : context.projectExists(record.projectId);
+  const draftProject =
+    projection === null && record.launch ? context.draftProject(record.threadId) : undefined;
+  if (draftProject !== undefined) {
+    // Older records have no project id; the open draft knows it.
+    const exists = context.projectExists(record.projectId ?? draftProject);
     if (exists === null) return { kind: "retry" };
     if (exists) return { kind: "restore-in-draft" };
     return { kind: "orphaned" };
@@ -119,7 +123,7 @@ export function checkUnconfirmedSends(options: {
         if (stopped || !store.unconfirmedSends().includes(record)) return;
         const outcome = decideUnconfirmedSend(record, lookup, {
           projectExists: options.projectExists,
-          draftOpen: (threadId) => store.findNewThreadDraft(threadId) !== undefined,
+          draftProject: (threadId) => store.findNewThreadDraft(threadId)?.projectId,
         });
         if (outcome.kind !== "retry") return settle(record, outcome);
         const cancel = options.schedule(() => {
