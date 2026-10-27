@@ -9,6 +9,7 @@ import type { RuntimeRequestId, ThreadId } from "@t3tools/contracts";
 import {
   useEffect,
   useImperativeHandle,
+  useReducer,
   useRef,
   useState,
   useSyncExternalStore,
@@ -17,16 +18,19 @@ import {
 
 import { allowsCustomAnswer, answerText, optionValue, resolveAnswer } from "./questionAnswers.ts";
 import {
+  ENGAGE_HINT,
   activeQuestion,
-  createArmGuard,
+  createEngagementGuard,
   draftOf,
   isOpen,
   onTextRow,
   pickActiveRequest,
+  pressPanelKey,
   resolvePanelKey,
   setTypedAnswer,
   stepRequest,
   type PanelAction,
+  type PanelRunState,
   type QuestionForm,
 } from "./requestPanel.ts";
 import type { RequestPanelStore } from "./requestPanelStore.ts";
@@ -49,7 +53,7 @@ export interface RequestPanelHandle {
   readonly handleKey: (key: KeyEvent) => boolean;
 }
 
-export interface RequestPanelProps {
+export interface RequestPanelProps extends PanelRunState {
   readonly threadId: ThreadId;
   readonly queue: ReadonlyArray<PendingRequest>;
   readonly store: RequestPanelStore;
@@ -59,6 +63,10 @@ export interface RequestPanelProps {
   /** Where the thread's commands run, shown under a command approval. */
   readonly cwd: string | null;
   readonly onFocus: () => void;
+  /** Esc and Ctrl+C stop the run, as in the composer. */
+  readonly onStop: () => void;
+  /** Ctrl+C with nothing running. */
+  readonly onExit: () => void;
   readonly onStatus: (message: string) => void;
   /** The footer's key hints for what the panel shows. */
   readonly onHints: (hints: string) => void;
@@ -108,21 +116,30 @@ function hintsFor(
   request: PendingRequest | null,
   form: QuestionForm | null,
   count: number,
+  engaged: boolean,
+  run: PanelRunState,
 ): string {
-  const step = count > 1 ? "  [ ] request" : "";
   if (request === null) return "";
+  const stop = run.running ? (run.stopRequested ? "  stopping…" : "  esc stop") : "";
+  const step = count > 1 ? "  [ ] request" : "";
+  const answerable =
+    request.kind === "approval"
+      ? approvalChoices(request.approval).length > 0
+      : request.input.responseCapability !== "not_resumable";
+  if (!answerable) return `${stop.trimStart()}  tab focus`.trimStart();
+  if (!engaged) return `⏎ respond${stop}  tab focus`;
   if (request.kind === "approval") {
     const choices = approvalChoices(request.approval);
-    if (choices.length === 0) return `esc stop run${step}  tab focus`;
-    return `${choices.map((choice) => choice.key).join("/")} or 1-${choices.length} choose${step}  tab focus`;
+    return `${choices.map((choice) => choice.key).join("/")} or 1-${choices.length} choose${step}${stop}  tab focus`;
   }
   const question = form === null ? null : activeQuestion(request.input, form);
-  const dismiss = request.input.dismissible ? "  esc dismiss" : "";
+  const dismiss = request.input.dismissible && !run.running ? "  esc dismiss" : "";
+  const next = form !== null && form.index < request.input.questions.length - 1 ? "next" : "submit";
   if (question !== null && form !== null && onTextRow(form, question)) {
-    return `type an answer  ⏎ ${form.index < request.input.questions.length - 1 ? "next" : "submit"}  ↑ options${dismiss}  tab focus`;
+    return `type an answer  ⏎ ${next}  ↑ options${dismiss}${stop}  tab focus`;
   }
   const many = request.input.questions.length > 1 ? "  ←→ question" : "";
-  return `↑↓ move  1-9 pick  ⏎ ${form !== null && form.index < request.input.questions.length - 1 ? "next" : "submit"}${many}${step}${dismiss}`;
+  return `↑↓ move  1-9 pick  ⏎ ${next}${many}${step}${dismiss}${stop}`;
 }
 
 /**
@@ -131,6 +148,7 @@ function hintsFor(
  */
 export function RequestPanel(props: RequestPanelProps) {
   const { threadId, queue, store, responder, theme, ref } = props;
+  const run: PanelRunState = { running: props.running, stopRequested: props.stopRequested };
   const palette = theme.palette;
   useSyncExternalStore(store.subscribe, store.version);
   useSyncExternalStore(responder.subscribe, responder.version);
@@ -139,14 +157,28 @@ export function RequestPanel(props: RequestPanelProps) {
   const activeId = active?.requestId ?? null;
   const form = active?.kind === "question" ? store.form(threadId, active.input) : null;
 
-  // Keys typed just before a request shows up were meant for the composer.
-  const [armGuard] = useState(() => createArmGuard());
-  useEffect(() => armGuard.show(activeId), [activeId, armGuard]);
-  const isArmed = (requestId: RuntimeRequestId) => armGuard.armed(requestId);
+  // Typing meant for the composer must never answer: decisions wait for a deliberate Enter.
+  const [guard] = useState(() => createEngagementGuard());
+  useEffect(() => {
+    guard.show(activeId);
+  }, [activeId, guard]);
+  const [, rerender] = useReducer((count: number) => count + 1, 0);
+  const engaged = guard.engaged(activeId);
+  // A click is deliberate, once the request has been in view long enough to be aimed at.
+  const clicked = (requestId: RuntimeRequestId): boolean => {
+    if (!guard.settled(requestId)) return false;
+    if (!guard.engaged(requestId)) {
+      guard.engage(requestId);
+      rerender();
+    }
+    return true;
+  };
 
-  const hints = hintsFor(active, form, queue.length);
+  const hints = hintsFor(active, form, queue.length, engaged, run);
   const { onHints } = props;
-  useEffect(() => onHints(hints), [hints, onHints]);
+  useEffect(() => {
+    onHints(hints);
+  }, [hints, onHints]);
 
   const respond = (request: PendingRequest, response: RequestResponse) => {
     // With nothing else open, the panel keeps showing this one while its answer goes out.
@@ -158,6 +190,16 @@ export function RequestPanel(props: RequestPanelProps) {
   const apply = (request: PendingRequest, action: PanelAction) => {
     switch (action.type) {
       case "none":
+        return;
+      case "engage":
+        props.onStatus("");
+        rerender();
+        return;
+      case "stop":
+        props.onStop();
+        return;
+      case "exit":
+        props.onExit();
         return;
       case "step-request": {
         const next = stepRequest(queue, request.requestId, action.delta, statusOf);
@@ -196,21 +238,22 @@ export function RequestPanel(props: RequestPanelProps) {
       // Read now, not from the last render: a burst of keys builds on itself.
       const request = pickActiveRequest(queue, store.active(threadId), statusOf);
       if (request === null) return false;
-      const action = resolvePanelKey(
-        key,
+      const action = pressPanelKey(guard, request.requestId, key, (engagement) =>
         request.kind === "approval"
           ? {
               kind: "approval",
               choices: approvalChoices(request.approval),
               busy: busyOf(request),
-              armed: isArmed(request.requestId),
+              engagement,
+              ...run,
             }
           : {
               kind: "question",
               input: request.input,
               form: store.form(threadId, request.input),
               busy: busyOf(request),
-              armed: isArmed(request.requestId),
+              engagement,
+              ...run,
             },
       );
       if (action === null) return false;
@@ -228,7 +271,10 @@ export function RequestPanel(props: RequestPanelProps) {
 
   return (
     <box
-      onMouseDown={props.onFocus}
+      onMouseDown={() => {
+        props.onFocus();
+        clicked(active.requestId);
+      }}
       style={{
         marginTop: 1,
         border: true,
@@ -270,7 +316,9 @@ export function RequestPanel(props: RequestPanelProps) {
           request={active}
           cwd={props.cwd}
           busy={busy}
-          armed={() => isArmed(active.requestId)}
+          engaged={engaged}
+          running={props.running}
+          clicked={() => clicked(active.requestId)}
           theme={theme}
           onChoose={(choice) => respond(active, { type: "approval", decision: choice.decision })}
         />
@@ -278,7 +326,7 @@ export function RequestPanel(props: RequestPanelProps) {
         <QuestionBody
           input={active.input}
           form={form}
-          focused={props.focused && !busy}
+          focused={props.focused && !busy && engaged}
           theme={theme}
           onForm={(next) => store.setForm(threadId, active.requestId, next)}
           onType={(question, text) =>
@@ -289,15 +337,30 @@ export function RequestPanel(props: RequestPanelProps) {
             )
           }
           onPick={(index) => {
-            if (!isArmed(active.requestId) || busy) return;
+            if (busy || !clicked(active.requestId)) return;
             apply(
               active,
               resolvePanelKey(
                 { name: String(index + 1) },
-                { kind: "question", input: active.input, form, busy, armed: true },
+                {
+                  kind: "question",
+                  input: active.input,
+                  form: store.form(threadId, active.input),
+                  busy,
+                  engagement: "engaged",
+                  ...run,
+                },
               ) ?? { type: "none" },
             );
           }}
+        />
+      ) : null}
+      {!engaged && !busy && line === null ? (
+        <text
+          wrapMode="none"
+          truncate
+          content={`${ENGAGE_HINT}; until then keys do nothing here`}
+          style={{ fg: tone }}
         />
       ) : null}
       {line ? (
@@ -325,7 +388,10 @@ function ApprovalBody(props: {
   request: Extract<PendingRequest, { kind: "approval" }>;
   cwd: string | null;
   busy: boolean;
-  armed: () => boolean;
+  engaged: boolean;
+  running: boolean;
+  /** A click on a choice: true once it counts. */
+  clicked: () => boolean;
   theme: TuiTheme;
   onChoose: (choice: ApprovalChoice) => void;
 }) {
@@ -400,7 +466,7 @@ function ApprovalBody(props: {
       ) : null}
       {approval.responseCapability !== "live" ? (
         <text
-          content="The provider process is gone. Stop or restart the run to continue."
+          content={`The provider process is gone, so this can't be answered.${props.running ? " Esc stops the run." : ""}`}
           style={{ fg: palette.warning }}
         />
       ) : (
@@ -411,9 +477,10 @@ function ApprovalBody(props: {
               choice={choice}
               index={index}
               disabled={props.busy}
+              muted={!props.engaged}
               theme={theme}
               onPress={() => {
-                if (!props.busy && props.armed()) props.onChoose(choice);
+                if (!props.busy && props.clicked()) props.onChoose(choice);
               }}
             />
           ))}
@@ -427,6 +494,8 @@ function ChoiceButton(props: {
   choice: ApprovalChoice;
   index: number;
   disabled: boolean;
+  /** Shown but not taking keys yet. */
+  muted: boolean;
   theme: TuiTheme;
   onPress: () => void;
 }) {
@@ -447,13 +516,16 @@ function ChoiceButton(props: {
         marginRight: 2,
         paddingLeft: 1,
         paddingRight: 1,
-        backgroundColor: approving && !props.disabled ? palette.surfaceWarn : palette.composerPanel,
+        backgroundColor:
+          approving && !props.disabled && !props.muted
+            ? palette.surfaceWarn
+            : palette.composerPanel,
       }}
     >
       <text
         wrapMode="none"
         content={`${props.index + 1} `}
-        style={{ fg: props.disabled ? palette.subtle : palette.warning }}
+        style={{ fg: props.disabled || props.muted ? palette.subtle : palette.warning }}
       />
       <text
         wrapMode="none"
@@ -490,9 +562,9 @@ function QuestionBody(props: {
       <text content={question.question} style={{ fg: palette.text }} />
       <box style={{ flexDirection: "column", marginTop: 1 }}>
         {question.options.map((option, index) => {
+          // Typed text wins over picks, as in resolveAnswer.
           const selected =
-            draft.selected.includes(optionValue(option)) &&
-            (question.multiSelect || draft.custom.trim().length === 0);
+            draft.selected.includes(optionValue(option)) && draft.custom.trim().length === 0;
           const atCursor = props.focused && !typing && form.cursor === index;
           return (
             <box

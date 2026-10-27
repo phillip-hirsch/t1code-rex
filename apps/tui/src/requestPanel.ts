@@ -13,33 +13,69 @@ import {
   optionValue,
   resolveAnswer,
   toggleOption,
+  typeAnswer,
   type QuestionAnswer,
   type QuestionDraft,
 } from "./questionAnswers.ts";
 import type { ApprovalChoice, PendingRequest } from "./requestQueue.ts";
 import type { ResponseStatus } from "./requestResponder.ts";
 
-/** Keys right after a request appears are ignored, so typing meant for the composer can't answer it. */
-export const PANEL_ARM_DELAY_MS = 500;
+/** How long keys must stop before Enter engages the panel. */
+export const PANEL_QUIET_MS = 750;
 
 /**
- * Tracks when each request came into view; keys count only after the arm delay, so a key
- * typed for the composer just as a request replaced it can't answer it.
+ * Where the panel stands for a key: `engaged` takes decisions; `ready` and `typing` are
+ * disengaged, and only `ready` lets Enter engage it.
  */
-export function createArmGuard(now: () => number = Date.now) {
-  let shown: { readonly requestId: RuntimeRequestId | null; readonly at: number } = {
-    requestId: null,
-    at: 0,
+export type Engagement = "engaged" | "ready" | "typing";
+
+/**
+ * The panel opens disengaged, and its decision keys do nothing until Enter engages it.
+ * Enter only engages after PANEL_QUIET_MS with no keys, and every key while disengaged
+ * restarts that wait, so typing that carries on from the composer can never engage the
+ * panel or answer, however long it goes on. Another request disengages it again.
+ */
+export function createEngagementGuard(now: () => number = Date.now) {
+  let shown = {
+    requestId: null as RuntimeRequestId | null,
+    shownAt: 0,
+    quietSince: 0,
+    engaged: false,
+  };
+  const show = (requestId: RuntimeRequestId | null): void => {
+    if (shown.requestId === requestId) return;
+    const at = now();
+    shown = { requestId, shownAt: at, quietSince: at, engaged: false };
   };
   return {
-    show(requestId: RuntimeRequestId | null): void {
-      if (shown.requestId !== requestId) shown = { requestId, at: now() };
+    show,
+    /** For a key the panel is about to handle: where it stands. The key restarts the wait. */
+    press(requestId: RuntimeRequestId): Engagement {
+      show(requestId);
+      const at = now();
+      const state: Engagement = shown.engaged
+        ? "engaged"
+        : at - shown.quietSince >= PANEL_QUIET_MS
+          ? "ready"
+          : "typing";
+      shown.quietSince = at;
+      return state;
     },
-    armed(requestId: RuntimeRequestId): boolean {
-      return shown.requestId === requestId && now() - shown.at >= PANEL_ARM_DELAY_MS;
+    engage(requestId: RuntimeRequestId): void {
+      show(requestId);
+      shown.engaged = true;
+    },
+    engaged(requestId: RuntimeRequestId | null): boolean {
+      return requestId !== null && shown.requestId === requestId && shown.engaged;
+    },
+    /** In view long enough that a click is aimed at it, not at what it replaced. */
+    settled(requestId: RuntimeRequestId): boolean {
+      return shown.requestId === requestId && now() - shown.shownAt >= PANEL_QUIET_MS;
     },
   };
 }
+
+export type EngagementGuard = ReturnType<typeof createEngagementGuard>;
 
 /** Whether a request still takes an answer: not answered yet, or its answer was turned down. */
 export function isOpen(status: ResponseStatus | null): boolean {
@@ -137,11 +173,7 @@ export function setTypedAnswer(
   const draft = draftOf(form, question);
   if (draft.custom === text) return form;
   const drafts = new Map(form.drafts);
-  // Typing replaces a single choice, as web does.
-  drafts.set(question.id, {
-    selected: question.multiSelect || text.trim().length === 0 ? draft.selected : [],
-    custom: text,
-  });
+  drafts.set(question.id, typeAnswer(question, draft, text));
   return { ...form, drafts };
 }
 
@@ -159,25 +191,40 @@ export interface PanelKey {
   readonly ctrl?: boolean;
   readonly meta?: boolean;
   readonly shift?: boolean;
+  readonly option?: boolean;
+  readonly super?: boolean;
+  readonly hyper?: boolean;
 }
 
-export type PanelKeyContext =
-  | {
-      readonly kind: "approval";
-      readonly choices: ReadonlyArray<ApprovalChoice>;
-      /** An answer is on its way, or the request can't be answered. */
-      readonly busy: boolean;
-      readonly armed: boolean;
-    }
-  | {
-      readonly kind: "question";
-      readonly input: ThreadPendingUserInput;
-      readonly form: QuestionForm;
-      readonly busy: boolean;
-      readonly armed: boolean;
-    };
+/** What the panel shares with the composer: the run that Esc and Ctrl+C stop. */
+export interface PanelRunState {
+  readonly running: boolean;
+  /** Stop was already sent for this run, so another Ctrl+C quits instead. */
+  readonly stopRequested: boolean;
+}
+
+export type PanelKeyContext = PanelRunState &
+  (
+    | {
+        readonly kind: "approval";
+        readonly choices: ReadonlyArray<ApprovalChoice>;
+        /** An answer is on its way, or the request can't be answered. */
+        readonly busy: boolean;
+        readonly engagement: Engagement;
+      }
+    | {
+        readonly kind: "question";
+        readonly input: ThreadPendingUserInput;
+        readonly form: QuestionForm;
+        readonly busy: boolean;
+        readonly engagement: Engagement;
+      }
+  );
 
 export type PanelAction =
+  | { readonly type: "engage" }
+  | { readonly type: "stop" }
+  | { readonly type: "exit" }
   | { readonly type: "step-request"; readonly delta: 1 | -1 }
   | { readonly type: "decide"; readonly decision: ProviderApprovalDecision }
   | { readonly type: "form"; readonly form: QuestionForm }
@@ -189,29 +236,81 @@ export type PanelAction =
 
 const NONE: PanelAction = { type: "none" };
 
+export const ENGAGE_HINT = "Press ⏎ to respond";
+const STILL_TYPING_HINT = "Keys were still coming in; pause, then press ⏎ to respond";
+
 function isEnterKey(name: string): boolean {
   return name === "return" || name === "enter" || name === "kpenter";
 }
 
+/** Ctrl, Alt/Option, Cmd/Super or Hyper: a shortcut, never a decision. */
+function hasModifier(key: PanelKey): boolean {
+  return Boolean(key.ctrl || key.meta || key.option || key.super || key.hyper);
+}
+
 function digitOf(key: PanelKey): number | null {
-  if (key.ctrl || key.meta) return null;
-  const digit = /^[1-9]$/.test(key.name) ? Number(key.name) : null;
-  return digit;
+  return /^[1-9]$/.test(key.name) ? Number(key.name) : null;
 }
 
 function stepRequestKey(key: PanelKey): 1 | -1 | null {
-  if (key.ctrl || key.meta) return null;
   if (key.name === "]" || key.sequence === "]") return 1;
   if (key.name === "[" || key.sequence === "[") return -1;
   return null;
 }
 
+/**
+ * Resolves a key with the guard: where the panel stands goes into `context`, the key
+ * restarts the guard's wait, and an engage action engages it.
+ */
+export function pressPanelKey(
+  guard: EngagementGuard,
+  requestId: RuntimeRequestId,
+  key: PanelKey,
+  context: (engagement: Engagement) => PanelKeyContext,
+): PanelAction | null {
+  const action = resolvePanelKey(key, context(guard.press(requestId)));
+  if (action?.type === "engage") guard.engage(requestId);
+  return action;
+}
+
 /** What a key does in the request panel; null leaves it to the text box or the shell. */
 export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelAction | null {
+  const canStop = context.running && !context.stopRequested;
+  // Esc and Ctrl+C stop the run first, as in the composer; Ctrl+C quits once nothing runs.
+  if (key.ctrl && key.name === "c") return canStop ? { type: "stop" } : { type: "exit" };
+  if (key.name === "escape" && !hasModifier(key)) {
+    if (canStop) return { type: "stop" };
+    if (context.running) return NONE;
+    if (context.kind === "approval") return null;
+    if (!context.input.dismissible) {
+      return { type: "hint", message: "This question needs an answer" };
+    }
+  } else if (hasModifier(key)) {
+    return null;
+  }
+
+  if (key.name === "tab") return null;
   const step = stepRequestKey(key);
+  // An answer is out, or the request can't be answered: only moving to another one works.
+  if (context.busy) {
+    return step !== null && context.engagement === "engaged"
+      ? { type: "step-request", delta: step }
+      : NONE;
+  }
+
+  // Disengaged, every key is used up; only Enter after a pause engages the panel.
+  if (context.engagement !== "engaged") {
+    if (isEnterKey(key.name) && !key.shift && context.engagement === "ready") {
+      return { type: "engage" };
+    }
+    return {
+      type: "hint",
+      message: isEnterKey(key.name) ? STILL_TYPING_HINT : ENGAGE_HINT,
+    };
+  }
+
   if (context.kind === "approval") {
     if (step !== null) return { type: "step-request", delta: step };
-    if (key.ctrl || key.meta) return null;
     const digit = digitOf(key);
     const letter = key.name.length === 1 ? key.name.toLowerCase() : null;
     const choice =
@@ -226,7 +325,6 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
       }
       return null;
     }
-    if (context.busy || !context.armed) return NONE;
     return { type: "decide", decision: choice.decision };
   }
 
@@ -234,8 +332,6 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
   const question = activeQuestion(input, form);
   if (question === null) return null;
   const typing = onTextRow(form, question);
-  // The text box is unfocused while an answer is out; only moving to another request works.
-  if (context.busy) return step === null ? null : { type: "step-request", delta: step };
 
   const advance = (next: QuestionForm): PanelAction => {
     const answer = resolveAnswer(question, draftOf(next, question));
@@ -262,15 +358,11 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
     return { type: "submit", answers };
   };
 
-  if (key.name === "escape") {
-    if (!context.armed) return NONE;
-    return input.dismissible
-      ? { type: "dismiss" }
-      : { type: "hint", message: "This question needs an answer; stop the run to skip it" };
-  }
+  // Reached only when nothing runs and the provider allows it.
+  if (key.name === "escape") return { type: "dismiss" };
 
   if (typing) {
-    if (isEnterKey(key.name) && !key.shift) return context.armed ? advance(form) : NONE;
+    if (isEnterKey(key.name) && !key.shift) return advance(form);
     if (key.name === "up" && question.options.length > 0) {
       return { type: "form", form: { ...form, cursor: question.options.length - 1 } };
     }
@@ -311,17 +403,14 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
   };
   const digit = digitOf(key);
   if (digit !== null) {
-    if (!context.armed) return NONE;
     const next = pick(digit - 1);
     return next === null ? NONE : { type: "form", form: next };
   }
   if (key.name === "space") {
-    if (!context.armed) return NONE;
     const next = pick(form.cursor);
     return next === null ? NONE : { type: "form", form: next };
   }
   if (isEnterKey(key.name)) {
-    if (!context.armed) return NONE;
     const option = question.options[form.cursor];
     const draft = draftOf(form, question);
     // Enter takes the option under the cursor, unless a multi-select already has picks.

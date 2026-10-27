@@ -29,25 +29,22 @@ export function initialDraft(question: ThreadUserInputQuestion): QuestionDraft {
 }
 
 /**
- * The answer a draft gives, or null while it gives none. Typed text wins over a single
- * choice; a multi-select sends its choices when it has any. Mirrors web's rules.
+ * The answer a draft gives, or null while it gives none. Typed text wins over picked
+ * options, then a multi-select sends its picks as a list. Mirrors web's rules.
  */
 export function resolveAnswer(
   question: ThreadUserInputQuestion,
   draft: QuestionDraft,
 ): QuestionAnswer | null {
   const custom = allowsCustomAnswer(question) ? draft.custom.trim() : "";
+  if (custom.length > 0) return custom;
   const known = new Set(question.options.map(optionValue));
   const selected = draft.selected.filter((value) => known.has(value));
-  if (question.multiSelect) {
-    if (selected.length > 0) return selected;
-    return custom.length > 0 ? custom : null;
-  }
-  if (custom.length > 0) return custom;
+  if (question.multiSelect) return selected.length > 0 ? selected : null;
   return selected[0] ?? null;
 }
 
-/** Picks an option: a single choice replaces the last one and clears typed text. */
+/** Picks or unpicks an option. Either way typed text is cleared, as web does. */
 export function toggleOption(
   question: ThreadUserInputQuestion,
   draft: QuestionDraft,
@@ -57,7 +54,17 @@ export function toggleOption(
   const selected = draft.selected.includes(value)
     ? draft.selected.filter((entry) => entry !== value)
     : [...draft.selected, value];
-  return { selected, custom: draft.custom };
+  return { selected, custom: "" };
+}
+
+/** Typed text replaces the picked options once it isn't blank, as web does. */
+export function typeAnswer(
+  question: ThreadUserInputQuestion,
+  draft: QuestionDraft,
+  text: string,
+): QuestionDraft {
+  const replaces = question.initialAnswer !== undefined || text.trim().length > 0;
+  return { selected: replaces ? [] : draft.selected, custom: text };
 }
 
 /** The form's answers keyed by question id, or null while any question has none. */

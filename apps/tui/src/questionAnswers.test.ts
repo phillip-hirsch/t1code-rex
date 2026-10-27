@@ -8,6 +8,7 @@ import {
   initialDraft,
   resolveAnswer,
   toggleOption,
+  typeAnswer,
 } from "./questionAnswers.ts";
 
 function q(id: string, fields: Partial<ThreadUserInputQuestion> = {}): ThreadUserInputQuestion {
@@ -53,6 +54,27 @@ describe("question answers", () => {
     );
     expect(resolveAnswer(question, both)).toEqual(["pg", "SQLite"]);
     expect(resolveAnswer(question, toggleOption(question, both, "pg"))).toEqual(["SQLite"]);
+  });
+
+  it("lets typed text win over multi-select picks", () => {
+    const question = q("dbs", { multiSelect: true });
+    expect(resolveAnswer(question, { selected: ["pg"], custom: " MySQL " })).toBe("MySQL");
+  });
+
+  it("clears multi-select picks when text is typed, and typed text when an option is picked", () => {
+    const question = q("dbs", { multiSelect: true });
+    const typed = typeAnswer(question, toggleOption(question, EMPTY_QUESTION_DRAFT, "pg"), "MySQL");
+    expect(typed).toEqual({ selected: [], custom: "MySQL" });
+    expect(resolveAnswer(question, typed)).toBe("MySQL");
+    const picked = toggleOption(question, typed, "SQLite");
+    expect(picked).toEqual({ selected: ["SQLite"], custom: "" });
+    expect(resolveAnswer(question, picked)).toEqual(["SQLite"]);
+  });
+
+  it("keeps picks while the typed text is blank", () => {
+    const question = q("dbs", { multiSelect: true });
+    const picked = toggleOption(question, EMPTY_QUESTION_DRAFT, "pg");
+    expect(typeAnswer(question, picked, "  ")).toEqual({ selected: ["pg"], custom: "  " });
   });
 
   it("drops picks the question no longer offers", () => {

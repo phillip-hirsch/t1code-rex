@@ -1084,7 +1084,11 @@ function Shell(props: AppProps) {
                       ? threadWorkspacePath(activeThread, activeProject ?? undefined)
                       : null
                   }
+                  running={running}
+                  stopRequested={stopRequested}
                   onFocus={() => setFocusArea("composer")}
+                  onStop={stopRun}
+                  onExit={requestExit}
                   onStatus={setStatus}
                   onHints={setPanelHints}
                 />
