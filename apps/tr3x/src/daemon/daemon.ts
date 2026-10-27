@@ -143,7 +143,8 @@ async function runOwner(
   } finally {
     stopHealth();
     if (fatal !== undefined) log(fatal);
-    log(`stopping server (pid ${server.process.pid})`);
+    const pid = server.process.pid;
+    log(`stopping server${pid === undefined ? "" : ` (pid ${pid})`}`);
     await server.stop();
     removeDaemonState(paths.daemonStatePath, process.pid);
     log("server stopped");
