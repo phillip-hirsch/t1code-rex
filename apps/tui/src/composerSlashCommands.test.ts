@@ -74,3 +74,19 @@ describe("/clone", () => {
     expect(resolveComposerSlashAction("/clone")).toMatchObject({ type: "error" });
   });
 });
+
+describe("/git, /branch and /worktree", () => {
+  it("open the git menu and branch picker, and flip a draft's env mode", () => {
+    expect(resolveComposerSlashAction("/git")).toEqual({ type: "git-menu" });
+    expect(resolveComposerSlashAction("/branch")).toEqual({ type: "branch-picker", query: "" });
+    expect(resolveComposerSlashAction("/branch feat/x")).toEqual({
+      type: "branch-picker",
+      query: "feat/x",
+    });
+    expect(resolveComposerSlashAction("/worktree")).toEqual({ type: "toggle-worktree" });
+    expect(resolveComposerSlashAction("/worktree retry")).toEqual({ type: "retry-worktree" });
+    // Gone: the server can't resolve a failed worktree setup to the project checkout.
+    expect(resolveComposerSlashAction("/worktree local")).toMatchObject({ type: "error" });
+    expect(resolveComposerSlashAction("/worktree x")).toMatchObject({ type: "error" });
+  });
+});

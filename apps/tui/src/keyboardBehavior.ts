@@ -94,6 +94,10 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
         action: "Scroll the timeline",
       },
       {
+        shortcut: "g / G",
+        action: "Jump to the top or bottom of the timeline or diff",
+      },
+      {
         shortcut: "Ctrl+U / Ctrl+D",
         action: "Scroll the timeline or diff by half a page",
       },
@@ -106,6 +110,25 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
         shortcut: "v",
         action: "Toggle unified and split diff view",
         note: "Only while the diff view is focused.",
+      },
+    ],
+  },
+  {
+    title: "Git",
+    items: [
+      {
+        shortcut: "c",
+        action: "Open the git menu: commit, push, PR, pull",
+        note: "While the thread is focused; also /git.",
+      },
+      {
+        shortcut: "b",
+        action: "Switch or create a branch",
+        note: "While the thread is focused; also /branch.",
+      },
+      {
+        shortcut: "/worktree retry",
+        action: "Retry a failed worktree setup",
       },
     ],
   },

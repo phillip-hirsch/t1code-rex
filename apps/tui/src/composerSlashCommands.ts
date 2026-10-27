@@ -77,6 +77,24 @@ export const COMPOSER_SLASH_COMMANDS: ReadonlyArray<ComposerSlashCommand> = [
     template: "/diff",
   },
   {
+    command: "git",
+    usage: "/git",
+    description: "Commit, push, open a PR or pull",
+    template: "/git",
+  },
+  {
+    command: "branch",
+    usage: "/branch [name]",
+    description: "Switch or create a branch",
+    template: "/branch ",
+  },
+  {
+    command: "worktree",
+    usage: "/worktree [retry]",
+    description: "Start in a new worktree or locally; retry a failed setup",
+    template: "/worktree",
+  },
+  {
     command: "recover",
     usage: "/recover",
     description: "Put messages whose thread and project are gone here",
@@ -122,6 +140,10 @@ export type ComposerSlashAction =
   | { readonly type: "recover" }
   | { readonly type: "toggle-diff" }
   | { readonly type: "clone"; readonly args: string }
+  | { readonly type: "git-menu" }
+  | { readonly type: "branch-picker"; readonly query: string }
+  | { readonly type: "toggle-worktree" }
+  | { readonly type: "retry-worktree" }
   | { readonly type: "error"; readonly message: string };
 
 /** What a slash command does; null when the text isn't one of ours and should be sent. */
@@ -156,6 +178,19 @@ export function resolveComposerSlashAction(text: string): ComposerSlashAction | 
       return parsed.args.length === 0
         ? { type: "error", message: "Type owner/repo or a URL after /clone" }
         : { type: "clone", args: parsed.args };
+    case "git":
+      return { type: "git-menu" };
+    case "branch":
+      return { type: "branch-picker", query: parsed.args };
+    case "worktree":
+      switch (parsed.args.toLowerCase()) {
+        case "":
+          return { type: "toggle-worktree" };
+        case "retry":
+          return { type: "retry-worktree" };
+        default:
+          return { type: "error", message: "Type /worktree or /worktree retry" };
+      }
     case "steer":
     case "queue":
       return parsed.args.length === 0

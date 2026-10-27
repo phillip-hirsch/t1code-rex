@@ -114,6 +114,35 @@ describe("new-thread drafts", () => {
     expect(writes.at(-1)).toEqual({ draftThreadsByProjectId: undefined });
     expect(store.openNewThreadDraft(ProjectId.make("p"), mint).threadId).toBe("new-2");
   });
+
+  it("saves a draft's env mode and worktree base, and reads them back", () => {
+    const { store, writes } = setup();
+    store.openNewThreadDraft(ProjectId.make("p"), () => ThreadId.make("new-1"));
+    store.setNewThreadDraftWorkspace("new-1", { envMode: "worktree", baseBranch: "main" });
+    store.flush();
+    const saved = {
+      draftThreadsByProjectId: {
+        p: { id: "new-1", projectId: "p", envMode: "worktree", baseBranch: "main" },
+      },
+    } as const;
+    expect(writes.at(-1)).toEqual(saved);
+    const restored = setup(saved).store;
+    expect(restored.findNewThreadDraft("new-1")).toEqual({
+      threadId: "new-1",
+      projectId: "p",
+      envMode: "worktree",
+      baseBranch: "main",
+    });
+  });
+
+  it("ignores a saved env mode it doesn't know", () => {
+    const { store } = setup({
+      draftThreadsByProjectId: {
+        p: { id: "new-1", projectId: "p", envMode: "cloud" as "local", baseBranch: "" },
+      },
+    });
+    expect(store.findNewThreadDraft("new-1")).toEqual({ threadId: "new-1", projectId: "p" });
+  });
 });
 
 describe("settings picks", () => {

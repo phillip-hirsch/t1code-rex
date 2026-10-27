@@ -16,6 +16,12 @@ import {
   createShellEnvironmentAtoms,
 } from "@t3tools/client-runtime/state/shell";
 import { createServerEnvironmentAtoms } from "@t3tools/client-runtime/state/server";
+import {
+  createVcsActionManager,
+  createVcsEnvironmentAtoms,
+  type RunVcsStackedActionInput,
+  type VcsActionState,
+} from "@t3tools/client-runtime/state/vcs";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import { createTerminalEnvironmentAtoms } from "@t3tools/client-runtime/state/terminal";
 import {
@@ -46,10 +52,13 @@ import {
   type PinThreadInput,
   type RespondToThreadApprovalInput,
   type RespondToThreadUserInputInput,
+  type RetryWorkspacePreparationInput,
   type SetThreadInteractionModeInput,
   type SetThreadRuntimeModeInput,
   type SettleThreadInput,
   type StartThreadTurnInput,
+  type StopThreadSessionInput,
+  ThreadSnapshotLoader,
   type ThreadSnapshotLoadResult,
   type UnarchiveThreadInput,
   type UnpinThreadInput,
@@ -65,8 +74,16 @@ import type {
   OrchestrationV2ShellSnapshot,
   ProjectCloneStartInput,
   ProjectSearchEntriesInput,
+  ServerSettingsPatch,
   SourceControlCloneRepositoryInput,
   ThreadId,
+  VcsCreateRefInput,
+  VcsInitInput,
+  VcsListRefsResult,
+  VcsPullInput,
+  VcsStatusResult,
+  VcsSwitchRefInput,
+  WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -76,12 +93,19 @@ import * as Option from "effect/Option";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
-import type { ComposerCommandResult } from "../composerSender.ts";
+import type { ComposerCommandResult, WorkspaceGuard } from "../composerSender.ts";
 import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurns } from "../diffTurns.ts";
 import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
+import { branchRefsInput, mergeRefPages, type BranchRefPages } from "../branchPicker.ts";
+import {
+  deriveWorktreeLaunch,
+  sameWorktreeLaunch,
+  type WorktreeLaunch,
+} from "../worktreeLaunch.ts";
 import type { TuiServerSession } from "../serverLauncher.ts";
 import * as Platform from "./platform.ts";
 import * as Runtime from "./runtime.ts";
+import { createWorkspaceGuard, type WorkspaceGuardOptions } from "./workspaceGuard.ts";
 
 export interface TuiConnectionOptions {
   readonly session: TuiServerSession;
@@ -94,6 +118,14 @@ const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
 /** Turn and full-thread diffs share one result shape. */
 export type CheckpointDiffAtom = Atom.Atom<
   AsyncResult.AsyncResult<OrchestrationGetTurnDiffResult, unknown>
+>;
+
+/** A checkout's live status; null when the server has none for it yet. */
+export type VcsStatusAtom = Atom.Atom<AsyncResult.AsyncResult<VcsStatusResult | null, unknown>>;
+/** The branch picker's refs for a query: its first pages, merged. */
+export type VcsRefsAtom = Atom.Atom<BranchRefPages>;
+export type WorktreeSetupAtom = Atom.Atom<
+  AsyncResult.AsyncResult<WorktreeSetupSnapshot | null, unknown>
 >;
 
 /** A management action's outcome: its value, or the failure to show. */
@@ -179,6 +211,18 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       return value;
     }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:diff-turns:${threadId}`));
   });
+  // The thread's worktree launch; a new value only when its run, status or base changes.
+  const worktreeLaunchAtom = Atom.family((threadId: ThreadId) => {
+    let value: WorktreeLaunch | null = null;
+    return Atom.make((get) => {
+      const projection = Option.getOrNull(
+        get(threadDetails.stateAtom({ environmentId, threadId })).data,
+      );
+      const next = projection === null ? null : deriveWorktreeLaunch(projection);
+      if (!sameWorktreeLaunch(value, next)) value = next;
+      return value;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:worktree-launch:${threadId}`));
+  });
   // One page request per thread at a time; repeats while it runs share its result.
   const loadEarlierHistory = createRuntimeCommand(runtime, {
     label: "tr3x:thread:load-earlier",
@@ -209,6 +253,20 @@ export function createTuiConnection(options: TuiConnectionOptions) {
             Effect.succeed<ThreadSnapshotLoadResult>({ _tag: "missing" }),
         }),
       );
+    }),
+  });
+  // The thread as the server has it now, as client-runtime loads a cold thread: the bounded
+  // snapshot (every run, a recent window of items), or the full one from older servers.
+  const threadSnapshot = createEnvironmentCommand(runtime, {
+    label: "tr3x:thread:snapshot",
+    execute: Effect.fn("tr3x.threadSnapshot")(function* (threadId: ThreadId) {
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared)) {
+        return { _tag: "unavailable" } satisfies ThreadSnapshotLoadResult;
+      }
+      const loader = yield* ThreadSnapshotLoader;
+      return yield* loader.load(prepared.value, threadId);
     }),
   });
   // Upstream's thread commands, serialized per thread like web and mobile.
@@ -250,6 +308,42 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     label: "tr3x:orchestration:archived-shell-snapshot",
     tag: ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
   });
+  // Branch status, refs and worktree setup, plus git actions with their streamed progress.
+  const vcs = createVcsEnvironmentAtoms(runtime);
+  const vcsActions = createVcsActionManager(runtime);
+  const vcsTarget = (cwd: string) => ({ environmentId, cwd });
+  // Each page is its own `listRefs` query; a page is asked for once the one before it says
+  // there's more.
+  const refPagesAtom = Atom.family((key: string) => {
+    const [cwd, query, pages] = JSON.parse(key) as [string, string, number];
+    return Atom.make((get): BranchRefPages => {
+      const results: Array<AsyncResult.AsyncResult<VcsListRefsResult, unknown>> = [];
+      let cursor: number | undefined;
+      for (let page = 0; page < pages; page += 1) {
+        const result = get(
+          vcs.listRefs({ environmentId, input: branchRefsInput(cwd, query, cursor) }),
+        );
+        results.push(result);
+        const value = Option.getOrNull(AsyncResult.value(result));
+        if (value === null || value.nextCursor === null) break;
+        cursor = value.nextCursor;
+      }
+      return mergeRefPages(results);
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:vcs-ref-pages:${key}`));
+  });
+  /** Runs a VCS command while the checkout's action state shows it as busy. */
+  const trackVcs = <Input, A, E>(
+    cwd: string,
+    operation: "pull" | "switch_ref" | "create_ref" | "init",
+    label: string,
+    command: AtomCommand<{ environmentId: EnvironmentId; input: Input }, A, E>,
+    input: Input,
+  ) =>
+    vcsActions
+      .track(registry, vcsTarget(cwd), { operation, label }, () =>
+        runAtomCommand(registry, command, { environmentId, input }, { reportFailure: false }),
+      )
+      .then(toActionResult);
   const serverConfigsAtom = createEnvironmentServerConfigsAtom({
     catalogValueAtom: catalog.catalogValueAtom,
     serverConfigValueAtom: server.configValueAtom,
@@ -364,6 +458,65 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     refreshArchivedThreads: () => registry.refresh(archivedShellSnapshotAtom),
     /** The archived threads as the server has them now, never from cache. */
     fetchArchivedShellSnapshot: () => runAction(archivedShellSnapshot, {}),
+    /** Live status of a checkout, from `subscribeVcsStatus` while something reads it. */
+    vcsStatusAtom: (cwd: string): VcsStatusAtom => vcs.status({ environmentId, input: { cwd } }),
+    /** The refs matching a query, as the server filters them: its first `pages` pages. */
+    vcsRefsAtom: (cwd: string, query: string, pages: number): VcsRefsAtom =>
+      refPagesAtom(JSON.stringify([cwd, query, pages])),
+    /** What a checkout's git action is doing now: its phase, hook and last output line. */
+    vcsActionStateAtom: (cwd: string): Atom.Atom<VcsActionState> =>
+      vcsActions.stateAtom(vcsTarget(cwd)),
+    worktreeSetupAtom: (threadId: ThreadId): WorktreeSetupAtom =>
+      vcs.worktreeSetup({ environmentId, input: { threadId } }),
+    cancelWorktreeSetup: (threadId: ThreadId) => runAction(vcs.cancelWorktreeSetup, { threadId }),
+    /** Whether the thread is launching into a worktree, or that launch failed; from its runs. */
+    worktreeLaunchAtom: (threadId: ThreadId): Atom.Atom<WorktreeLaunch | null> =>
+      worktreeLaunchAtom(threadId),
+    /**
+     * Keeps the thread's runs loaded until disposed, selected or not, and says why nothing
+     * may start on it now: its worktree isn't there. Undefined until the server's state is
+     * known; see `createWorkspaceGuard`.
+     */
+    guardWorkspace: (
+      threadId: ThreadId,
+      schedule: WorkspaceGuardOptions["schedule"],
+    ): WorkspaceGuard =>
+      createWorkspaceGuard({
+        registry,
+        stateAtom: threadDetails.stateAtom({ environmentId, threadId }),
+        loadSnapshot: () =>
+          runAtomCommand(
+            registry,
+            threadSnapshot,
+            { environmentId, input: threadId },
+            { reportFailure: false },
+          ).then((result) =>
+            AsyncResult.isSuccess(result) ? result.value : { _tag: "unavailable" as const },
+          ),
+        schedule,
+      }),
+    /** Runs a failed worktree preparation again, for the message that started it. */
+    retryWorkspacePreparation: (input: RetryWorkspacePreparationInput) =>
+      runAction(threadCommands.retryWorkspacePreparation, input),
+    /** Re-reads a checkout's status; `localOnly` skips the remote fetch. */
+    refreshVcsStatus: (cwd: string, localOnly = false) =>
+      runAction(vcs.refreshStatus, { cwd, ...(localOnly ? { localOnly } : {}) }),
+    switchRef: (input: VcsSwitchRefInput) =>
+      trackVcs(input.cwd, "switch_ref", "Switching branch", vcs.switchRef, input),
+    createRef: (input: VcsCreateRefInput) =>
+      trackVcs(input.cwd, "create_ref", "Creating branch", vcs.createRef, input),
+    initRepository: (input: VcsInitInput) =>
+      trackVcs(input.cwd, "init", "Initializing repository", vcs.init, input),
+    pull: (input: VcsPullInput) => trackVcs(input.cwd, "pull", "Pulling", vcs.pull, input),
+    /** Commit, push or open a PR; progress lands in `vcsActionStateAtom(cwd)` as it streams. */
+    runStackedAction: (cwd: string, input: RunVcsStackedActionInput) =>
+      runAtomCommand(registry, vcsActions.runStackedAction(vcsTarget(cwd)), input, {
+        reportFailure: false,
+      }).then(toActionResult),
+    stopThreadSession: (input: StopThreadSessionInput) =>
+      runAction(threadCommands.stopSession, input),
+    updateServerSettings: (patch: ServerSettingsPatch) =>
+      runAction(server.updateSettings, { patch }),
     retryNow: catalog.retryNow,
     /** Upstream's terminal atoms: attach, write, resize and close server-side shells. */
     terminals,

@@ -43,6 +43,12 @@ export interface ComposerSenderOptions {
   ) => Promise<ComposerCommandResult>;
   /** Releases the queue the server holds after Stop (upstream's `queue.resume`). */
   readonly resumeQueue: (input: ResumeThreadQueueInput) => Promise<ComposerCommandResult>;
+  /**
+   * Watches a thread while it has jobs here, selected or not: why nothing may start on it
+   * now (its worktree isn't there). Asked before each command, sends and resumes alike;
+   * never before the thread exists.
+   */
+  readonly guardWorkspace?: (threadId: ThreadId) => WorkspaceGuard;
   /** Declines the approvals a message redirects past, before its other commands. */
   readonly declineApprovals?: (input: DeclineApprovalsInput) => Promise<ComposerCommandResult>;
   /** The thread's settings as the shell lists them now; null for threads it doesn't list. */
@@ -57,6 +63,18 @@ export interface ComposerSenderOptions {
   ) => void;
 }
 
+/** Keeps a thread's runs loaded while the sender has jobs for it. */
+export interface WorkspaceGuard {
+  /**
+   * Why nothing may start on the thread now; undefined while the server's state isn't known.
+   * A promise only while the answer is on its way; once known, it's answered at once.
+   */
+  readonly blockedReason: () => WorkspaceBlock | Promise<WorkspaceBlock>;
+  readonly dispose: () => void;
+}
+
+export type WorkspaceBlock = string | null | undefined;
+
 /** A message, or the `queue.resume` that releases the server's held queue after Stop. */
 interface JobState {
   readonly kind: "send" | "resume";
@@ -66,6 +84,8 @@ interface JobState {
   status: ComposerSendStatus;
   /** Set while a command is in flight; stops waiting on it (to resend, or to drop it). */
   abandon: (() => void) | null;
+  /** Its command that can't be called back went out: the message, or the resume. */
+  dispatched: boolean;
 }
 
 /** A message and the commands it was planned to issue, frozen when it was sent. */
@@ -75,8 +95,6 @@ interface SendJob extends JobState {
   readonly stages: ReadonlyArray<ComposerStage>;
   /** Stages before this one were accepted; a retry resumes here. */
   next: number;
-  /** The message itself went out unconfirmed: it may have landed. */
-  dispatched: boolean;
 }
 
 type ResumeJob = JobState & { readonly kind: "resume" };
@@ -101,11 +119,25 @@ interface ThreadQueue {
   cancelRetry: (() => void) | null;
   /** Stop held the queue: nothing more goes out until it's resumed. */
   held: boolean;
+  /** Made at the first command it checks: a draft's thread doesn't exist before its launch. */
+  guard: WorkspaceGuard | null;
 }
 
 const OK: ComposerCommandResult = { ok: true };
+/** How long a guard's answer may take before the job waits and asks again, as offline. */
+const GUARD_WAIT_MS = 5_000;
 const ABANDONED = Symbol("abandoned");
 const HELD = Symbol("held");
+/** The thread's runs aren't loaded yet, so whether its worktree is there is unknown. */
+const UNKNOWN = Symbol("unknown");
+
+/** A message that can't go out now; it goes back to its composer with the reason. */
+interface Blocked {
+  readonly blocked: string;
+}
+
+/** The guard's answer: go (null), wait, or go back. Waited answers can also pause or drop it. */
+type Gated = Blocked | typeof UNKNOWN | typeof HELD | typeof ABANDONED | null;
 const STALL_MS = 30_000;
 
 export const DISCARD_NOTICE = "Not sent; edit it and send again";
@@ -182,6 +214,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
       current: null,
       cancelRetry: null,
       held: false,
+      guard: null,
     };
     queues.set(threadId, queue);
     return queue;
@@ -256,6 +289,37 @@ export function createComposerSender(options: ComposerSenderOptions) {
       : options.setInteractionMode({ ...command, interactionMode: stage.value });
   };
 
+  /**
+   * Whether the job's next command may go out. A draft's own launch makes the thread, so
+   * there's nothing to check yet; everything after it is checked. Watching starts here, not
+   * when the job is queued: a thread watched before it exists reads as deleted.
+   */
+  const gate = (queue: ThreadQueue, job: Job): Gated | Promise<Gated> => {
+    const { guardWorkspace } = options;
+    if (guardWorkspace === undefined || (job.kind === "send" && job.send.target.kind === "draft")) {
+      return null;
+    }
+    queue.guard ??= guardWorkspace(job.threadId);
+    const reason = queue.guard.blockedReason();
+    if (!(reason instanceof Promise)) return gated(reason);
+    let cancelWait = () => {};
+    const timedOut = new Promise<undefined>((resolve) => {
+      cancelWait = options.schedule(() => resolve(undefined), GUARD_WAIT_MS);
+    });
+    return Promise.race([reason, timedOut]).then((answer) => {
+      cancelWait();
+      // The answer took a moment: anything that changed meanwhile wins, Stop included.
+      if (disposed || !queue.jobs.includes(job)) return ABANDONED;
+      if (queue.held || (job.kind === "send" && queue.jobs[0] !== job)) return HELD;
+      return gated(answer);
+    });
+  };
+
+  const gated = (reason: WorkspaceBlock): Gated => {
+    if (reason === undefined) return UNKNOWN;
+    return reason === null ? null : { blocked: reason };
+  };
+
   /** One command's reply; marks the job stuck if none comes in time. */
   const attempt = (job: Job, issue: () => Promise<ComposerCommandResult>) =>
     new Promise<ComposerCommandResult | typeof ABANDONED>((resolve) => {
@@ -285,9 +349,14 @@ export function createComposerSender(options: ComposerSenderOptions) {
   const runJob = async (
     queue: ThreadQueue,
     job: Job,
-  ): Promise<ComposerCommandResult | typeof ABANDONED | typeof HELD> => {
+  ): Promise<ComposerCommandResult | typeof ABANDONED | typeof HELD | typeof UNKNOWN | Blocked> => {
     if (job.kind === "resume") {
+      // A resume releases the server's held runs; they'd start in the project checkout.
+      const checked = gate(queue, job);
+      const gated = checked instanceof Promise ? await checked : checked;
+      if (gated !== null) return gated;
       mark(job, "sending");
+      job.dispatched = true;
       return attempt(job, () =>
         options.resumeQueue({ commandId: job.commandId, threadId: job.threadId }),
       );
@@ -297,6 +366,9 @@ export function createComposerSender(options: ComposerSenderOptions) {
       if (stage === undefined) break;
       // Stop, or a resume that went ahead of it: it waits at this stage, before its message.
       if (queue.held || queue.jobs[0] !== job) return HELD;
+      const checked = gate(queue, job);
+      const gated = checked instanceof Promise ? await checked : checked;
+      if (gated !== null) return gated;
       mark(job, "sending");
       if (stage.kind === "start-turn") job.dispatched = true;
       const result = await attempt(job, () => runStage(job.send, stage));
@@ -332,11 +404,46 @@ export function createComposerSender(options: ComposerSenderOptions) {
     }
   };
 
+  const removeQueue = (threadId: string, queue: ThreadQueue) => {
+    queue.cancelRetry?.();
+    queue.guard?.dispose();
+    queues.delete(threadId);
+  };
+
   const dropIfIdle = (threadId: string, queue: ThreadQueue) => {
     if (queue.jobs.length === 0 && queue.draining === null && queues.get(threadId) === queue) {
-      queue.cancelRetry?.();
-      queues.delete(threadId);
+      removeQueue(threadId, queue);
     }
+  };
+
+  /**
+   * A message can't go out: what waited behind it was planned on top of it, so all of it
+   * goes back, in order. A resume ahead of it still goes out.
+   */
+  const restoreMessages = (queue: ThreadQueue, reason: string) => {
+    for (const entry of sendJobs(queue).reverse()) store.restoreSend(entry.send, reason);
+    const resumes = queue.jobs.filter((entry) => entry.kind === "resume");
+    queue.jobs.splice(0, queue.jobs.length, ...resumes);
+  };
+
+  /**
+   * Nothing may start on the thread: its messages go back to the composer, and resumes are
+   * dropped, so the runs the server holds stay held.
+   */
+  const blockThread = (threadId: ThreadId, queue: ThreadQueue, reason: string) => {
+    restoreMessages(queue, reason);
+    queue.jobs.splice(0, queue.jobs.length);
+    store.setNotice(threadId, reason);
+  };
+
+  /** Asks again later, as after a dropped connection. */
+  const retryLater = (threadId: string, queue: ThreadQueue, job: Job) => {
+    job.attempt += 1;
+    for (const entry of queue.jobs) mark(entry, "waiting");
+    queue.cancelRetry = options.schedule(
+      () => void drain(threadId, queue),
+      retryDelayMs(job.attempt - 1),
+    );
   };
 
   /** Runs the queue's jobs in order until it empties, is held, one is rejected, or the connection drops. */
@@ -354,6 +461,14 @@ export function createComposerSender(options: ComposerSenderOptions) {
           if (disposed) break;
           // Paused (held, or a resume went ahead), resent, or dropped: the next pass decides.
           if (result === HELD || result === ABANDONED) continue;
+          if (result === UNKNOWN) {
+            retryLater(threadId, queue, job);
+            break;
+          }
+          if ("blocked" in result) {
+            blockThread(job.threadId, queue, result.blocked);
+            continue;
+          }
           if (result.ok) {
             queue.jobs.splice(queue.jobs.indexOf(job), 1);
             finish(job);
@@ -370,19 +485,10 @@ export function createComposerSender(options: ComposerSenderOptions) {
               store.setNotice(job.threadId, `Resume failed: ${reason} (/resume, /discard)`);
               break;
             }
-            // What waited behind it was planned on top of it: all of it goes back, in order.
-            // A resume ahead of it still goes out.
-            for (const entry of sendJobs(queue).reverse()) store.restoreSend(entry.send, reason);
-            const resumes = queue.jobs.filter((entry) => entry.kind === "resume");
-            queue.jobs.splice(0, queue.jobs.length, ...resumes);
+            restoreMessages(queue, reason);
             continue;
           }
-          job.attempt += 1;
-          for (const entry of queue.jobs) mark(entry, "waiting");
-          queue.cancelRetry = options.schedule(
-            () => void drain(threadId, queue),
-            retryDelayMs(job.attempt - 1),
-          );
+          retryLater(threadId, queue, job);
           break;
         }
       } finally {
@@ -400,9 +506,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
   /** The job whose command is going out now, if any. */
   const inFlight = (queue: ThreadQueue): Job | undefined => queue.current ?? undefined;
 
-  /** A command in flight that must finish where it is: a resume, or a message that went out. */
-  const committed = (job: Job | undefined): job is Job =>
-    job !== undefined && (job.kind === "resume" || job.dispatched);
+  /** A command in flight that must finish where it is: a resume or message that went out. */
+  const committed = (job: Job | undefined): job is Job => job?.dispatched === true;
 
   const resumeJob = (threadId: ThreadId): ResumeJob => ({
     kind: "resume",
@@ -411,6 +516,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
     attempt: 0,
     status: "sending",
     abandon: null,
+    dispatched: false,
   });
 
   /**
@@ -431,6 +537,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
     disposed = true;
     for (const queue of queues.values()) {
       queue.cancelRetry?.();
+      queue.guard?.dispose();
       queue.current?.abandon?.();
     }
     queues.clear();
@@ -568,9 +675,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
         store.setNotice(threadId, null);
         queue.jobs.splice(0, queue.jobs.length);
         queue.held = false;
-        stopRetry(queue);
         queue.current?.abandon?.();
-        queues.delete(threadId);
+        removeQueue(threadId, queue);
       }
       for (const threadId of forgotten) {
         accepted.delete(threadId);

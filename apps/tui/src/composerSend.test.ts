@@ -100,6 +100,26 @@ describe("buildStartTurnInput", () => {
   });
 });
 
+describe("buildStartTurnInput in a new worktree", () => {
+  it("asks the launch to make the draft's worktree from its base", () => {
+    const draft = send({
+      target: { kind: "draft", threadId: ThreadId.make("new-1"), projectId: ProjectId.make("p") },
+      worktree: { projectCwd: "/repo", baseBranch: "main", startFromOrigin: false },
+    });
+    expect(buildStartTurnInput(draft).bootstrap).toMatchObject({
+      createThread: { projectId: "p", branch: null, worktreePath: null },
+      prepareWorktree: { projectCwd: "/repo", baseBranch: "main", startFromOrigin: false },
+    });
+  });
+
+  it("leaves a follow-up's checkout alone", () => {
+    const followUp = send({
+      worktree: { projectCwd: "/repo", baseBranch: "main", startFromOrigin: false },
+    });
+    expect(buildStartTurnInput(followUp).bootstrap).toBeUndefined();
+  });
+});
+
 describe("settingsCommandsForSend", () => {
   it("changes only the modes that differ, with ids derived from the send", () => {
     expect(settingsCommandsForSend(send(), codex)).toEqual([]);

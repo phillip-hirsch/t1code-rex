@@ -22,6 +22,7 @@ import {
   MAYBE_SENT_NOTICE,
   QUIT_NOTICE,
   type ComposerCommandResult,
+  type WorkspaceBlock,
 } from "./composerSender.ts";
 import type { ComposerSettings } from "./composerSettings.ts";
 import { createComposerStore, type ComposerStore } from "./composerStore.ts";
@@ -70,7 +71,11 @@ function deferred() {
  */
 function setup(
   script: ReadonlyArray<ComposerCommandResult | Promise<ComposerCommandResult>>,
-  options: { readonly store?: ComposerStore } = {},
+  options: {
+    readonly store?: ComposerStore;
+    /** Why nothing may start on a thread; undefined while its runs aren't loaded. */
+    readonly blockedReason?: (threadId: string) => WorkspaceBlock | Promise<WorkspaceBlock>;
+  } = {},
 ) {
   const store = options.store ?? createComposerStore({ initialPrefs: {}, persist: null });
   const results = [...script];
@@ -81,6 +86,9 @@ function setup(
   }> = [];
   const timers: Array<{ readonly run: () => void; readonly delayMs: number }> = [];
   const server: { settings: ComposerSettings | null } = { settings: threadSettings };
+  /** The threads the sender watches now. */
+  const watched = new Set<string>();
+  const { blockedReason } = options;
   const respond = (kind: string, commandId: string | undefined, input: unknown) => {
     calls.push({ kind, commandId: commandId ?? "", input });
     return Promise.resolve(results.shift() ?? ok);
@@ -93,6 +101,17 @@ function setup(
     threadSettings: () => server.settings,
     // Logged as "resume"; the input keeps the job's real command id.
     resumeQueue: (input) => respond("queue.resume", "resume", input),
+    ...(blockedReason === undefined
+      ? {}
+      : {
+          guardWorkspace: (threadId: ThreadId) => {
+            watched.add(threadId);
+            return {
+              blockedReason: () => blockedReason(threadId),
+              dispose: () => watched.delete(threadId),
+            };
+          },
+        }),
     schedule: (run, delayMs) => {
       const timer = { run, delayMs };
       timers.push(timer);
@@ -106,7 +125,7 @@ function setup(
   const elapse = (delayMs: number) => {
     for (const timer of timers.filter((entry) => entry.delayMs === delayMs)) timer.run();
   };
-  return { store, sender, calls, timers, server, elapse };
+  return { store, sender, calls, timers, server, elapse, watched };
 }
 
 /** Lets queued promise callbacks run; no clock involved. */
@@ -1107,5 +1126,189 @@ describe("composer sender, PR 15 Sol audit round 1", () => {
     expect(sender.pendingCount({ threadIds: [], projectId: "q" })).toBe(0);
     expect(sender.forget({ threadIds: [], projectId: "p" })).toBe(1);
     expect(sender.pendingCount()).toBe(0);
+  });
+});
+
+describe("composer sender, worktree setup", () => {
+  it("hands back queued messages, without sending them, once the thread's worktree is gone", async () => {
+    let blocked: string | null = null;
+    const { store, sender, calls } = setup([dropped], { blockedReason: () => blocked });
+    await sender.send(send({ text: "one" }));
+    await sender.send(send({ commandId: CommandId.make("cmd-2"), text: "two" }));
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    // While they wait to reconnect, the thread's worktree setup fails.
+    blocked = "Worktree setup failed";
+    await sender.retryWaiting();
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    expect(store.getDraft("t1").text).toBe("one\n\ntwo");
+    expect(store.snapshot("t1").sends).toEqual([]);
+    expect(store.snapshot("t1").notice).toBe("Worktree setup failed");
+  });
+
+  it("S1: checks every thread it has jobs for, whichever one is on screen", async () => {
+    const blocked = new Map<string, string | null>();
+    const { store, sender, calls, watched } = setup([dropped], {
+      blockedReason: (threadId) => blocked.get(threadId) ?? null,
+    });
+    const other = {
+      kind: "thread" as const,
+      threadId: ThreadId.make("t2"),
+      projectId: ProjectId.make("p"),
+    };
+    // A steer to t1 waits to reconnect; the user moves on to t2.
+    await sender.send(send({ dispatch: "steer", text: "steer" }));
+    expect(watched).toEqual(new Set(["t1"]));
+    await sender.send(send({ target: other, commandId: CommandId.make("cmd-2") }));
+    expect(ids(calls)).toEqual(["cmd-1", "cmd-2"]);
+    // t1's worktree setup fails meanwhile. Nothing here knows which thread is selected.
+    blocked.set("t1", "Worktree setup failed");
+    await sender.retryWaiting();
+    expect(ids(calls)).toEqual(["cmd-1", "cmd-2"]);
+    expect(store.getDraft("t1").text).toBe("steer");
+    expect(store.snapshot("t1").notice).toBe("Worktree setup failed");
+    // Watching stops once the thread has nothing pending.
+    expect(watched).toEqual(new Set());
+  });
+
+  it("S1: waits while the thread's runs aren't loaded, then asks again", async () => {
+    let known = false;
+    const { store, sender, calls, elapse } = setup([], {
+      blockedReason: () => (known ? null : undefined),
+    });
+    await sender.send(send());
+    expect(ids(calls)).toEqual([]);
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["waiting"]);
+    known = true;
+    elapse(retryDelayMs(0));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1"]);
+  });
+
+  it("S2: never sends queue.resume while the thread's worktree isn't there", async () => {
+    const { store, sender, calls } = setup([], { blockedReason: () => "Worktree setup failed" });
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(calls).toEqual([]);
+    expect(store.snapshot("t1").notice).toBe("Worktree setup failed");
+    expect(sender.pendingCount()).toBe(0);
+  });
+
+  it("S2: messages held by Stop go back, unreleased, once the worktree setup failed", async () => {
+    let blocked: string | null = null;
+    const inFlight = deferred();
+    const { store, sender, calls } = setup([inFlight.promise], { blockedReason: () => blocked });
+    const first = sender.send(send());
+    void sender.send(send({ commandId: CommandId.make("cmd-2"), text: "two" }));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    blocked = "Worktree setup failed";
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    expect(store.getDraft("t1").text).toBe("two");
+    expect(store.snapshot("t1").notice).toBe("Worktree setup failed");
+  });
+
+  it("waits for an answer that takes a moment, then asks again later if none comes", async () => {
+    let answer: (value: WorkspaceBlock) => void = () => {};
+    let asks = 0;
+    const { store, sender, calls, timers, elapse } = setup([], {
+      blockedReason: () => {
+        asks += 1;
+        if (asks > 1) return null;
+        return new Promise<WorkspaceBlock>((resolve) => {
+          answer = resolve;
+        });
+      },
+    });
+    void sender.send(send());
+    await settle();
+    expect(ids(calls)).toEqual([]);
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["sending"]);
+    // No answer in time: it waits as if offline, and a late answer changes nothing.
+    elapse(timers[0]!.delayMs);
+    await settle();
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["waiting"]);
+    answer("Worktree setup failed");
+    await settle();
+    expect(store.snapshot("t1").notice).toBeNull();
+    elapse(retryDelayMs(0));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1"]);
+  });
+
+  it("lets a Stop that lands while the answer is on its way win", async () => {
+    let answer: (value: WorkspaceBlock) => void = () => {};
+    const { store, sender, calls } = setup([], {
+      blockedReason: () =>
+        new Promise<WorkspaceBlock>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    void sender.send(send());
+    await settle();
+    sender.hold("t1");
+    answer(null);
+    await settle();
+    expect(ids(calls)).toEqual([]);
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["held"]);
+  });
+
+  /** A guard whose every answer waits until the test gives it. */
+  const slowGuard = () => {
+    let answer: (value: WorkspaceBlock) => void = () => {};
+    const harness = setup([], {
+      blockedReason: () =>
+        new Promise<WorkspaceBlock>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    return { ...harness, answer: (value: WorkspaceBlock) => answer(value) };
+  };
+
+  it("PR 20 S1: a Stop that lands while a resume waits on its answer keeps the queue held", async () => {
+    const { sender, calls, answer } = slowGuard();
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    sender.hold("t1");
+    answer(null);
+    await settle();
+    expect(calls).toEqual([]);
+    // /resume releases it again.
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    answer(null);
+    await settle();
+    expect(calls.map((call) => call.kind)).toEqual(["queue.resume"]);
+  });
+
+  it("PR 20 S1: /discard drops a resume still waiting on its answer", async () => {
+    const { sender, calls, answer, watched } = slowGuard();
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(sender.discard("t1")).toEqual({ messages: 0, resumes: 1 });
+    answer(null);
+    await settle();
+    expect(calls).toEqual([]);
+    expect(watched).toEqual(new Set());
+  });
+
+  it("never holds back a draft's own launch, nor watches its thread before it exists", async () => {
+    const launchReply = deferred();
+    const { sender, calls, store, watched } = setup([launchReply.promise], {
+      blockedReason: () => "blocked",
+    });
+    const draft = store.openNewThreadDraft(ProjectId.make("p"), () => ThreadId.make("new-1"));
+    const target = { kind: "draft" as const, ...draft };
+    const launched = sender.send(send({ target }));
+    void sender.send(send({ target, commandId: CommandId.make("cmd-2"), text: "follow-up" }));
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    expect(watched).toEqual(new Set());
+    launchReply.resolve(ok);
+    await launched;
+    // The follow-up is checked once the launch made the thread.
+    expect(ids(calls)).toEqual(["cmd-1"]);
+    expect(store.getDraft("new-1").text).toBe("follow-up");
   });
 });
