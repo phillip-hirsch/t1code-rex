@@ -20,12 +20,14 @@ import { allowsCustomAnswer, answerText, optionValue, resolveAnswer } from "./qu
 import {
   ENGAGE_HINT,
   activeQuestion,
+  availableChoices,
   createEngagementGuard,
   draftOf,
   isOpen,
   onTextRow,
   pickActiveRequest,
   pressPanelKey,
+  requestRunStopped,
   resolvePanelKey,
   setTypedAnswer,
   stepRequest,
@@ -50,7 +52,10 @@ const FILES_MAX = 4;
 const TEXT_ROWS_MAX = 3;
 
 export interface RequestPanelHandle {
+  /** Keys while the panel has focus; true when it used the key. */
   readonly handleKey: (key: KeyEvent) => boolean;
+  /** Focus just moved here by Tab: engages the panel once its request has settled. */
+  readonly enter: () => void;
 }
 
 export interface RequestPanelProps extends PanelRunState {
@@ -59,16 +64,22 @@ export interface RequestPanelProps extends PanelRunState {
   readonly store: RequestPanelStore;
   readonly responder: RequestResponder;
   readonly theme: TuiTheme;
+  /** Keys come here only while focused; the composer has them otherwise. */
   readonly focused: boolean;
   /** Where the thread's commands run, shown under a command approval. */
   readonly cwd: string | null;
+  /** The run Stop was last sent for; its requests can only be declined. */
+  readonly stopSentRunId: string | null;
+  /** A click on the panel: focus moves here. */
   readonly onFocus: () => void;
-  /** Esc and Ctrl+C stop the run, as in the composer. */
+  /** Esc, Tab, or another request: focus goes back to the composer. */
+  readonly onLeave: () => void;
+  /** Ctrl+C stops the run, as in the composer. */
   readonly onStop: () => void;
   /** Ctrl+C with nothing running. */
   readonly onExit: () => void;
   readonly onStatus: (message: string) => void;
-  /** The footer's key hints for what the panel shows. */
+  /** The footer's key hints while the panel has focus. */
   readonly onHints: (hints: string) => void;
   readonly ref?: Ref<RequestPanelHandle>;
 }
@@ -117,34 +128,56 @@ function hintsFor(
   form: QuestionForm | null,
   count: number,
   engaged: boolean,
+  stopped: boolean,
   run: PanelRunState,
 ): string {
   if (request === null) return "";
-  const stop = run.running ? (run.stopRequested ? "  stopping…" : "  esc stop") : "";
+  const stop = run.running ? (run.stopRequested ? "  stopping…" : "  ^C stop") : "";
   const step = count > 1 ? "  [ ] request" : "";
+  const back = "  esc back";
   const answerable =
     request.kind === "approval"
       ? approvalChoices(request.approval).length > 0
       : request.input.responseCapability !== "not_resumable";
-  if (!answerable) return `${stop.trimStart()}  tab focus`.trimStart();
-  if (!engaged) return `⏎ respond${stop}  tab focus`;
+  if (!answerable) return `${step}${stop}${back}`.trimStart();
+  if (!engaged) return `⏎ respond${step}${stop}${back}`;
   if (request.kind === "approval") {
-    const choices = approvalChoices(request.approval);
-    return `${choices.map((choice) => choice.key).join("/")} or 1-${choices.length} choose${step}${stop}  tab focus`;
+    const choices = availableChoices(approvalChoices(request.approval), stopped);
+    const keys = choices.map((choice) => choice.key).join("/");
+    return `${keys} or ${choices.length === 1 ? "1" : `1-${choices.length}`} choose${step}${stop}${back}`;
   }
   const question = form === null ? null : activeQuestion(request.input, form);
-  const dismiss = request.input.dismissible && !run.running ? "  esc dismiss" : "";
+  const dismiss = request.input.dismissible && !run.running ? "  ^X dismiss" : "";
   const next = form !== null && form.index < request.input.questions.length - 1 ? "next" : "submit";
   if (question !== null && form !== null && onTextRow(form, question)) {
-    return `type an answer  ⏎ ${next}  ↑ options${dismiss}${stop}  tab focus`;
+    return `type an answer  ⏎ ${next}  ↑ options${dismiss}${stop}${back}`;
   }
   const many = request.input.questions.length > 1 ? "  ←→ question" : "";
-  return `↑↓ move  1-9 pick  ⏎ ${next}${many}${step}${dismiss}${stop}`;
+  return `↑↓ move  1-9 pick  ⏎ ${next}${many}${step}${dismiss}${stop}${back}`;
+}
+
+const STOPPED_NOTE = "Run stopped. This request can only be declined to clear it";
+
+/** The panel's own line under the request: how to reach it, or what it waits for. */
+function panelNote(input: {
+  kind: PendingRequest["kind"];
+  focused: boolean;
+  engaged: boolean;
+  stopped: boolean;
+}): string {
+  if (!input.focused) {
+    const tab = "Tab to respond";
+    if (input.stopped) return `Run stopped; this can only be declined · ${tab}`;
+    return input.kind === "approval" ? `${tab} · sending a message declines it` : tab;
+  }
+  if (!input.engaged) return `${ENGAGE_HINT}; until then keys do nothing here`;
+  return input.stopped ? STOPPED_NOTE : "";
 }
 
 /**
- * Approvals and questions, in the composer's place while any is pending. Keys reach it the
- * way they reach the composer: the shell's keyboard hook calls its handle first.
+ * Approvals and questions, above the composer while any is pending. The composer keeps
+ * focus and keys; Tab or a click moves focus here, and Esc, Tab or another request moves it
+ * back. While focused, the shell's keyboard hook calls this handle first.
  */
 export function RequestPanel(props: RequestPanelProps) {
   const { threadId, queue, store, responder, theme, ref } = props;
@@ -157,11 +190,23 @@ export function RequestPanel(props: RequestPanelProps) {
   const activeId = active?.requestId ?? null;
   const form = active?.kind === "question" ? store.form(threadId, active.input) : null;
 
-  // Typing meant for the composer must never answer: decisions wait for a deliberate Enter.
+  // Behind focus, a second layer: decisions wait until the request has settled in view.
   const [guard] = useState(() => createEngagementGuard());
   useEffect(() => {
     guard.show(activeId);
   }, [activeId, guard]);
+  // Another request (answered, resolved elsewhere, or a new one) sends focus back to the
+  // composer; stepping with [ ] stays here, disengaged.
+  const steppedTo = useRef<RuntimeRequestId | null>(null);
+  const shownId = useRef(activeId);
+  const { focused, onLeave } = props;
+  useEffect(() => {
+    const previous = shownId.current;
+    shownId.current = activeId;
+    if (previous === activeId) return;
+    if (activeId !== null && activeId === steppedTo.current) return;
+    if (focused) onLeave();
+  }, [activeId, focused, onLeave]);
   const [, rerender] = useReducer((count: number) => count + 1, 0);
   const engaged = guard.engaged(activeId);
   // A click is deliberate, once the request has been in view long enough to be aimed at.
@@ -174,7 +219,10 @@ export function RequestPanel(props: RequestPanelProps) {
     return true;
   };
 
-  const hints = hintsFor(active, form, queue.length, engaged, run);
+  const stop = { stopSentRunId: props.stopSentRunId, stopRequested: props.stopRequested };
+  const stoppedOf = (request: PendingRequest): boolean => requestRunStopped(request, stop);
+  const stopped = active !== null && stoppedOf(active);
+  const hints = hintsFor(active, form, queue.length, engaged, stopped, run);
   const { onHints } = props;
   useEffect(() => {
     onHints(hints);
@@ -195,6 +243,9 @@ export function RequestPanel(props: RequestPanelProps) {
         props.onStatus("");
         rerender();
         return;
+      case "leave":
+        props.onLeave();
+        return;
       case "stop":
         props.onStop();
         return;
@@ -203,8 +254,12 @@ export function RequestPanel(props: RequestPanelProps) {
         return;
       case "step-request": {
         const next = stepRequest(queue, request.requestId, action.delta, statusOf);
-        if (next === null) props.onStatus("No other request is waiting");
-        else store.setActive(threadId, next);
+        if (next === null) {
+          props.onStatus("No other request is waiting");
+        } else {
+          steppedTo.current = next;
+          store.setActive(threadId, next);
+        }
         return;
       }
       case "decide":
@@ -242,7 +297,7 @@ export function RequestPanel(props: RequestPanelProps) {
         request.kind === "approval"
           ? {
               kind: "approval",
-              choices: approvalChoices(request.approval),
+              choices: availableChoices(approvalChoices(request.approval), stoppedOf(request)),
               busy: busyOf(request),
               engagement,
               ...run,
@@ -260,6 +315,12 @@ export function RequestPanel(props: RequestPanelProps) {
       apply(request, action);
       return true;
     },
+    enter: () => {
+      const request = pickActiveRequest(queue, store.active(threadId), statusOf);
+      if (request === null) return;
+      guard.enter(request.requestId);
+      rerender();
+    },
   }));
 
   if (active === null) return null;
@@ -268,6 +329,7 @@ export function RequestPanel(props: RequestPanelProps) {
   const position = queue.length > 1 ? `[ ${queue.indexOf(active) + 1}/${queue.length} ]` : "";
   const busy = busyOf(active);
   const tone = active.kind === "approval" ? palette.warning : palette.info;
+  const note = panelNote({ kind: active.kind, focused: props.focused, engaged, stopped });
 
   return (
     <box
@@ -316,7 +378,8 @@ export function RequestPanel(props: RequestPanelProps) {
           request={active}
           cwd={props.cwd}
           busy={busy}
-          engaged={engaged}
+          stopped={stopped}
+          engaged={engaged && props.focused}
           running={props.running}
           clicked={() => clicked(active.requestId)}
           theme={theme}
@@ -355,13 +418,8 @@ export function RequestPanel(props: RequestPanelProps) {
           }}
         />
       ) : null}
-      {!engaged && !busy && line === null ? (
-        <text
-          wrapMode="none"
-          truncate
-          content={`${ENGAGE_HINT}; until then keys do nothing here`}
-          style={{ fg: tone }}
-        />
+      {note !== "" && !busy && line === null ? (
+        <text wrapMode="none" truncate content={note} style={{ fg: tone }} />
       ) : null}
       {line ? (
         <text
@@ -388,6 +446,8 @@ function ApprovalBody(props: {
   request: Extract<PendingRequest, { kind: "approval" }>;
   cwd: string | null;
   busy: boolean;
+  /** Its run was stopped: only declining is left. */
+  stopped: boolean;
   engaged: boolean;
   running: boolean;
   /** A click on a choice: true once it counts. */
@@ -398,7 +458,7 @@ function ApprovalBody(props: {
   const { request, theme } = props;
   const palette = theme.palette;
   const { approval, subject } = request;
-  const choices = approvalChoices(approval);
+  const choices = availableChoices(approvalChoices(approval), props.stopped);
   const detail = approval.detail?.trim() ?? "";
   // The provider's summary, unless it only repeats the command or a file name shown above.
   const repeats =
@@ -466,11 +526,11 @@ function ApprovalBody(props: {
       ) : null}
       {approval.responseCapability !== "live" ? (
         <text
-          content={`The provider process is gone, so this can't be answered.${props.running ? " Esc stops the run." : ""}`}
+          content={`The provider process is gone, so this can't be answered.${props.running ? " Ctrl+C stops the run." : ""}`}
           style={{ fg: palette.warning }}
         />
       ) : (
-        <box style={{ flexDirection: "row", flexWrap: "wrap", marginTop: 1 }}>
+        <box style={{ flexDirection: "row", flexWrap: "wrap" }}>
           {choices.map((choice, index) => (
             <ChoiceButton
               key={choice.decision}
@@ -560,7 +620,7 @@ function QuestionBody(props: {
   return (
     <box style={{ flexDirection: "column" }}>
       <text content={question.question} style={{ fg: palette.text }} />
-      <box style={{ flexDirection: "column", marginTop: 1 }}>
+      <box style={{ flexDirection: "column" }}>
         {question.options.map((option, index) => {
           // Typed text wins over picks, as in resolveAnswer.
           const selected =

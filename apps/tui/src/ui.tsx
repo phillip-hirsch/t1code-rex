@@ -36,7 +36,8 @@ import {
 
 import packageJson from "../package.json" with { type: "json" };
 import { copyTextToClipboard } from "./clipboardText.ts";
-import { Composer, QueuedMessages, type ComposerHandle, type ProviderBadge } from "./composer.tsx";
+import { QueuedMessages, type ProviderBadge } from "./composer.tsx";
+import { ComposerDock, type ComposerDockHandle } from "./composerDock.tsx";
 import { describeSendFailure, type ComposerTarget } from "./composerSend.ts";
 import { createComposerSender } from "./composerSender.ts";
 import {
@@ -94,7 +95,6 @@ import {
 import { ModelPickerView } from "./modelPickerView.tsx";
 import { NewThreadView } from "./newThreadView.tsx";
 import { createRequestPanelStore } from "./requestPanelStore.ts";
-import { RequestPanel } from "./requestPanelView.tsx";
 import { NO_PENDING_REQUESTS, type PendingRequest } from "./requestQueue.ts";
 import { createRequestResponder } from "./requestResponder.ts";
 
@@ -138,7 +138,8 @@ interface ContextMenuState {
   readonly index: number;
 }
 
-type FocusArea = "sidebar" | "thread" | "composer";
+/** "requests" is the request panel above the composer, reached with Tab or a click. */
+type FocusArea = "sidebar" | "thread" | "composer" | "requests";
 
 function threadSettings(thread: SidebarThread): ComposerSettings {
   return {
@@ -328,7 +329,7 @@ function Shell(props: AppProps) {
 
   const markdownStyles = useMarkdownStyles(theme);
   const threadViewRef = useRef<ThreadViewHandle | null>(null);
-  const composerRef = useRef<ComposerHandle | null>(null);
+  const dockRef = useRef<ComposerDockHandle | null>(null);
   const [modelPicker, modelPickerRef, setModelPicker] = useSyncedState<ModelPickerState | null>(
     null,
   );
@@ -407,6 +408,7 @@ function Shell(props: AppProps) {
     [connection.environmentId, requestPanelStore, responder],
   );
   const [panelHints, setPanelHints] = useState("");
+  const [requestsShown, setRequestsShown] = useState(false);
 
   const connectionState = Option.getOrNull(AsyncResult.value(connectionResult));
   const connectionView = describeConnection(connectionState, connection.session.mode);
@@ -599,7 +601,6 @@ function Shell(props: AppProps) {
       ? connection.thread(composerTarget.threadId).requestQueueAtom
       : NO_REQUESTS_ATOM,
   );
-  const showRequests = composerTarget?.kind === "thread" && requestQueue.length > 0;
   const running = threadRuntimeIsActive(activeThread?.runtime);
   const activeRunId = activeThread?.runtime?.activeRunId ?? null;
   const stopRequested = running && stopRequestedRunId === (activeRunId ?? "unknown");
@@ -811,6 +812,8 @@ function Shell(props: AppProps) {
   }, [layout.showSidebar]);
 
   const composerFocused = focusArea === "composer" && composerTarget !== null;
+  const requestsFocused = focusArea === "requests" && composerTarget !== null;
+  const dockFocused = composerFocused || requestsFocused;
   const cycleFocus = () => {
     const order: FocusArea[] = [
       ...(sidebarVisible ? (["sidebar"] as const) : []),
@@ -901,7 +904,7 @@ function Shell(props: AppProps) {
     ) {
       return true;
     }
-    if (composerFocused && composerRef.current?.handleKey(key)) return true;
+    if (dockFocused && dockRef.current?.handleKey(key)) return true;
     if (key.ctrl && key.name === "c") {
       requestExit();
       return true;
@@ -911,7 +914,7 @@ function Shell(props: AppProps) {
       return true;
     }
     // Everything else is typing.
-    if (composerFocused) return false;
+    if (dockFocused) return false;
     if (sidebarFocused) {
       if (key.name === "m" && sidebar.cursorRow?.kind === "thread") {
         openContextMenu(sidebar.cursorRow.threadId, null);
@@ -964,10 +967,10 @@ function Shell(props: AppProps) {
     ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
     : sidebarFocused
       ? "↑↓ move  ←→ fold  ⏎ open  m menu  ⌘N new  tab focus  ⌘K palette  q quit"
-      : composerFocused && showRequests
+      : requestsFocused
         ? panelHints
         : composerFocused
-          ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  tab focus  ⌘K palette`
+          ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
           : `↑↓ scroll  PgUp/PgDn page  End bottom  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette  q quit`;
 
   const sidebarElement = sidebarVisible ? (
@@ -1069,54 +1072,54 @@ function Shell(props: AppProps) {
                   theme={theme}
                 />
               ) : null}
-              {showRequests ? (
-                <RequestPanel
-                  key={`requests:${composerTarget.threadId}`}
-                  ref={composerRef}
-                  threadId={composerTarget.threadId}
-                  queue={requestQueue}
-                  store={requestPanelStore}
-                  responder={responder}
-                  theme={theme}
-                  focused={composerFocused && modelPicker === null && !paletteOpen}
-                  cwd={
-                    activeThread
-                      ? threadWorkspacePath(activeThread, activeProject ?? undefined)
-                      : null
-                  }
-                  running={running}
-                  stopRequested={stopRequested}
-                  onFocus={() => setFocusArea("composer")}
-                  onStop={stopRun}
-                  onExit={requestExit}
-                  onStatus={setStatus}
-                  onHints={setPanelHints}
-                />
-              ) : (
-                <Composer
-                  key={`composer:${composerTarget.threadId}`}
-                  ref={composerRef}
-                  target={composerTarget}
-                  store={composerStore}
-                  sender={sender}
-                  theme={theme}
-                  focused={composerFocused && modelPicker === null && !paletteOpen}
-                  baseSettings={baseSettings}
-                  modelLabel={modelLabel}
-                  providerBadge={providerBadge}
-                  running={running}
-                  stopRequested={stopRequested}
-                  clipboardDir={NodePath.join(paths.stateHomeDir, "clipboard")}
-                  onFocus={() => setFocusArea("composer")}
-                  onStop={stopRun}
-                  onExit={requestExit}
-                  onNewThread={() => openNewThread(composerTarget.projectId)}
-                  onOpenModelPicker={toggleModelPicker}
-                  onSetInteractionMode={setInteractionMode}
-                  onSetRuntimeMode={setRuntimeMode}
-                  onStatus={setStatus}
-                />
-              )}
+              <ComposerDock
+                key={`composer:${composerTarget.threadId}`}
+                ref={dockRef}
+                composer={{
+                  target: composerTarget,
+                  store: composerStore,
+                  theme,
+                  baseSettings,
+                  modelLabel,
+                  providerBadge,
+                  running,
+                  stopRequested,
+                  clipboardDir: NodePath.join(paths.stateHomeDir, "clipboard"),
+                  onStop: stopRun,
+                  onExit: requestExit,
+                  onNewThread: () => openNewThread(composerTarget.projectId),
+                  onOpenModelPicker: toggleModelPicker,
+                  onSetInteractionMode: setInteractionMode,
+                  onSetRuntimeMode: setRuntimeMode,
+                  onStatus: setStatus,
+                }}
+                sender={sender}
+                requests={
+                  composerTarget.kind === "thread"
+                    ? {
+                        queue: requestQueue,
+                        store: requestPanelStore,
+                        responder,
+                        cwd: activeThread
+                          ? threadWorkspacePath(activeThread, activeProject ?? undefined)
+                          : null,
+                        stopSentRunId: stopRequestedRunId,
+                        onHints: setPanelHints,
+                      }
+                    : null
+                }
+                focus={
+                  modelPicker !== null || paletteOpen
+                    ? null
+                    : composerFocused
+                      ? "composer"
+                      : requestsFocused
+                        ? "requests"
+                        : null
+                }
+                onFocus={setFocusArea}
+                onPanelShown={setRequestsShown}
+              />
             </>
           ) : (
             <ServerSummary

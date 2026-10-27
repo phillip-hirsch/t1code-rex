@@ -5,10 +5,12 @@ import {
 } from "@t3tools/client-runtime/state/thread-requests";
 import type {
   OrchestrationV2ExecutionNode,
+  OrchestrationV2Run,
   OrchestrationV2RuntimeRequest,
   OrchestrationV2Subagent,
   ProviderApprovalDecision,
   ProviderApprovalOption,
+  RunId,
   RuntimeRequestId,
 } from "@t3tools/contracts";
 
@@ -24,23 +26,31 @@ export type ApprovalSubject =
       }>;
     };
 
-export type PendingRequest =
-  | {
-      readonly kind: "approval";
-      readonly requestId: RuntimeRequestId;
-      readonly createdAt: string;
-      readonly approval: ThreadPendingApproval;
-      readonly subject: ApprovalSubject | null;
-      /** Set when a native subagent of this thread asked. */
-      readonly subagent: string | null;
-    }
-  | {
-      readonly kind: "question";
-      readonly requestId: RuntimeRequestId;
-      readonly createdAt: string;
-      readonly input: ThreadPendingUserInput;
-      readonly subagent: string | null;
-    };
+/** The run a request belongs to, and whether that run is over (stopped, failed or done). */
+export interface RequestRun {
+  readonly runId: RunId | null;
+  readonly runEnded: boolean;
+}
+
+export type PendingRequest = RequestRun &
+  (
+    | {
+        readonly kind: "approval";
+        readonly requestId: RuntimeRequestId;
+        readonly createdAt: string;
+        readonly approval: ThreadPendingApproval;
+        readonly subject: ApprovalSubject | null;
+        /** Set when a native subagent of this thread asked. */
+        readonly subagent: string | null;
+      }
+    | {
+        readonly kind: "question";
+        readonly requestId: RuntimeRequestId;
+        readonly createdAt: string;
+        readonly input: ThreadPendingUserInput;
+        readonly subagent: string | null;
+      }
+  );
 
 /** The slice of a thread projection the queue reads. */
 export interface RequestQueueSource {
@@ -48,7 +58,17 @@ export interface RequestQueueSource {
   readonly turnItems: ReadonlyArray<ThreadTurnItemLike>;
   readonly nodes: ReadonlyArray<OrchestrationV2ExecutionNode>;
   readonly subagents: ReadonlyArray<OrchestrationV2Subagent>;
+  readonly runs: ReadonlyArray<Pick<OrchestrationV2Run, "id" | "status">>;
 }
+
+/** Run statuses that can still use an answer. */
+const LIVE_RUN_STATUSES: ReadonlySet<OrchestrationV2Run["status"]> = new Set([
+  "preparing",
+  "queued",
+  "starting",
+  "running",
+  "waiting",
+]);
 
 /** Client-runtime's structure strips streamed text from some items; the queue never reads it. */
 type ThreadTurnItemLike = Parameters<typeof derivePendingThreadRequests>[0]["turnItems"][number];
@@ -110,6 +130,23 @@ export function deriveRequestQueue(source: RequestQueueSource): ReadonlyArray<Pe
     return null;
   };
 
+  const runOf = (requestId: RuntimeRequestId): RequestRun => {
+    let nodeId = requestsById.get(requestId)?.nodeId ?? null;
+    for (let depth = 0; nodeId !== null && depth < NODE_DEPTH_MAX; depth += 1) {
+      const node = nodesById.get(nodeId);
+      if (node === undefined) break;
+      if (node.runId !== null) {
+        const run = source.runs.find((entry) => entry.id === node.runId);
+        return {
+          runId: node.runId,
+          runEnded: run !== undefined && !LIVE_RUN_STATUSES.has(run.status),
+        };
+      }
+      nodeId = node.parentNodeId;
+    }
+    return { runId: null, runEnded: false };
+  };
+
   const toolItemOf = (requestId: RuntimeRequestId): ThreadTurnItemLike | undefined => {
     const nodeId = requestsById.get(requestId)?.nodeId;
     const toolNodeId = nodeId === undefined ? null : (nodesById.get(nodeId)?.parentNodeId ?? null);
@@ -129,6 +166,7 @@ export function deriveRequestQueue(source: RequestQueueSource): ReadonlyArray<Pe
       approval,
       subject: subjectOf(toolItemOf(approval.requestId)),
       subagent: subagentOf(approval.requestId),
+      ...runOf(approval.requestId),
     })),
     ...userInputs.map((input): PendingRequest => ({
       kind: "question",
@@ -136,6 +174,7 @@ export function deriveRequestQueue(source: RequestQueueSource): ReadonlyArray<Pe
       createdAt: input.createdAt,
       input,
       subagent: subagentOf(input.requestId),
+      ...runOf(input.requestId),
     })),
   ];
   return queue.toSorted(
@@ -254,7 +293,8 @@ export function createRequestQueueSelector() {
       previousSource.runtimeRequests === source.runtimeRequests &&
       previousSource.turnItems === source.turnItems &&
       previousSource.nodes === source.nodes &&
-      previousSource.subagents === source.subagents
+      previousSource.subagents === source.subagents &&
+      previousSource.runs === source.runs
     ) {
       return previous;
     }

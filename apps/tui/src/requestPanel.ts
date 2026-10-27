@@ -17,10 +17,10 @@ import {
   type QuestionAnswer,
   type QuestionDraft,
 } from "./questionAnswers.ts";
-import type { ApprovalChoice, PendingRequest } from "./requestQueue.ts";
+import type { ApprovalChoice, PendingRequest, RequestRun } from "./requestQueue.ts";
 import type { ResponseStatus } from "./requestResponder.ts";
 
-/** How long keys must stop before Enter engages the panel. */
+/** How long a request must be in view, or keys must stop, before the panel takes decisions. */
 export const PANEL_QUIET_MS = 750;
 
 /**
@@ -30,10 +30,9 @@ export const PANEL_QUIET_MS = 750;
 export type Engagement = "engaged" | "ready" | "typing";
 
 /**
- * The panel opens disengaged, and its decision keys do nothing until Enter engages it.
- * Enter only engages after PANEL_QUIET_MS with no keys, and every key while disengaged
- * restarts that wait, so typing that carries on from the composer can never engage the
- * panel or answer, however long it goes on. Another request disengages it again.
+ * Behind focus, a second layer: entering engages the panel only once its request has been in
+ * view for PANEL_QUIET_MS; otherwise Enter after PANEL_QUIET_MS with no keys does. Every key
+ * while disengaged restarts that wait, and another request disengages it.
  */
 export function createEngagementGuard(now: () => number = Date.now) {
   let shown = {
@@ -47,6 +46,8 @@ export function createEngagementGuard(now: () => number = Date.now) {
     const at = now();
     shown = { requestId, shownAt: at, quietSince: at, engaged: false };
   };
+  const settled = (requestId: RuntimeRequestId): boolean =>
+    shown.requestId === requestId && now() - shown.shownAt >= PANEL_QUIET_MS;
   return {
     show,
     /** For a key the panel is about to handle: where it stands. The key restarts the wait. */
@@ -65,13 +66,17 @@ export function createEngagementGuard(now: () => number = Date.now) {
       show(requestId);
       shown.engaged = true;
     },
+    /** Focus moved to the panel (Tab or a click): engages it once the request has settled. */
+    enter(requestId: RuntimeRequestId): boolean {
+      show(requestId);
+      if (settled(requestId)) shown.engaged = true;
+      return shown.engaged;
+    },
     engaged(requestId: RuntimeRequestId | null): boolean {
       return requestId !== null && shown.requestId === requestId && shown.engaged;
     },
-    /** In view long enough that a click is aimed at it, not at what it replaced. */
-    settled(requestId: RuntimeRequestId): boolean {
-      return shown.requestId === requestId && now() - shown.shownAt >= PANEL_QUIET_MS;
-    },
+    /** In view long enough that a click or Tab is aimed at it, not at what was there before. */
+    settled,
   };
 }
 
@@ -194,19 +199,48 @@ export interface PanelKey {
   readonly option?: boolean;
   readonly super?: boolean;
   readonly hyper?: boolean;
+  /** A held key's auto-repeat (kitty keyboard protocol); never a fresh press. */
+  readonly repeated?: boolean;
 }
 
-/** What the panel shares with the composer: the run that Esc and Ctrl+C stop. */
+/** What the panel shares with the composer: the run that Ctrl+C stops. */
 export interface PanelRunState {
   readonly running: boolean;
   /** Stop was already sent for this run, so another Ctrl+C quits instead. */
   readonly stopRequested: boolean;
 }
 
+/**
+ * Whether the run a request belongs to was stopped: the run says it ended, or Stop was sent
+ * for it. `stopSentRunId` is the run Stop was last sent for; a request with no known run
+ * goes by the active run's `stopRequested`.
+ */
+export function requestRunStopped(
+  request: RequestRun,
+  stop: { readonly stopSentRunId: string | null; readonly stopRequested: boolean },
+): boolean {
+  if (request.runEnded) return true;
+  return request.runId === null ? stop.stopRequested : request.runId === stop.stopSentRunId;
+}
+
+/**
+ * The decisions a request offers now. Once its run was stopped, approving would act for a
+ * run that's gone, so only declining is left, to clear it.
+ */
+export function availableChoices(
+  choices: ReadonlyArray<ApprovalChoice>,
+  stopped: boolean,
+): ReadonlyArray<ApprovalChoice> {
+  if (!stopped) return choices;
+  const decline = choices.filter((choice) => choice.decision === "decline");
+  return decline.length > 0 ? decline : choices.filter((choice) => choice.decision === "cancel");
+}
+
 export type PanelKeyContext = PanelRunState &
   (
     | {
         readonly kind: "approval";
+        /** What can be decided now; see availableChoices. */
         readonly choices: ReadonlyArray<ApprovalChoice>;
         /** An answer is on its way, or the request can't be answered. */
         readonly busy: boolean;
@@ -223,6 +257,8 @@ export type PanelKeyContext = PanelRunState &
 
 export type PanelAction =
   | { readonly type: "engage" }
+  /** Back to the composer. */
+  | { readonly type: "leave" }
   | { readonly type: "stop" }
   | { readonly type: "exit" }
   | { readonly type: "step-request"; readonly delta: 1 | -1 }
@@ -238,6 +274,7 @@ const NONE: PanelAction = { type: "none" };
 
 export const ENGAGE_HINT = "Press ⏎ to respond";
 const STILL_TYPING_HINT = "Keys were still coming in; pause, then press ⏎ to respond";
+const REPEAT_HINT = "Let go of the key, then press it again";
 
 function isEnterKey(name: string): boolean {
   return name === "return" || name === "enter" || name === "kpenter";
@@ -247,6 +284,9 @@ function isEnterKey(name: string): boolean {
 function hasModifier(key: PanelKey): boolean {
   return Boolean(key.ctrl || key.meta || key.option || key.super || key.hyper);
 }
+
+/** Keys that only move the cursor; a held one may repeat. */
+const MOVE_KEYS: ReadonlySet<string> = new Set(["up", "down", "left", "right", "j", "k", "h", "l"]);
 
 function digitOf(key: PanelKey): number | null {
   return /^[1-9]$/.test(key.name) ? Number(key.name) : null;
@@ -273,35 +313,57 @@ export function pressPanelKey(
   return action;
 }
 
-/** What a key does in the request panel; null leaves it to the text box or the shell. */
+/**
+ * What a key does in the focused request panel; null leaves it to the panel's text box.
+ * A held key's repeats only move the cursor or type: engaging, picking, deciding and
+ * submitting each take a fresh press.
+ */
 export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelAction | null {
-  const canStop = context.running && !context.stopRequested;
-  // Esc and Ctrl+C stop the run first, as in the composer; Ctrl+C quits once nothing runs.
-  if (key.ctrl && key.name === "c") return canStop ? { type: "stop" } : { type: "exit" };
-  if (key.name === "escape" && !hasModifier(key)) {
-    if (canStop) return { type: "stop" };
-    if (context.running) return NONE;
-    if (context.kind === "approval") return null;
-    if (!context.input.dismissible) {
-      return { type: "hint", message: "This question needs an answer" };
-    }
-  } else if (hasModifier(key)) {
+  const action = resolveFreshKey(key, context);
+  if (!key.repeated || action === null || MOVE_KEYS.has(key.name)) return action;
+  switch (action.type) {
+    case "step-request":
+    case "none":
+    case "stop":
+    case "exit":
+      return action;
+    case "hint":
+      return action.form === undefined ? action : { type: "hint", message: REPEAT_HINT };
+    default:
+      return { type: "hint", message: REPEAT_HINT };
+  }
+}
+
+function resolveFreshKey(key: PanelKey, context: PanelKeyContext): PanelAction | null {
+  // Ctrl+C stops the run first, as in the composer; it quits once nothing runs.
+  if (key.ctrl && key.name === "c") {
+    return context.running && !context.stopRequested ? { type: "stop" } : { type: "exit" };
+  }
+  if (key.name === "tab" || (key.name === "escape" && !hasModifier(key))) {
+    return key.repeated ? NONE : { type: "leave" };
+  }
+  if (hasModifier(key) && !(context.kind === "question" && key.ctrl && key.name === "x")) {
     return null;
   }
 
-  if (key.name === "tab") return null;
   const step = stepRequestKey(key);
-  // An answer is out, or the request can't be answered: only moving to another one works.
-  if (context.busy) {
-    return step !== null && context.engagement === "engaged"
-      ? { type: "step-request", delta: step }
-      : NONE;
-  }
+  const onText =
+    context.kind === "question" &&
+    context.engagement === "engaged" &&
+    !context.busy &&
+    (() => {
+      const question = activeQuestion(context.input, context.form);
+      return question !== null && onTextRow(context.form, question);
+    })();
+  // Moving to another request works whatever state this one is in.
+  if (step !== null && !onText) return { type: "step-request", delta: step };
+  // An answer is out, or the request can't be answered.
+  if (context.busy) return NONE;
 
   // Disengaged, every key is used up; only Enter after a pause engages the panel.
   if (context.engagement !== "engaged") {
     if (isEnterKey(key.name) && !key.shift && context.engagement === "ready") {
-      return { type: "engage" };
+      return key.repeated ? NONE : { type: "engage" };
     }
     return {
       type: "hint",
@@ -310,7 +372,6 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
   }
 
   if (context.kind === "approval") {
-    if (step !== null) return { type: "step-request", delta: step };
     const digit = digitOf(key);
     const letter = key.name.length === 1 ? key.name.toLowerCase() : null;
     const choice =
@@ -358,8 +419,12 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
     return { type: "submit", answers };
   };
 
-  // Reached only when nothing runs and the provider allows it.
-  if (key.name === "escape") return { type: "dismiss" };
+  if (key.ctrl && key.name === "x") {
+    if (!input.dismissible) return { type: "hint", message: "This question needs an answer" };
+    return context.running
+      ? { type: "hint", message: "Ctrl+C stops the run; then Ctrl+X dismisses this" }
+      : { type: "dismiss" };
+  }
 
   if (typing) {
     if (isEnterKey(key.name) && !key.shift) return advance(form);
@@ -369,7 +434,6 @@ export function resolvePanelKey(key: PanelKey, context: PanelKeyContext): PanelA
     return null;
   }
 
-  if (step !== null) return { type: "step-request", delta: step };
   const lastRow = question.options.length - (allowsCustomAnswer(question) ? 0 : 1);
   if (key.name === "up" || key.name === "k") {
     return { type: "form", form: { ...form, cursor: Math.max(0, form.cursor - 1) } };

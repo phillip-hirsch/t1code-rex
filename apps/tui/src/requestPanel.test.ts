@@ -1,13 +1,15 @@
-import type { RuntimeRequestId } from "@t3tools/contracts";
+import { RunId, type RuntimeRequestId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   ENGAGE_HINT,
   PANEL_QUIET_MS,
+  availableChoices,
   createEngagementGuard,
   initialForm,
   pickActiveRequest,
   pressPanelKey,
+  requestRunStopped,
   resolvePanelKey,
   setTypedAnswer,
   stepRequest,
@@ -184,6 +186,19 @@ describe("engagement", () => {
     expect(guard.engaged(id)).toBe(false);
   });
 
+  it("engages on Tab into the panel only once the request has settled in view", () => {
+    let now = 0;
+    const guard = createEngagementGuard(() => now);
+    guard.show(id);
+    now += PANEL_QUIET_MS - 1;
+    // Too soon: the panel takes focus but stays disengaged until Enter after a pause.
+    expect(guard.enter(id)).toBe(false);
+    expect(guard.engaged(id)).toBe(false);
+    now += 1;
+    expect(guard.enter(id)).toBe(true);
+    expect(guard.engaged(id)).toBe(true);
+  });
+
   it("takes a click only once the request has been in view for the quiet period", () => {
     let now = 0;
     const guard = createEngagementGuard(() => now);
@@ -236,19 +251,29 @@ describe("resolvePanelKey: approvals", () => {
     expect(resolvePanelKey(key("s", { super: true }), context)).toBeNull();
   });
 
-  it("stops the run on Esc or Ctrl+C, and Ctrl+C quits once nothing runs", () => {
+  it("goes back to the composer on Esc or Tab, in any state", () => {
+    for (const state of [
+      context,
+      { ...context, engagement: "typing" as const },
+      { ...context, busy: true },
+      { ...context, running: true },
+    ]) {
+      expect(resolvePanelKey(key("escape"), state)).toEqual({ type: "leave" });
+      expect(resolvePanelKey(key("tab"), state)).toEqual({ type: "leave" });
+      expect(resolvePanelKey(key("tab", { shift: true }), state)).toEqual({ type: "leave" });
+    }
+  });
+
+  it("stops the run on Ctrl+C, and quits once nothing runs or a stop was sent", () => {
     const running = { ...context, running: true };
-    expect(resolvePanelKey(key("escape"), running)).toEqual({ type: "stop" });
     expect(resolvePanelKey(key("c", { ctrl: true }), running)).toEqual({ type: "stop" });
     // Disengaged or not, and even when the request can't be answered.
     expect(
-      resolvePanelKey(key("escape"), { ...running, engagement: "typing", busy: true }),
+      resolvePanelKey(key("c", { ctrl: true }), { ...running, engagement: "typing", busy: true }),
     ).toEqual({ type: "stop" });
     const stopping = { ...running, stopRequested: true };
-    expect(resolvePanelKey(key("escape"), stopping)).toEqual({ type: "none" });
     expect(resolvePanelKey(key("c", { ctrl: true }), stopping)).toEqual({ type: "exit" });
     expect(resolvePanelKey(key("c", { ctrl: true }), context)).toEqual({ type: "exit" });
-    expect(resolvePanelKey(key("escape"), context)).toBeNull();
   });
 
   it("never approves on Enter", () => {
@@ -265,8 +290,92 @@ describe("resolvePanelKey: approvals", () => {
       delta: -1,
     });
     expect(resolvePanelKey(key("5"), context)).toBeNull();
-    expect(resolvePanelKey(key("tab"), context)).toBeNull();
     expect(resolvePanelKey(key("y", { ctrl: true }), context)).toBeNull();
+  });
+
+  // N2: an approval that can't be answered must not trap the keyboard.
+  it("steps between requests while disengaged, busy, or unanswerable", () => {
+    for (const state of [
+      { ...context, engagement: "typing" as const },
+      { ...context, engagement: "ready" as const },
+      { ...context, busy: true },
+      { ...context, busy: true, engagement: "typing" as const, choices: [] },
+    ]) {
+      expect(resolvePanelKey(key("]"), state)).toEqual({ type: "step-request", delta: 1 });
+      expect(resolvePanelKey(key("["), state)).toEqual({ type: "step-request", delta: -1 });
+    }
+  });
+
+  // N4: holding a key must not answer; each decision takes a fresh press.
+  it("ignores a held key's repeats for engaging and deciding", () => {
+    expect(
+      resolvePanelKey(key("return", { repeated: true }), { ...context, engagement: "ready" }),
+    ).toEqual({ type: "none" });
+    for (const name of ["y", "1", "s", "2", "n", "c"]) {
+      expect(resolvePanelKey(key(name, { repeated: true }), context)?.type).toBe("hint");
+    }
+    // Repeats still step between requests.
+    expect(resolvePanelKey(key("]", { repeated: true }), context)?.type).toBe("step-request");
+    // And a held Tab or Esc doesn't bounce focus.
+    expect(resolvePanelKey(key("tab", { repeated: true }), context)).toEqual({ type: "none" });
+  });
+
+  it("holding Enter engages once, then decides nothing", () => {
+    let now = 0;
+    const guard = createEngagementGuard(() => now);
+    guard.show(request.requestId);
+    now += PANEL_QUIET_MS;
+    const at = (engagement: ReturnType<typeof guard.press>) => ({ ...context, engagement });
+    const actions = [
+      pressPanelKey(guard, request.requestId, key("return"), at),
+      ...Array.from({ length: 20 }, () => {
+        now += 30;
+        return pressPanelKey(guard, request.requestId, key("return", { repeated: true }), at);
+      }),
+    ];
+    expect(actions[0]).toEqual({ type: "engage" });
+    expect(actions.some((action) => action?.type === "decide")).toBe(false);
+  });
+});
+
+// N3: Stop ends the run an approval belongs to; approving it then would act for nothing.
+describe("a stopped run's requests", () => {
+  const stopFor = (stopSentRunId: string | null, stopRequested = false) => ({
+    stopSentRunId,
+    stopRequested,
+  });
+
+  it("knows the run was stopped from the run itself, or from the stop that was sent", () => {
+    expect(requestRunStopped({ runId: null, runEnded: true }, stopFor(null))).toBe(true);
+    expect(
+      requestRunStopped({ runId: RunId.make("run-1"), runEnded: false }, stopFor("run-1")),
+    ).toBe(true);
+    expect(
+      requestRunStopped({ runId: RunId.make("run-2"), runEnded: false }, stopFor("run-1")),
+    ).toBe(false);
+    // No known run: the active run's stop counts.
+    expect(requestRunStopped({ runId: null, runEnded: false }, stopFor("x", true))).toBe(true);
+    expect(requestRunStopped({ runId: null, runEnded: false }, stopFor("x", false))).toBe(false);
+  });
+
+  it("offers only Decline, so 1, y and s can't approve", () => {
+    const [request] = queueOf(["a"]);
+    if (request?.kind !== "approval") throw new Error("expected an approval");
+    const choices = availableChoices(approvalChoices(request.approval), true);
+    expect(choices.map((choice) => choice.decision)).toEqual(["decline"]);
+    const context = {
+      kind: "approval" as const,
+      choices,
+      busy: false,
+      engagement: "engaged" as const,
+      ...idle,
+    };
+    expect(resolvePanelKey(key("1"), context)).toEqual({ type: "decide", decision: "decline" });
+    expect(resolvePanelKey(key("n"), context)).toEqual({ type: "decide", decision: "decline" });
+    for (const name of ["y", "s", "a", "2", "3", "4"]) {
+      expect(resolvePanelKey(key(name), context)?.type).not.toBe("decide");
+    }
+    expect(availableChoices(approvalChoices(request.approval), false)).toHaveLength(4);
   });
 });
 
@@ -366,14 +475,17 @@ describe("resolvePanelKey: questions", () => {
     });
   });
 
-  it("dismisses on Esc only when the provider allows it and nothing runs", () => {
+  it("dismisses on Ctrl+X only when the provider allows it and nothing runs", () => {
     const input = questionInput([question("q1", ["A"])]);
-    expect(press(input, initialForm(input), "escape")).toEqual({
+    const ctrlX = { ctrl: true };
+    expect(press(input, initialForm(input), "x", ctrlX)).toEqual({
       type: "hint",
       message: "This question needs an answer",
     });
     const dismissible = questionInput([question("q1", ["A"])], { responseMode: "message" });
-    expect(press(dismissible, initialForm(dismissible), "escape")).toEqual({ type: "dismiss" });
+    expect(press(dismissible, initialForm(dismissible), "x", ctrlX)).toEqual({ type: "dismiss" });
+    // Esc goes back to the composer; it never dismisses.
+    expect(press(dismissible, initialForm(dismissible), "escape")).toEqual({ type: "leave" });
     const context = {
       kind: "question" as const,
       form: initialForm(input),
@@ -382,14 +494,28 @@ describe("resolvePanelKey: questions", () => {
       running: true,
       stopRequested: false,
     };
-    // A running question, dismissible or not, stops the run first.
-    expect(resolvePanelKey(key("escape"), { ...context, input })).toEqual({ type: "stop" });
-    expect(resolvePanelKey(key("escape"), { ...context, input: dismissible })).toEqual({
-      type: "stop",
-    });
+    // While a run is going, dismissing waits for a stop.
+    expect(resolvePanelKey(key("x", ctrlX), { ...context, input: dismissible })?.type).toBe("hint");
     expect(resolvePanelKey(key("c", { ctrl: true }), { ...context, input })).toEqual({
       type: "stop",
     });
+  });
+
+  it("ignores a held Enter's repeats, so a default answer isn't submitted", () => {
+    const input = questionInput([question("q1", ["Red", "Blue"]), question("q2", ["A", "B"])]);
+    const form = initialForm(input);
+    expect(press(input, form, "return", { repeated: true })?.type).toBe("hint");
+    expect(press(input, form, "space", { repeated: true })?.type).toBe("hint");
+    expect(press(input, form, "1", { repeated: true })?.type).toBe("hint");
+    // Moving the cursor may repeat.
+    expect(press(input, form, "down", { repeated: true })?.type).toBe("form");
+    // A fresh press still advances.
+    expect(press(input, form, "return")?.type).toBe("form");
+  });
+
+  it("types [ and ] into the text box instead of stepping requests", () => {
+    const input = questionInput([question("q1", [])]);
+    expect(press(input, initialForm(input), "]", { sequence: "]" })).toBeNull();
   });
 
   it("does nothing but step requests while its answer is out", () => {

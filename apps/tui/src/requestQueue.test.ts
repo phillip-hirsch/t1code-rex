@@ -1,3 +1,4 @@
+import { RunId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -128,6 +129,29 @@ describe("deriveRequestQueue", () => {
     );
     expect(request?.subagent).toBeNull();
   });
+
+  it("finds the run a request belongs to, and whether that run ended", () => {
+    const nodes = [
+      node("node-r1", "approval_request", "node-tool"),
+      node("node-tool", "tool_call", "node-root", "run-1"),
+      node("node-root", "root_turn", null, "run-1"),
+    ];
+    const at = (status: "running" | "waiting" | "interrupted" | "completed" | null) =>
+      deriveRequestQueue(
+        source({
+          runtimeRequests: [runtimeRequest("r1", "command")],
+          nodes,
+          turnItems: [approvalItem("r1")],
+          runs: status === null ? [] : [{ id: RunId.make("run-1"), status }],
+        }),
+      )[0];
+    expect(at("waiting")).toMatchObject({ runId: "run-1", runEnded: false });
+    expect(at("running")).toMatchObject({ runId: "run-1", runEnded: false });
+    expect(at("interrupted")).toMatchObject({ runId: "run-1", runEnded: true });
+    expect(at("completed")).toMatchObject({ runId: "run-1", runEnded: true });
+    // A run the thread hasn't listed yet isn't taken as ended.
+    expect(at(null)).toMatchObject({ runId: "run-1", runEnded: false });
+  });
 });
 
 describe("approvalChoices", () => {
@@ -190,6 +214,23 @@ describe("createRequestQueueSelector", () => {
       }),
     );
     expect(streamed).toBe(first);
+  });
+
+  it("picks up a run that stopped while its request stayed pending", () => {
+    const select = createRequestQueueSelector();
+    const fields = {
+      runtimeRequests: [runtimeRequest("r1", "command")],
+      turnItems: [approvalItem("r1")],
+      nodes: [node("node-r1", "approval_request", null, "run-1")],
+    };
+    const running = select(
+      source({ ...fields, runs: [{ id: RunId.make("run-1"), status: "waiting" }] }),
+    );
+    const stopped = select(
+      source({ ...fields, runs: [{ id: RunId.make("run-1"), status: "interrupted" }] }),
+    );
+    expect(running[0]?.runEnded).toBe(false);
+    expect(stopped[0]?.runEnded).toBe(true);
   });
 
   it("returns the shared empty queue once nothing is pending", () => {

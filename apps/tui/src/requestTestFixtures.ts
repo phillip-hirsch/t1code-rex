@@ -50,11 +50,12 @@ export function node(
   id: string,
   kind: string,
   parentNodeId: string | null,
+  runId: string | null = null,
 ): OrchestrationV2ExecutionNode {
   return decodeNode({
     id,
     threadId: REQUEST_THREAD_ID,
-    runId: null,
+    runId,
     parentNodeId,
     rootNodeId: "node-root",
     kind,
@@ -155,5 +156,5 @@ export function question(
 }
 
 export function source(fields: Partial<RequestQueueSource>): RequestQueueSource {
-  return { runtimeRequests: [], turnItems: [], nodes: [], subagents: [], ...fields };
+  return { runtimeRequests: [], turnItems: [], nodes: [], subagents: [], runs: [], ...fields };
 }

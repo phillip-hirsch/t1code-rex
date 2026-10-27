@@ -57,6 +57,8 @@ interface Job {
   attempt: number;
   status: ResponseStatus;
   cancelRetry: (() => void) | null;
+  /** The attempt out now, if any. */
+  inFlight: Promise<void> | null;
 }
 
 /**
@@ -96,8 +98,12 @@ export function createRequestResponder(options: RequestResponderOptions) {
 
   const track = (job: Job) => {
     const attempt = run(job);
+    job.inFlight = attempt;
     running.add(attempt);
-    void attempt.finally(() => running.delete(attempt));
+    void attempt.finally(() => {
+      running.delete(attempt);
+      if (job.inFlight === attempt) job.inFlight = null;
+    });
   };
 
   const run = async (job: Job): Promise<void> => {
@@ -146,12 +152,21 @@ export function createRequestResponder(options: RequestResponderOptions) {
         attempt: 0,
         status: { state: "sending", response },
         cancelRetry: null,
+        inFlight: null,
       };
       jobs.set(requestId, job);
       track(job);
       return true;
     },
     status(requestId: RuntimeRequestId): ResponseStatus | null {
+      return jobs.get(requestId)?.status ?? null;
+    },
+    /**
+     * Where a request's response stands once the attempt out now has its reply: "sent",
+     * "failed", or "waiting" for a retry. Null once it resolved and was pruned.
+     */
+    async outcome(requestId: RuntimeRequestId): Promise<ResponseStatus | null> {
+      await jobs.get(requestId)?.inFlight;
       return jobs.get(requestId)?.status ?? null;
     },
     /** Clears a turned-down response's error, e.g. once the user saw it and moved on. */

@@ -42,6 +42,16 @@ TR3X_TUI_ATTACH_ONLY=1 TR3X_HOST=127.0.0.1 TR3X_PORT=3773 \
 
 Only one main window saves prefs for a config directory. The first one holds an OS file lock on `prefs.lock.db` next to `prefs.json` until it exits. Any other main window reads prefs but doesn't save them, and its footer says "prefs not saved here". The OS releases the lock when the owner dies, even from `kill -9`, so the next window takes it. A `prefs.json.lock` left by an older build is ignored and safe to delete.
 
+## Approvals and questions
+
+When an agent asks for approval or asks a question, a panel shows it above the composer. The composer keeps focus, so typing and Enter work as before.
+
+- **Tab** or a click moves focus to the panel; **Esc** or **Tab** goes back. Focus also goes back when the request changes. If the request appeared less than 0.75 s before, the panel waits for Enter first.
+- Approvals: `y`/`1` approve once, `s`/`2` approve for this session, `n` decline, `c` decline and stop the run. Enter never approves. Questions: `↑↓` move, `1-9` or Space pick, `⏎` next or submit, `Ctrl+X` dismisses when the question allows it. `[` and `]` step between requests. Ctrl+C stops the run.
+- Holding a key never answers: a held key's repeats only move the cursor.
+- As in upstream's web app, sending a message while an approval is shown declines it and steers the run with your message. A request that arrives while you're typing stays out of view until you pause for 1.5 s, send or leave the composer, so that send leaves it alone.
+- After a stop, a pending approval can only be declined, to clear it.
+
 ## Rex
 
 When tr3x runs inside a Rex session (`REX_SESSION` is set), the command palette (`⌘K`, or `Ctrl+K`) gets a Rex section:
