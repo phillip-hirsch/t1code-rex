@@ -9,6 +9,7 @@ import {
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import type { ComposerDispatch, UnconfirmedComposerSend } from "./composerSend.ts";
 import type { TuiPaths } from "./config.ts";
 import type { TuiThemeId } from "./theme.ts";
 
@@ -33,6 +34,8 @@ export interface PersistedComposerDraft {
   readonly text: string;
   readonly attachments: readonly PersistedComposerImageAttachment[];
   readonly mentions?: readonly PersistedComposerMention[];
+  /** Why tr3x put the text back (e.g. "maybe not sent"), until it's edited or sent. */
+  readonly notice?: string;
 }
 
 export interface PersistedDraftThreadState {
@@ -49,6 +52,10 @@ export interface TuiPrefs {
   readonly threadLastVisitedAtById?: Readonly<Record<string, string>>;
   readonly draftThreadsByProjectId?: Readonly<Record<string, PersistedDraftThreadState>>;
   readonly composerDraftsByThreadId?: Readonly<Record<string, PersistedComposerDraft>>;
+  /** Messages that went out unconfirmed when tr3x quit; the next launch checks they landed. */
+  readonly composerUnconfirmedSends?: readonly UnconfirmedComposerSend[];
+  /** What Enter does while a run is busy, as upstream's "Follow-up behavior"; steer by default. */
+  readonly followUpBehavior?: ComposerDispatch;
   readonly mainView?:
     | "thread"
     | "settings"

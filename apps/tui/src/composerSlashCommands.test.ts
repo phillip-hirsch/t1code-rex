@@ -44,6 +44,8 @@ describe("composer slash commands", () => {
       dispatch: "steer",
       text: "use tabs\nnot spaces",
     });
+    expect(resolveComposerSlashAction("/resume")).toEqual({ type: "resume" });
+    expect(resolveComposerSlashAction("/discard")).toEqual({ type: "discard" });
     expect(resolveComposerSlashAction("/queue")).toEqual({
       type: "error",
       message: "Type a message after /queue",

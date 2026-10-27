@@ -13,7 +13,7 @@ const idle: ComposerKeyState = {
 };
 
 describe("resolveComposerKey", () => {
-  it("sends on Enter, steers on Alt+Enter, and leaves Shift+Enter to the textarea", () => {
+  it("sends on Enter, uses the alternate send on Cmd/Ctrl/Alt+Enter, and leaves Shift+Enter to the textarea", () => {
     expect(resolveComposerKey({ name: "return" }, { ...idle, hasText: true })).toEqual({
       type: "submit",
       alternate: false,
@@ -22,7 +22,15 @@ describe("resolveComposerKey", () => {
       type: "submit",
       alternate: true,
     });
+    // Upstream's alternate is mod+Enter: Cmd on macOS (super under kitty), Ctrl elsewhere.
+    for (const modifier of [{ super: true }, { ctrl: true }, { option: true }]) {
+      expect(resolveComposerKey({ name: "return", ...modifier }, idle)).toEqual({
+        type: "submit",
+        alternate: true,
+      });
+    }
     expect(resolveComposerKey({ name: "return", shift: true }, idle)).toBeNull();
+    // Ctrl+J still adds a newline.
     expect(resolveComposerKey({ name: "linefeed" }, idle)).toBeNull();
   });
 

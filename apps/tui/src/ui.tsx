@@ -38,7 +38,12 @@ import packageJson from "../package.json" with { type: "json" };
 import { copyTextToClipboard } from "./clipboardText.ts";
 import { QueuedMessages, type ProviderBadge } from "./composer.tsx";
 import { ComposerDock, type ComposerDockHandle } from "./composerDock.tsx";
-import { describeSendFailure, type ComposerTarget } from "./composerSend.ts";
+import {
+  DEFAULT_FOLLOW_UP_BEHAVIOR,
+  describeSendFailure,
+  type ComposerTarget,
+} from "./composerSend.ts";
+import { checkUnconfirmedSends } from "./composerRecovery.ts";
 import { createComposerSender } from "./composerSender.ts";
 import {
   applySettingsPatch,
@@ -115,7 +120,8 @@ export interface AppProps {
   /** A main window that found prefs.json locked by another one; it says it won't save. */
   readonly prefsLockedOut?: boolean;
   readonly cwd: string;
-  readonly interruptRequestToken?: number;
+  /** Registers what a quit signal runs; returns a function that unregisters it. */
+  readonly onSignalQuit?: (quit: () => void) => () => void;
   readonly onRequestExit?: () => void;
   readonly threadWindowLaunch?: ThreadWindowLaunch | null;
 }
@@ -312,7 +318,7 @@ function Shell(props: AppProps) {
     logger,
     paths,
     threadWindowLaunch,
-    interruptRequestToken,
+    onSignalQuit,
     onRequestExit,
   } = props;
   const palette = theme.palette;
@@ -367,12 +373,13 @@ function Shell(props: AppProps) {
         const timer = setTimeout(run, delayMs);
         return () => clearTimeout(timer);
       },
-      onFailure: (send, error, action) =>
-        logger.log("composer.send.failed", {
-          threadId: send.target.threadId,
-          commandId: send.commandId,
+      resumeQueue: connection.resumeQueue,
+      onFailure: (job, error, action) =>
+        logger.log(job.kind === "send" ? "composer.send.failed" : "composer.resume.failed", {
+          threadId: job.threadId,
+          commandId: job.commandId,
           action,
-          error: describeSendFailure(error),
+          error: action === "stuck" ? "no reply yet" : describeSendFailure(error),
         }),
     }),
   );
@@ -409,6 +416,44 @@ function Shell(props: AppProps) {
   );
   const [panelHints, setPanelHints] = useState("");
   const [requestsShown, setRequestsShown] = useState(false);
+  // Messages the last quit couldn't confirm: dropped if their thread has them, else restored.
+  useEffect(
+    () =>
+      checkUnconfirmedSends({
+        store: composerStore,
+        lookupThread: connection.fetchFullThreadSnapshot,
+        projectExists: (projectId) =>
+          connection.registry.get(connection.hasShellSnapshotAtom)
+            ? connection.registry
+                .get(connection.projectsAtom)
+                .some((project) => project.id === projectId)
+            : null,
+        mintThreadId: () => ThreadId.make(NodeCrypto.randomUUID()),
+        schedule: (run, delayMs) => {
+          const timer = setTimeout(run, delayMs);
+          return () => clearTimeout(timer);
+        },
+        onMoved: (_record, projectId) => {
+          const project = connection.registry
+            .get(connection.projectsAtom)
+            .find((entry) => entry.id === projectId);
+          setStatus(`Unsent message moved to a new thread in ${project?.title ?? "its project"}`);
+        },
+        onOrphaned: () => setStatus("Unsent message's project is gone; /recover"),
+      }),
+    [composerStore, connection],
+  );
+  // Forget modes and launches the shell now lists.
+  const listedThreads = sidebar.threadsById;
+  useEffect(
+    () =>
+      sender.reconcile((threadId) => {
+        const thread = listedThreads.get(threadId);
+        return thread ? threadSettings(thread) : null;
+      }),
+    [sender, listedThreads],
+  );
+  const followUpBehavior = props.initialPrefs.followUpBehavior ?? DEFAULT_FOLLOW_UP_BEHAVIOR;
 
   const connectionState = Option.getOrNull(AsyncResult.value(connectionResult));
   const connectionView = describeConnection(connectionState, connection.session.mode);
@@ -431,15 +476,38 @@ function Shell(props: AppProps) {
   // Rex tabs open from the main window only; a thread tab never opens more tabs.
   const rexTabs = rex !== null && !threadWindowLaunch;
 
-  // Unsaved draft edits go to disk before the app exits.
-  const requestExit = useCallback(() => {
+  // A window that can't save prefs asks once before dropping unsent messages.
+  const [exitArmed, setExitArmed] = useState(false);
+  useEffect(() => {
+    if (!exitArmed) return;
+    const timer = setTimeout(() => setExitArmed(false), 5_000);
+    return () => clearTimeout(timer);
+  }, [exitArmed]);
+  // Unsent messages and unsaved draft edits go to disk before the app exits.
+  const finishExit = useCallback(() => {
+    if (composerStore.canPersist) {
+      sender.handOff();
+    } else {
+      const pending = sender.pendingCount();
+      if (pending > 0) logger.log("composer.sends.dropped", { count: pending });
+    }
     composerStore.flush();
     onRequestExit?.();
-  }, [composerStore, onRequestExit]);
+  }, [composerStore, logger, onRequestExit, sender]);
+  const requestExit = useCallback(() => {
+    const pending = composerStore.canPersist ? 0 : sender.pendingCount();
+    if (pending > 0 && !exitArmed) {
+      setStatus(
+        `${pending} message${pending === 1 ? "" : "s"} not sent yet, and this window can't save them. Quit again to drop them`,
+      );
+      setExitArmed(true);
+      return;
+    }
+    finishExit();
+  }, [composerStore, exitArmed, finishExit, sender]);
 
-  useEffect(() => {
-    if ((interruptRequestToken ?? 0) > 0) requestExit();
-  }, [interruptRequestToken, requestExit]);
+  // A signal quits without asking.
+  useEffect(() => onSignalQuit?.(finishExit), [onSignalQuit, finishExit]);
 
   // Sends that lost the connection go out again, with the same ids, once it's back.
   const connected = connectionView.label === "Connected";
@@ -701,7 +769,13 @@ function Shell(props: AppProps) {
     if (!activeThread || !running) return;
     const runKey = activeRunId ?? "unknown";
     setStopRequestedRunId(runKey);
-    setStatus("Stopping");
+    // Messages not sent yet stay here until resumed, like the queue the server holds.
+    const held = sender.hold(activeThread.id);
+    setStatus(
+      held === 0
+        ? "Stopping"
+        : `Stopping; ${held} unsent message${held === 1 ? "" : "s"} held. Enter or /resume sends, /discard edits`,
+    );
     void connection
       .interruptTurn({
         commandId: CommandId.make(NodeCrypto.randomUUID()),
@@ -1084,6 +1158,7 @@ function Shell(props: AppProps) {
                   providerBadge,
                   running,
                   stopRequested,
+                  followUpBehavior,
                   clipboardDir: NodePath.join(paths.stateHomeDir, "clipboard"),
                   onStop: stopRun,
                   onExit: requestExit,

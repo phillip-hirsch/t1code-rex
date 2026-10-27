@@ -21,18 +21,23 @@ export type ComposerTarget =
 export type ComposerAttachment = UploadChatImageAttachment & { readonly id: string };
 
 /**
- * How a message meets a run in progress. Enter queues behind it and Alt+Enter steers it; on
- * an idle thread both start a run (client-runtime and the server resolve that, from the
- * thread's live state). So the choice never depends on the TUI's cached run state, which
- * can be stale: an explicit `/queue` must never become a dispatch that steers a live run.
+ * How a message meets a busy run: Enter steers and the alternate key queues, as upstream's
+ * default `followUpBehavior`, which the pref of that name swaps. An idle thread starts a run
+ * either way, resolved from live state, so this never reads the TUI's cached run state.
  */
 export type ComposerDispatch = "queue" | "steer";
 
+export const DEFAULT_FOLLOW_UP_BEHAVIOR: ComposerDispatch = "steer";
+
 export function chooseDispatch(input: {
   readonly alternate: boolean;
+  readonly followUpBehavior?: ComposerDispatch;
   readonly requested?: ComposerDispatch;
 }): ComposerDispatch {
-  return input.requested ?? (input.alternate ? "steer" : "queue");
+  if (input.requested !== undefined) return input.requested;
+  const primary = input.followUpBehavior ?? DEFAULT_FOLLOW_UP_BEHAVIOR;
+  if (!input.alternate) return primary;
+  return primary === "steer" ? "queue" : "steer";
 }
 
 /** One message on its way to the server. Its ids stay fixed, so a retry can't double-send. */
@@ -71,6 +76,24 @@ export type ComposerSettingsCommand =
       readonly value: ComposerSettings["interactionMode"];
     };
 
+/** One step of a send's plan: a mode change, then the message itself. */
+export type ComposerStage = ComposerSettingsCommand | { readonly kind: "start-turn" };
+
+/**
+ * A message that went out unconfirmed before tr3x quit. The next launch looks for its id on
+ * the thread, and puts the text back in the composer if it isn't there; it's never resent.
+ */
+export interface UnconfirmedComposerSend {
+  readonly threadId: ThreadId;
+  /** Where it goes back if the thread is gone. Absent in records saved before it was added. */
+  readonly projectId?: ProjectId;
+  /** It launched a new-thread draft, which stays open until the thread has the message. */
+  readonly launch: boolean;
+  readonly messageId: MessageId;
+  readonly text: string;
+  readonly attachments: ReadonlyArray<ComposerAttachment>;
+}
+
 /**
  * Mode changes a send applies first, each with an id derived from the send's own. `base` is
  * what the thread will have when the send goes out: the thread's settings now, or those of
@@ -78,19 +101,20 @@ export type ComposerSettingsCommand =
  */
 export function settingsCommandsForSend(
   send: ComposerSend,
-  base: ComposerSettings | null,
+  /** "unknown": a mode command was dropped mid-flight, so set both modes explicitly. */
+  base: ComposerSettings | null | "unknown",
 ): ReadonlyArray<ComposerSettingsCommand> {
   // A new thread launches with its settings; nothing to change first.
   if (send.target.kind === "draft" || base === null) return [];
   const commands: Array<ComposerSettingsCommand> = [];
-  if (send.settings.runtimeMode !== base.runtimeMode) {
+  if (base === "unknown" || send.settings.runtimeMode !== base.runtimeMode) {
     commands.push({
       kind: "runtime-mode",
       commandId: CommandId.make(`${send.commandId}:runtime-mode`),
       value: send.settings.runtimeMode,
     });
   }
-  if (send.settings.interactionMode !== base.interactionMode) {
+  if (base === "unknown" || send.settings.interactionMode !== base.interactionMode) {
     commands.push({
       kind: "interaction-mode",
       commandId: CommandId.make(`${send.commandId}:interaction-mode`),
@@ -169,10 +193,10 @@ export function classifySendFailure(error: unknown, interrupted: boolean): "retr
   return isTransportConnectionErrorMessage(message) ? "retry" : "restore";
 }
 
-const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000];
+const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 
 export function retryDelayMs(attempt: number): number {
-  return RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)] ?? 15_000;
+  return RETRY_DELAYS_MS[Math.min(attempt, RETRY_DELAYS_MS.length - 1)] ?? 60_000;
 }
 
 /** A readable reason for a send the server turned down. */

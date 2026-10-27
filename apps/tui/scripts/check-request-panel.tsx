@@ -12,6 +12,7 @@ import { ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contrac
 import { act, createRef, useImperativeHandle, useRef, useState } from "react";
 
 import { ComposerDock, type ComposerDockHandle, type DockFocus } from "../src/composerDock.tsx";
+import { DEFAULT_FOLLOW_UP_BEHAVIOR } from "../src/composerSend.ts";
 import { createComposerSender } from "../src/composerSender.ts";
 import type { ComposerSettings } from "../src/composerSettings.ts";
 import { createComposerStore } from "../src/composerStore.ts";
@@ -134,6 +135,7 @@ async function mount(
     setRuntimeMode: () => Promise.resolve({ ok: true }),
     setInteractionMode: () => Promise.resolve({ ok: true }),
     threadSettings: () => settings,
+    resumeQueue: () => Promise.resolve({ ok: true }),
     schedule: () => () => undefined,
   });
   const panelStore = createRequestPanelStore();
@@ -157,6 +159,7 @@ async function mount(
             store,
             theme: DEFAULT_TUI_THEME,
             baseSettings: settings,
+            followUpBehavior: DEFAULT_FOLLOW_UP_BEHAVIOR,
             modelLabel: () => "Claude Haiku 5.5",
             providerBadge: () => ({ icon: "✱", color: "#ffffff" }),
             running: options.running ?? true,
@@ -250,7 +253,12 @@ async function checkTypingThenRequest(): Promise<void> {
   await act(() => setup.mockInput.typeText("yes", 30));
   await settle(setup.renderOnce);
   check("N1: Enter sent the draft", turns[0]?.message.text, "please also update the README");
-  check("N1: as a follow-up, the request having been out of view", turns[0]?.dispatchMode, "queue");
+  // A plain follow-up: Enter while busy uses the follow-up default (steer, as upstream).
+  check(
+    "N1: as a plain follow-up, the request having been out of view",
+    turns[0]?.dispatchMode,
+    DEFAULT_FOLLOW_UP_BEHAVIOR,
+  );
   check("N1: nothing was approved or declined", calls.length, 0);
   check("N1: yes went into the composer", frame().includes("yes"), true);
   check("N1: the request shows after the send", frame().includes("$ ls > listing.txt"), true);

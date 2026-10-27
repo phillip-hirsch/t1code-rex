@@ -69,6 +69,7 @@ function setup(options: {
     setRuntimeMode: () => Promise.resolve(ok),
     setInteractionMode: () => Promise.resolve(ok),
     threadSettings: () => settings,
+    resumeQueue: () => Promise.resolve(ok),
     schedule: () => () => undefined,
   });
   const responder = createRequestResponder({
