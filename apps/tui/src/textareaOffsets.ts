@@ -17,10 +17,14 @@ export function cursorStringOffset(textarea: Textarea): number {
  * as Backspace does, until that much text is gone.
  */
 export function replaceBeforeCursor(
-  textarea: Textarea & Pick<TextareaRenderable, "deleteCharBackward" | "insertText">,
+  textarea: Textarea &
+    Pick<TextareaRenderable, "clearSelection" | "deleteCharBackward" | "insertText">,
   length: number,
   text: string,
 ): void {
+  // With a selection, Backspace deletes the selection instead of one grapheme, so the
+  // length check below would remove the wrong text.
+  textarea.clearSelection();
   const target = textarea.plainText.length - length;
   while (textarea.plainText.length > target && textarea.deleteCharBackward()) {
     // Each pass removes one grapheme.

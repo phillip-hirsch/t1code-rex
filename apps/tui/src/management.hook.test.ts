@@ -65,6 +65,8 @@ function setup(input: {
   readonly projects: ReadonlyArray<OrchestrationProjectShell>;
   readonly threads: ReadonlyArray<EnvironmentThreadShell>;
   readonly archived?: TuiActionResult<OrchestrationV2ArchivedShellSnapshot>;
+  /** Replaces the archived reply, e.g. with one the test resolves later. */
+  readonly archivedReply?: () => Promise<TuiActionResult<OrchestrationV2ArchivedShellSnapshot>>;
   readonly folders?: Record<string, ReadonlyArray<string>>;
 }) {
   const prefs: { current: TuiPrefs } = { current: {} };
@@ -124,6 +126,7 @@ function setup(input: {
     },
     refreshArchivedThreads: () => undefined,
     fetchArchivedShellSnapshot: () =>
+      input.archivedReply?.() ??
       Promise.resolve(
         input.archived ?? {
           ok: true,
@@ -181,6 +184,8 @@ function setup(input: {
   });
   return {
     hook,
+    registry,
+    source,
     store,
     sender,
     prefs,
@@ -290,6 +295,65 @@ describe("thread and project management, PR 15 Sol audit round 1", () => {
     const { hook } = setup({ projects: [projectShell("p")], threads: [] });
     await hook.actAsync(() => hook.current.requestRemoveProject("p"));
     expect(hook.current.confirm?.steps.map((step) => step.confirmLabel)).toEqual(["Remove"]);
+  });
+
+  it("N2: a thread that appears while archived threads load counts, and goes with the project", async () => {
+    let resolveArchived!: (reply: TuiActionResult<OrchestrationV2ArchivedShellSnapshot>) => void;
+    const { hook, registry, source, sender } = setup({
+      projects: [projectShell("p")],
+      threads: [],
+      archivedReply: () =>
+        new Promise((resolve) => {
+          resolveArchived = resolve;
+        }),
+    });
+    const request = hook.current.requestRemoveProject("p");
+    // A thread arrives through the shell, with a queued message, before the fetch returns.
+    hook.act(() => registry.set(source.threadShellsAtom, [presentedThread("t1", "p")]));
+    void sender.send(send("t1", "1", "queued"));
+    await hook.actAsync(async () => {
+      resolveArchived({
+        ok: true,
+        value: { schemaVersion: 1, snapshotSequence: 1, projects: [], threads: [] },
+      });
+      await request;
+    });
+    expect(hook.current.confirm?.steps.map((step) => step.confirmLabel)).toEqual([
+      "Continue",
+      "Remove project",
+    ]);
+    hook.act(() => hook.current.pressConfirm("confirm"));
+    await hook.actAsync(async () => {
+      hook.current.pressConfirm("confirm");
+      await settle();
+    });
+    expect(sender.pendingCount()).toBe(0);
+  });
+
+  it("N2: a newer remove request drops the dialog of one still counting", async () => {
+    const resolvers: Array<(reply: TuiActionResult<OrchestrationV2ArchivedShellSnapshot>) => void> =
+      [];
+    const { hook } = setup({
+      projects: [projectShell("p"), projectShell("q")],
+      threads: [],
+      archivedReply: () =>
+        new Promise((resolve) => {
+          resolvers.push(resolve);
+        }),
+    });
+    const first = hook.current.requestRemoveProject("p");
+    const second = hook.current.requestRemoveProject("q");
+    const empty = {
+      ok: true as const,
+      value: { schemaVersion: 1, snapshotSequence: 1, projects: [], threads: [] },
+    };
+    await hook.actAsync(async () => {
+      resolvers[1]?.(empty);
+      await second;
+      resolvers[0]?.(empty);
+      await first;
+    });
+    expect(hook.current.confirm?.steps[0]?.title).toBe('Remove project "q"?');
   });
 
   it("S7: folder suggestions disappear as soon as the path changes, so a quick Tab can't apply a stale one", async () => {

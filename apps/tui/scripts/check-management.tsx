@@ -337,6 +337,25 @@ async function checkMentionUnicode(): Promise<void> {
     `中 ${link} tail`,
   );
   mounted.destroy();
+
+  // N1 (round 2): with a selection, Backspace would delete the selection instead of the
+  // trigger, so completion clears it first and replaces only the "@m" before the cursor.
+  const selected = await mountComposer({ focused: true });
+  act(() => selected.composer.current?.insertText("keep @ma tail"));
+  for (let step = 0; step < 5; step += 1) {
+    act(() => selected.setup.mockInput.pressArrow("left"));
+  }
+  act(() => selected.setup.mockInput.pressArrow("left", { shift: true }));
+  await settle(selected.setup.renderOnce, 6);
+  check('N1: with "a" selected, it searches for "m"', selected.searches.at(-1)?.query, "m");
+  act(() => selected.setup.mockInput.pressTab());
+  await settle(selected.setup.renderOnce);
+  check(
+    "N1: and Tab replaces exactly the trigger, keeping the rest",
+    selected.store.getDraft(threadId).text,
+    `keep ${link}a tail`,
+  );
+  selected.destroy();
 }
 
 // A 1×1 PNG.

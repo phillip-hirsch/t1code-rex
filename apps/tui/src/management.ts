@@ -20,7 +20,7 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { copyTextToClipboard } from "./clipboardText.ts";
 import type { ComposerSender } from "./composerSender.ts";
@@ -184,6 +184,11 @@ export function useManagement(options: ManagementOptions) {
   } = options;
   const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [prompt, setPrompt] = useState<PromptState | null>(null);
+  // The latest sidebar, for code that reads it after an await.
+  const sidebarRef = useRef(sidebar);
+  sidebarRef.current = sidebar;
+  /** Bumped by each remove-project request, so a superseded one drops its dialog. */
+  const removalRequest = useRef(0);
   /** Remounts the prompt's input so a picked suggestion's text lands with the cursor at its end. */
   const [promptRevision, setPromptRevision] = useState(0);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
@@ -422,29 +427,38 @@ export function useManagement(options: ManagementOptions) {
    */
   const requestRemoveProject = async (projectId: string) => {
     if (!sidebar.projectsById.has(projectId)) return;
+    const request = (removalRequest.current += 1);
     setStatus("Counting the project's threads…");
     const archived = await connection.fetchArchivedShellSnapshot();
+    if (request !== removalRequest.current) return;
     setStatus(null);
-    const project = sidebar.projectsById.get(projectId);
+    // The sidebar may have changed while the archived threads loaded.
+    const current = sidebarRef.current;
+    const project = current.projectsById.get(projectId);
     if (!project) return;
     const archivedIds = archived.ok
       ? archived.value.threads
           .filter((thread) => thread.projectId === projectId && thread.archivedAt !== null)
           .map((thread) => thread.id)
       : null;
-    const listedIds = [...sidebar.threadsById.values()]
-      .filter((thread) => thread.projectId === projectId)
-      .map((thread) => thread.id);
+    const listedIdsIn = (view: ManagementSidebar) =>
+      [...view.threadsById.values()]
+        .filter((thread) => thread.projectId === projectId)
+        .map((thread) => thread.id);
     const draftId = composerStore.getNewThreadDraft(projectId)?.threadId;
-    const threadIds = [...listedIds, ...(archivedIds ?? []), ...(draftId ? [draftId] : [])];
+    const threadIds = [
+      ...listedIdsIn(current),
+      ...(archivedIds ?? []),
+      ...(draftId ? [draftId] : []),
+    ];
     const pending = sender.pendingCount({ threadIds, projectId });
     const threads =
       archivedIds === null
         ? null
         : {
             listed:
-              (sidebar.threadCountByProject.get(ProjectId.make(projectId)) ?? 0) +
-              (sidebar.olderSettledByProject.get(ProjectId.make(projectId)) ?? 0),
+              (current.threadCountByProject.get(ProjectId.make(projectId)) ?? 0) +
+              (current.olderSettledByProject.get(ProjectId.make(projectId)) ?? 0),
             archived: archivedIds.length,
           };
     setConfirm({
@@ -456,7 +470,9 @@ export function useManagement(options: ManagementOptions) {
           force: true,
         });
         if (result.ok) {
-          forgetThreads(threadIds, projectId);
+          // Threads listed after the dialog opened go with the project too.
+          const latest = new Set([...threadIds, ...listedIdsIn(sidebarRef.current)]);
+          forgetThreads([...latest], projectId);
           if (draftId) composerStore.closeNewThreadDraft(draftId);
         }
         report("Remove project", result, `Removed project ${project.title}`);
