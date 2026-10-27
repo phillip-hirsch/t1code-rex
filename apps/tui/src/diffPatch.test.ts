@@ -6,7 +6,6 @@ import {
   layoutDiffFile,
   lineLimitShowingHunk,
   parseUnifiedDiff,
-  showTrailingWhitespace,
   type DiffFile,
 } from "./diffPatch.ts";
 
@@ -145,15 +144,6 @@ function bigFile(hunkSizes: ReadonlyArray<number>): DiffFile {
   return file;
 }
 
-describe("showTrailingWhitespace", () => {
-  it("marks trailing spaces and tabs of changed lines only", () => {
-    expect(showTrailingWhitespace("+after  \t")).toBe("+after··→");
-    expect(showTrailingWhitespace("-a b ")).toBe("-a b·");
-    expect(showTrailingWhitespace(" context  ")).toBe(" context  ");
-    expect(showTrailingWhitespace("+")).toBe("+");
-  });
-});
-
 describe("layoutDiffFile", () => {
   it("draws every hunk of a small file, each as a patch OpenTUI can parse", () => {
     const app = parseUnifiedDiff(TWO_FILES).files[0];
@@ -181,12 +171,62 @@ describe("layoutDiffFile", () => {
   it("notes a missing final newline under its hunk, unless the hunk is cut short", () => {
     const doc = parseUnifiedDiff(TWO_FILES).files[1];
     if (doc === undefined) throw new Error("no file");
-    expect(layoutDiffFile(doc, DIFF_FILE_LINE_BUDGET).chunks[0]?.eofNote).toBe(
+    expect(layoutDiffFile(doc, DIFF_FILE_LINE_BUDGET).chunks[0]?.notes).toEqual([
       "↵ No newline at end of file in the new version",
-    );
-    expect(layoutDiffFile(doc, 1).chunks[0]?.eofNote).toBeNull();
+    ]);
+    expect(layoutDiffFile(doc, 1).chunks[0]?.notes).toEqual([]);
     const app = parseUnifiedDiff(TWO_FILES).files[0];
-    expect(app && layoutDiffFile(app, DIFF_FILE_LINE_BUDGET).chunks[0]?.eofNote).toBeNull();
+    expect(app && layoutDiffFile(app, DIFF_FILE_LINE_BUDGET).chunks[0]?.notes).toEqual([]);
+  });
+
+  it("keeps line text as is, drops CRLF carriage returns, and names changes rows can't show", () => {
+    const file = parseUnifiedDiff(
+      [
+        "--- a/x.txt",
+        "+++ b/x.txt",
+        "@@ -1,8 +1,8 @@",
+        " one\r",
+        "-two\r",
+        "+two \t\r",
+        "-three",
+        "+three\r",
+        "-four\r",
+        "+four",
+        "-five",
+        "-six",
+        "+fiv",
+        "+six  ",
+        "+seven  ",
+        "-eight\r",
+        "+eight  ",
+        " nine\r",
+        "",
+      ].join("\n"),
+    ).files[0];
+    if (file === undefined) throw new Error("no file");
+    const chunk = layoutDiffFile(file, DIFF_FILE_LINE_BUDGET).chunks[0];
+    expect(chunk?.patch.split("\n").slice(3)).toEqual([
+      " one",
+      "-two",
+      "+two \t",
+      "-three",
+      "+three",
+      "-four",
+      "+four",
+      "-five",
+      "-six",
+      "+fiv",
+      "+six  ",
+      "+seven  ",
+      "-eight",
+      "+eight  ",
+      " nine",
+    ]);
+    expect(chunk?.notes).toEqual([
+      "· Trailing whitespace changed on lines 2, 6, 8",
+      "↵ Line endings changed (LF → CRLF) on line 3",
+      "↵ Line endings changed (CRLF → LF) on lines 4, 8",
+    ]);
   });
 
   it("caps a huge file, cutting the hunk that crosses the limit with matching counts", () => {

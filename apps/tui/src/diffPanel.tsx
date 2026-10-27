@@ -722,14 +722,15 @@ const DiffHunkView = memo(function DiffHunkView(props: {
         lineNumberBg={palette.surface}
         lineNumberFg={palette.subtle}
       />
-      {chunk.eofNote === null ? null : (
+      {chunk.notes.map((note) => (
         <text
+          key={note}
           wrapMode="none"
           truncate
-          content={chunk.eofNote}
+          content={note}
           style={{ fg: palette.warning, bg: palette.surface }}
         />
-      )}
+      ))}
     </box>
   );
 });

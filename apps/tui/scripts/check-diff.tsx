@@ -311,12 +311,16 @@ check(
 check("D8: the header names the run, not a turn", frame.includes("This run"), true);
 check("D8: and no other run's diff is asked for", runData.requested().join(","), "");
 
-// D9: , steps to the nearest diffable turn; trailing spaces of a changed line show as dots.
+// D9: , steps to the nearest diffable turn; a trailing whitespace change is named.
 act(() => runSetup.mockInput.pressKey(","));
 await settle(runSetup.renderOnce);
 frame = runSetup.captureCharFrame();
 check("D9: , steps back to turn 1", frame.includes("Turn 1 of 1 (latest)"), true);
-check("D9: trailing spaces show", /\+ two··· /.test(frame), true);
+check(
+  "D9: a trailing whitespace change is named",
+  frame.includes("· Trailing whitespace changed on line 2"),
+  true,
+);
 
 // D10: a newline-only change says which side has no final newline, in both views.
 check(
@@ -334,6 +338,74 @@ check(
   true,
 );
 runSetup.renderer.destroy();
+
+// D11-D12: CRLF lines and whitespace-only changes, which look the same once drawn.
+const CRLF_TURN = [
+  "diff --git a/crlf.txt b/crlf.txt",
+  "--- a/crlf.txt",
+  "+++ b/crlf.txt",
+  "@@ -1,5 +1,5 @@",
+  " one\r",
+  "-two\r",
+  "+two   \r",
+  "-b",
+  "+b   \t",
+  "-four",
+  "+four\r",
+  " five\r",
+  "",
+].join("\n");
+const crlfData = createSource(diffTurns([turn(1, "run-1")]), () => CRLF_TURN);
+const crlfSetup = await testRender(<Harness source={crlfData.source} />, {
+  width: 120,
+  height: 30,
+  kittyKeyboard: true,
+});
+
+/** Drags from just after `sign` (e.g. "+ b") to the end of its row, and reads the selection. */
+async function copyAfter(sign: string): Promise<string | undefined> {
+  const rows = crlfSetup.captureCharFrame().split("\n");
+  const y = rows.findIndex((row) => row.includes(sign));
+  const row = rows[y] ?? "";
+  await act(async () => {
+    await crlfSetup.mockMouse.drag(row.indexOf(sign) + 2, y, row.length - 1, y);
+    await crlfSetup.renderOnce();
+  });
+  const text = crlfSetup.renderer.getSelection()?.getSelectedText();
+  act(() => crlfSetup.renderer.clearSelection());
+  return text;
+}
+
+for (const view of ["unified", "split"] as const) {
+  await settle(crlfSetup.renderOnce);
+  frame = crlfSetup.captureCharFrame();
+  const rows = frame.split("\n");
+  // D11: copying a changed line gives its own text, trailing spaces and tab included.
+  check(`D11: ${view} copies a line exactly`, JSON.stringify(await copyAfter("+ b")), '"b   \\t"');
+  check(
+    `D11: ${view} copies a CRLF line's spaces, without its carriage return`,
+    JSON.stringify(await copyAfter("+ two")),
+    '"two   "',
+  );
+  // D12: a whitespace-only or line-ending-only change is named under its hunk.
+  check(
+    `D12: ${view} names the trailing whitespace change`,
+    frame.includes("Trailing whitespace changed on lines 2, 3"),
+    true,
+  );
+  check(
+    `D12: ${view} names the line ending change`,
+    frame.includes("Line endings changed (LF → CRLF) on line 4"),
+    true,
+  );
+  check(
+    `D12: ${view} keeps the sides' rows together`,
+    (rows.find((line) => line.includes("five"))?.match(/five/g) ?? []).length,
+    view === "split" ? 2 : 1,
+  );
+  if (view === "unified") act(() => crlfSetup.mockInput.pressKey("v"));
+}
+crlfSetup.renderer.destroy();
 
 if (failures > 0) {
   console.log(`\n${failures} check(s) failed`);

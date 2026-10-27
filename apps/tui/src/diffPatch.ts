@@ -323,8 +323,8 @@ export interface DiffChunk {
   readonly header: string;
   /** A one-hunk patch for OpenTUI's <diff>, with counts matching the lines it holds. */
   readonly patch: string;
-  /** Drawn under the hunk: which side has no newline at the end of the file. */
-  readonly eofNote: string | null;
+  /** Drawn under the hunk: changes its rows can't show, like a line ending or final newline. */
+  readonly notes: ReadonlyArray<string>;
 }
 
 export interface DiffFileLayout {
@@ -352,16 +352,53 @@ const EOF_NOTES: Record<MissingFinalNewline, string> = {
   both: "↵ No newline at end of file",
 };
 
+/** Lists line numbers, the first few only. */
+function onLines(lines: ReadonlyArray<number>): string {
+  const shown = lines.slice(0, 5).join(", ");
+  const more = lines.length > 5 ? ` and ${lines.length - 5} more` : "";
+  return `on ${lines.length === 1 ? "line" : "lines"} ${shown}${more}`;
+}
+
+const withoutCr = (text: string) => (text.endsWith("\r") ? text.slice(0, -1) : text);
+const withoutTrailingWhitespace = (text: string) => text.replace(/[ \t]+$/, "");
+
 /**
- * Trailing spaces and tabs of a changed line drawn as "·" and "→", so a whitespace change
- * is visible (on a highlighted row they'd look like nothing).
+ * Notes for changed lines that draw the same on both sides: trailing whitespace (invisible on a
+ * highlighted row) and line endings (the "\r" isn't drawn). Removals pair with the additions
+ * after them in order, as the split view lays them out; additions are numbered on the new side.
  */
-export function showTrailingWhitespace(line: string): string {
-  if (!line.startsWith("+") && !line.startsWith("-")) return line;
-  const trailing = /[ \t]+$/.exec(line.slice(1));
-  if (trailing === null) return line;
-  const marks = trailing[0].replaceAll(" ", "·").replaceAll("\t", "→");
-  return line.slice(0, line.length - trailing[0].length) + marks;
+function invisibleChangeNotes(hunk: DiffHunk, lines: ReadonlyArray<string>): string[] {
+  const whitespace: number[] = [];
+  const endings = { "LF → CRLF": [] as number[], "CRLF → LF": [] as number[] };
+  let newLine = hunk.newStart;
+  let index = 0;
+  while (index < lines.length) {
+    const removed: string[] = [];
+    const added: string[] = [];
+    while (lines[index]?.startsWith("-")) removed.push((lines[index++] ?? "").slice(1));
+    while (lines[index]?.startsWith("+")) added.push((lines[index++] ?? "").slice(1));
+    for (const [pair, after] of added.slice(0, removed.length).entries()) {
+      const before = removed[pair] ?? "";
+      const [drawnBefore, drawnAfter] = [withoutCr(before), withoutCr(after)];
+      if (withoutTrailingWhitespace(drawnBefore) !== withoutTrailingWhitespace(drawnAfter))
+        continue;
+      if (drawnBefore !== drawnAfter) whitespace.push(newLine + pair);
+      if (before.endsWith("\r") !== after.endsWith("\r")) {
+        endings[after.endsWith("\r") ? "LF → CRLF" : "CRLF → LF"].push(newLine + pair);
+      }
+    }
+    newLine += added.length;
+    if (removed.length === 0 && added.length === 0) {
+      newLine += 1;
+      index += 1;
+    }
+  }
+  const notes =
+    whitespace.length > 0 ? [`· Trailing whitespace changed ${onLines(whitespace)}`] : [];
+  for (const [change, at] of Object.entries(endings)) {
+    if (at.length > 0) notes.push(`↵ Line endings changed (${change}) ${onLines(at)}`);
+  }
+  return notes;
 }
 
 /** Index of the first body line of each hunk, counted across the file. */
@@ -393,11 +430,12 @@ export function layoutDiffFile(file: DiffFile, lineLimit: number): DiffFileLayou
       key: `${file.key}:${hunkIndex}`,
       hunkIndex,
       header: hunk.context.length > 0 ? `${label} ${hunk.context}` : label,
-      patch: `--- a/${file.path}\n+++ b/${file.path}\n${hunkHeader(hunk, lines)}\n${lines.map(showTrailingWhitespace).join("\n")}`,
-      eofNote:
+      // A CRLF line's "\r" would draw as an extra row; its notes say when line endings change.
+      patch: `--- a/${file.path}\n+++ b/${file.path}\n${hunkHeader(hunk, lines)}\n${lines.map(withoutCr).join("\n")}`,
+      notes:
         hunk.missingFinalNewline === null || lines.length < hunk.lines.length
-          ? null
-          : EOF_NOTES[hunk.missingFinalNewline],
+          ? invisibleChangeNotes(hunk, lines)
+          : [...invisibleChangeNotes(hunk, lines), EOF_NOTES[hunk.missingFinalNewline]],
     });
   }
   return { chunks, hiddenLines: Math.max(0, file.lineCount - shown) };
