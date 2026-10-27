@@ -64,11 +64,16 @@ export interface AppProps {
   readonly initialPrefs: TuiPrefs;
   /** Null in Rex thread tabs, which never write prefs.json. */
   readonly prefsWriter: PrefsWriter | null;
+  /** A main window that found prefs.json locked by another one; it says it won't save. */
+  readonly prefsLockedOut?: boolean;
   readonly cwd: string;
   readonly interruptRequestToken?: number;
   readonly onRequestExit?: () => void;
   readonly threadWindowLaunch?: ThreadWindowLaunch | null;
 }
+
+/** Footer note in a main window that another window's prefs lock keeps from saving. */
+const PREFS_LOCKED_OUT_NOTE = "prefs not saved here";
 
 interface PaletteAction {
   readonly id: string;
@@ -662,6 +667,13 @@ function Shell(props: AppProps) {
       >
         <text wrapMode="none" truncate content={footerHints} style={{ fg: palette.subtle }} />
         <box style={{ flexGrow: 1 }} />
+        {props.prefsLockedOut ? (
+          <text
+            wrapMode="none"
+            content={status ? `${PREFS_LOCKED_OUT_NOTE}  ·  ` : PREFS_LOCKED_OUT_NOTE}
+            style={{ fg: palette.subtle }}
+          />
+        ) : null}
         {status ? (
           <text wrapMode="none" truncate content={status} style={{ fg: palette.muted }} />
         ) : null}
