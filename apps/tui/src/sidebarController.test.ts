@@ -166,3 +166,39 @@ describe("useSidebarController unread", () => {
     expect(sidebar.hook.current.statusByThread.get("done")).toBeNull();
   });
 });
+
+describe("useSidebarController rows", () => {
+  it("keeps unchanged row objects across selection changes and shell updates", () => {
+    const t1 = presentedThread("t1", "p", { updatedAt: at("2026-06-20T03:00:00.000Z") });
+    const t2 = presentedThread("t2", "p", { updatedAt: at("2026-06-20T02:00:00.000Z") });
+    const t3 = presentedThread("t3", "p", { updatedAt: at("2026-06-20T01:00:00.000Z") });
+    const sidebar = setup({
+      projects: [projectShell("p"), projectShell("q")],
+      threads: [t1, t2, t3],
+      prefs: { selectedThreadId: "t1" },
+    });
+    const before = sidebar.hook.current.rows;
+    sidebar.press(threadRowKey("t2"));
+    expect(sidebar.hook.current.rows).toBe(before);
+
+    // Retitling t3 changes its shell row, not the sidebar rows.
+    sidebar.setThreads([t1, t2, { ...t3, title: "renamed" }]);
+    expect(sidebar.hook.current.rows).toBe(before);
+
+    // A new thread adds one row; every other row keeps its object.
+    const t0 = presentedThread("t0", "p", { updatedAt: at("2026-06-20T05:00:00.000Z") });
+    sidebar.setThreads([t0, t1, t2, t3]);
+    const after = sidebar.hook.current.rows;
+    expect(after.map((row) => row.key)).toEqual([
+      projectRowKey("p"),
+      threadRowKey("t0"),
+      threadRowKey("t1"),
+      threadRowKey("t2"),
+      threadRowKey("t3"),
+      projectRowKey("q"),
+    ]);
+    for (const row of before) {
+      expect(after.find((candidate) => candidate.key === row.key)).toBe(row);
+    }
+  });
+});

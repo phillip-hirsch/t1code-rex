@@ -10,6 +10,7 @@ import {
   buildSidebarGroups,
   buildSidebarRows,
   projectRowKey,
+  shareSidebarRows,
   threadRowKey,
   type SidebarRow,
   type SidebarThread,
@@ -103,7 +104,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
       }),
     [projects, threads, settings],
   );
-  const rows = useMemo(
+  const builtRows = useMemo(
     () =>
       buildSidebarRows({
         groups,
@@ -114,6 +115,14 @@ export function useSidebarController(options: SidebarControllerOptions) {
       }),
     [groups, expandedProjectIds, showAllProjectIds, settings, selection.threadId],
   );
+  // Rebuilt rows reuse the previous objects they repeat, so a selection change or shell
+  // update re-renders only the rows it touches.
+  const [sharedRows, setSharedRows] = useState({ built: builtRows, rows: builtRows });
+  let rows = sharedRows.rows;
+  if (sharedRows.built !== builtRows) {
+    rows = shareSidebarRows(sharedRows.rows, builtRows);
+    setSharedRows({ built: builtRows, rows });
+  }
   const projectsById = useMemo(
     () => new Map<string, OrchestrationProjectShell>(projects.map((p) => [p.id, p])),
     [projects],
