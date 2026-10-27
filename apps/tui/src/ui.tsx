@@ -21,7 +21,11 @@ import type { TuiConnection } from "./connection/tuiConnection.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
 import { formatRelativeTime } from "./relativeTime.ts";
-import { resolveTuiResponsiveLayout, TUI_SIDEBAR_WIDTH } from "./responsiveLayout.ts";
+import {
+  resolveTuiResponsiveLayout,
+  toggleSidebarState,
+  TUI_SIDEBAR_WIDTH,
+} from "./responsiveLayout.ts";
 import {
   createRexClient,
   createRexWindowRegistry,
@@ -376,18 +380,17 @@ function Shell(props: AppProps) {
     [runTask],
   );
 
-  const toggleSidebar = useCallback(() => {
+  const toggleSidebar = () => {
     setContextMenu(null);
-    if (!layout.showSidebar) {
-      const next = !sidebarOverlayOpen;
-      setSidebarOverlayOpen(next);
-      setFocusArea(next ? "sidebar" : "thread");
-      return;
-    }
-    if (!layout.showSidebarToggle) return;
-    setSidebarCollapsedPreference(true);
-    setFocusArea("thread");
-  }, [layout.showSidebar, layout.showSidebarToggle, sidebarOverlayOpen]);
+    const next = toggleSidebarState(layout, {
+      collapsedPreference: sidebarCollapsedPreference,
+      overlayOpen: sidebarOverlayOpen,
+    });
+    if (next === null) return;
+    setSidebarCollapsedPreference(next.collapsedPreference);
+    setSidebarOverlayOpen(next.overlayOpen);
+    setFocusArea(next.focus);
+  };
 
   // Re-showing the sidebar after a widen keeps it docked instead of as an overlay.
   const wasDocked = useRef(layout.showSidebar);
