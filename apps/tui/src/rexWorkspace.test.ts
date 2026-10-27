@@ -98,6 +98,7 @@ describe("rex output parsing", () => {
     expect(() => parseWindowNewResult("{}")).toThrow("did not return a window");
     expect(() => parseSplitResult('{"block_ids":[]}')).toThrow("did not return a block");
     expect(() => parseWindowNewResult("oops")).toThrow("invalid JSON");
+    expect(() => parseWindowIds("{}")).toThrow("unexpected result");
   });
 });
 
@@ -169,6 +170,9 @@ describe("rexTabLabel", () => {
   it("collapses whitespace and truncates long titles", () => {
     expect(rexTabLabel("  Fix\n login  ")).toBe("Fix login");
     expect(rexTabLabel("")).toBe("Thread");
+    expect(rexTabLabel("- wip")).toBe("wip");
+    expect(rexTabLabel("--help")).toBe("help");
+    expect(rexTabLabel("---")).toBe("Thread");
     expect(rexTabLabel("a".repeat(40), 10)).toBe(`${"a".repeat(9)}…`);
   });
 });

@@ -7,6 +7,7 @@ import {
   THREAD_WINDOW_LAUNCH_ENV,
   buildThreadWindowCommand,
   consumeThreadWindowLaunch,
+  expireThreadWindowLaunch,
   parseThreadWindowLaunch,
   writeThreadWindowLaunch,
 } from "./threadWindowLaunch";
@@ -33,10 +34,31 @@ describe("threadWindowLaunch", () => {
     const filePath = await writeThreadWindowLaunch(path.join(makeTempDir(), "windows"), launch);
     expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
 
-    const env = { [THREAD_WINDOW_LAUNCH_ENV]: filePath };
+    const env: NodeJS.ProcessEnv = { [THREAD_WINDOW_LAUNCH_ENV]: filePath };
     expect(consumeThreadWindowLaunch(env)).toEqual(launch);
     expect(fs.existsSync(filePath)).toBe(false);
-    expect(consumeThreadWindowLaunch(env)).toBeNull();
+    expect(env[THREAD_WINDOW_LAUNCH_ENV]).toBeUndefined();
+  });
+
+  it("refuses to start a thread window whose launch file is gone or invalid", async () => {
+    const missing = path.join(makeTempDir(), "missing.json");
+    expect(() => consumeThreadWindowLaunch({ [THREAD_WINDOW_LAUNCH_ENV]: missing })).toThrow(
+      "missing or expired",
+    );
+
+    const invalid = path.join(makeTempDir(), "invalid.json");
+    fs.writeFileSync(invalid, "{}");
+    expect(() => consumeThreadWindowLaunch({ [THREAD_WINDOW_LAUNCH_ENV]: invalid })).toThrow(
+      "missing or expired",
+    );
+    expect(fs.existsSync(invalid)).toBe(false);
+  });
+
+  it("deletes an unread launch file after its time limit", async () => {
+    const filePath = await writeThreadWindowLaunch(makeTempDir(), launch);
+    expireThreadWindowLaunch(filePath, 1);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fs.existsSync(filePath)).toBe(false);
   });
 
   it("ignores a missing variable and rejects malformed files", () => {
@@ -51,11 +73,12 @@ describe("threadWindowLaunch", () => {
   });
 
   it("relaunches the current runtime with shared paths but no connection secrets", () => {
-    const command = buildThreadWindowCommand("/state/launch.json", {
+    const paths = { homeDir: "/data/t1", configHomeDir: "/cfg/t1", stateHomeDir: "/state/t1" };
+    const command = buildThreadWindowCommand("/state/launch.json", paths, {
       execPath: "/usr/bin/bun",
       entryPath: "/app/dist/index.mjs",
       env: {
-        T1CODE_HOME: "/data/t1",
+        T1CODE_USE_MOUSE: "0",
         T1CODE_AUTH_TOKEN: "secret",
         T1CODE_PORT: "4321",
         T1CODE_TUI_ATTACH_ONLY: "1",
@@ -64,6 +87,9 @@ describe("threadWindowLaunch", () => {
     expect(command).toEqual([
       "env",
       "T1CODE_HOME=/data/t1",
+      "T1CODE_CONFIG_HOME=/cfg/t1",
+      "T1CODE_STATE_HOME=/state/t1",
+      "T1CODE_USE_MOUSE=0",
       `${THREAD_WINDOW_LAUNCH_ENV}=/state/launch.json`,
       "/usr/bin/bun",
       "/app/dist/index.mjs",

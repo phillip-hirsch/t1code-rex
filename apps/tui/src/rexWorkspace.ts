@@ -110,8 +110,8 @@ export function parseSplitResult(output: string): { readonly blockId: string } {
 
 export function parseWindowIds(output: string): ReadonlySet<string> {
   const windows = parseJson(output, "window ls").windows;
+  if (!Array.isArray(windows)) throw new Error("rex window ls returned an unexpected result.");
   const ids = new Set<string>();
-  if (!Array.isArray(windows)) return ids;
   for (const window of windows) {
     const id = asRecord(window)?.window_id;
     if (typeof id === "string") ids.add(id);
@@ -123,8 +123,11 @@ export const execRex: RexRunner = (bin, args) =>
   new Promise((resolve, reject) => {
     execFile(bin, [...args], { timeout: 15_000 }, (error, stdout, stderr) => {
       if (error) {
-        const detail = String(stderr).trim() || error.message;
-        reject(new Error(`rex ${args.slice(0, 2).join(" ")} failed: ${detail}`));
+        // Keep argv out of the message: it is shown in the status bar.
+        const command = args[0] === "window" ? `window ${args[1]}` : args[0];
+        const detail =
+          String(stderr).trim() || (error.killed ? "timed out" : `exit code ${error.code}`);
+        reject(new Error(`rex ${command} failed: ${detail}`));
         return;
       }
       resolve(String(stdout));
@@ -197,6 +200,11 @@ export function createRexWindowRegistry(client: RexClient) {
 }
 
 export function rexTabLabel(title: string, maxLength = 32): string {
-  const normalized = title.replace(/\s+/gu, " ").trim() || "Thread";
+  // The label is a positional argument, so a leading dash would read as a flag.
+  const normalized =
+    title
+      .replace(/\s+/gu, " ")
+      .replace(/^[\s-]+/u, "")
+      .trim() || "Thread";
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength - 1)}…` : normalized;
 }
