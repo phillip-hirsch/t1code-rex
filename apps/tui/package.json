@@ -30,6 +30,7 @@
     "check:management": "bun scripts/check-management.tsx",
     "check:terminal": "bun scripts/check-terminal.tsx",
     "check:diff": "bun scripts/check-diff.tsx",
+    "check:keys": "bun scripts/check-keys.tsx",
     "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {

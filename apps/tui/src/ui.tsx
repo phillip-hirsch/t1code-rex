@@ -3,7 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { type CliRenderer, decodePasteBytes, type KeyEvent } from "@opentui/core";
-import { useKeyboard, usePaste, useTerminalDimensions } from "@opentui/react";
+import { usePaste, useTerminalDimensions } from "@opentui/react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   connectionProjectionPhase,
@@ -122,7 +122,7 @@ import {
 } from "./modelPicker.ts";
 import { ModelPickerView } from "./modelPickerView.tsx";
 import { NewThreadView } from "./newThreadView.tsx";
-import { usePaletteNavigation, type PaletteKey } from "./paletteNavigation.ts";
+import { useSyncKeyboard } from "./syncKeyboard.ts";
 import { createRequestPanelStore } from "./requestPanelStore.ts";
 import { NO_PENDING_REQUESTS, type PendingRequest } from "./requestQueue.ts";
 import { createRedirectDecliner } from "./requestRedirect.ts";
@@ -390,13 +390,8 @@ function Shell(props: AppProps) {
   const serverConfig = useAtomValue(connection.serverConfigAtom);
   const { width: viewportColumns, height: viewportRows } = useTerminalDimensions();
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const {
-    query: paletteQuery,
-    index: paletteIndex,
-    reset: resetPalette,
-    live: livePalette,
-    press: pressPalette,
-  } = usePaletteNavigation();
+  const [paletteIndex, setPaletteIndex] = useState(0);
+  const [paletteQuery, setPaletteQuery] = useState("");
   /** The archived-threads view's highlighted row; null while the view is closed. */
   const [archivedSelection, setArchivedSelection] = useState<ArchivedSelection | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -1288,7 +1283,7 @@ function Shell(props: AppProps) {
   useEffect(() => {
     if (layout.showSidebar && !wasDocked.current) setSidebarOverlayOpen(false);
     wasDocked.current = layout.showSidebar;
-  }, [layout.showSidebar, wasDocked]);
+  }, [layout.showSidebar]);
 
   const composerFocused = focusArea === "composer" && composerTarget !== null;
   const requestsFocused = focusArea === "requests" && composerTarget !== null;
@@ -1374,7 +1369,8 @@ function Shell(props: AppProps) {
     // In the terminal, Ctrl+K is the shell's; the palette waits until focus leaves.
     if ((!terminalFocused && isPaletteShortcut(key)) || shortcut === "commandPalette.toggle") {
       setContextMenu(null);
-      resetPalette();
+      setPaletteIndex(0);
+      setPaletteQuery("");
       setPaletteOpen((open) => !open);
       return true;
     }
@@ -1392,22 +1388,21 @@ function Shell(props: AppProps) {
     }
     if (paletteOpen) {
       if (key.name === "escape" || (key.ctrl && key.name === "c")) setPaletteOpen(false);
-      else {
+      else if (key.name === "up") setPaletteIndex(Math.max(0, paletteSelected - 1));
+      else if (key.name === "down")
+        setPaletteIndex(Math.min(paletteActions.length - 1, paletteSelected + 1));
+      else if (isEnter(key.name)) {
+        const action = paletteActions[paletteSelected];
+        if (action && !key.repeated) runAction(action);
+      } else if (key.name === "backspace") {
+        setPaletteQuery((query) => query.slice(0, -1));
+        setPaletteIndex(0);
+      } else {
+        // Typing filters the list.
         const text = printableText(key);
-        const paletteKey: PaletteKey | null =
-          key.name === "up" || key.name === "down" || key.name === "backspace"
-            ? { kind: key.name }
-            : // Typing filters the list.
-              text !== null
-              ? { kind: "text", text }
-              : null;
-        if (isEnter(key.name)) {
-          const { query, index } = livePalette();
-          const rows = filterPaletteActions(actions, query);
-          const action = rows[Math.min(index, rows.length - 1)];
-          if (action && !key.repeated) runAction(action);
-        } else if (paletteKey !== null) {
-          pressPalette(paletteKey, (query) => filterPaletteActions(actions, query).length);
+        if (text !== null) {
+          setPaletteQuery((query) => query + text);
+          setPaletteIndex(0);
         }
       }
       return true;
@@ -1492,7 +1487,7 @@ function Shell(props: AppProps) {
     return false;
   };
 
-  useKeyboard((key) => {
+  useSyncKeyboard((key) => {
     if (handleKey(key)) key.preventDefault();
   });
   // A bracketed paste is one event, not keys: with the sidebar focused it goes to the
