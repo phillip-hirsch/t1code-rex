@@ -27,8 +27,13 @@ export type DaemonState = typeof DaemonState.Type;
 const decodeDaemonState = Schema.decodeUnknownSync(Schema.fromJsonString(DaemonState));
 const encodeDaemonState = Schema.encodeSync(Schema.fromJsonString(DaemonState));
 
+/**
+ * This process's start time, read from `ps` as `isDaemonAlive` reads it, so a
+ * wall-clock step after startup can't make a live owner look like a newer process.
+ */
 export function currentProcessStartedAt(): string {
-  return new Date(Date.now() - process.uptime() * 1_000).toISOString();
+  const started = processStartTime(process.pid) ?? Date.now() - process.uptime() * 1_000;
+  return new Date(started).toISOString();
 }
 
 /** The state file or its directory could be swapped or read by someone else. */
@@ -123,7 +128,7 @@ export function isDaemonAlive(state: DaemonState): boolean {
   if (!isProcessAlive(state.pid)) return false;
   const recorded = Date.parse(state.startedAt);
   const started = processStartTime(state.pid);
-  // `ps` reports whole seconds. Unknown identity stays conservative.
+  // Both sides come from `ps`, in whole seconds. Unknown identity stays conservative.
   return started === undefined || !Number.isFinite(recorded) || started <= recorded + 1_000;
 }
 

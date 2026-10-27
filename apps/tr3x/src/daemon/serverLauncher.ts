@@ -22,29 +22,35 @@ export interface ServerEndpoint {
 
 export interface ManagedServerOptions {
   readonly baseDir: string;
-  readonly host?: string;
   readonly port?: number;
-  readonly readyTimeoutMs?: number;
-  readonly restartOnExit?: boolean;
+  /** The first restart's delay. Each further rapid failure doubles it, up to 30 s. */
   readonly restartDelayMs?: number;
   /** Aborting before the server is ready stops it and rejects the start. */
   readonly signal?: AbortSignal;
-  readonly onLog?: (event: string, details?: Record<string, unknown>) => void;
+  readonly onStderr?: (chunk: string) => void;
 }
 
 export interface ManagedServer extends ServerEndpoint {
   readonly process: NodeChildProcess.ChildProcess;
-  readonly host: string;
-  readonly port: number;
   readonly environment: EnvironmentSummary;
-  readonly events: NodeEvents.EventEmitter<{
-    restart: [attempt: number];
-    exit: [code: number | null, signal: NodeJS.Signals | null];
-    fatal: [message: string];
-  }>;
+  readonly events: NodeEvents.EventEmitter<ManagedServerEvents>;
   /** SIGTERM, then SIGKILL after the grace period. Resolves once the process has exited. */
   readonly stop: () => Promise<void>;
 }
+
+interface ManagedServerEvents {
+  restart: [attempt: number, delayMs: number, reason: string];
+  /** The server is down for good: it lost the base dir, or kept failing. */
+  fatal: [message: string];
+}
+
+const HOST = "127.0.0.1";
+const READY_TIMEOUT_MS = 30_000;
+const MAX_RESTART_DELAY_MS = 30_000;
+/** Failures in a row, with no stable run between them, before the launcher gives up. */
+const MAX_RAPID_FAILURES = 5;
+/** A server that stayed ready this long before failing resets the failure count. */
+const STABLE_RUN_MS = 30_000;
 
 type SpawnImpl = (
   command: string,
@@ -217,79 +223,110 @@ export async function startManagedServer(
     dependencies.randomToken ?? (() => NodeCrypto.randomBytes(32).toString("hex"));
   const waitUntilReady = dependencies.waitUntilReady ?? waitForServerReady;
   const killGraceMs = dependencies.killGraceMs ?? 5_000;
-  const host = options.host?.trim() || "127.0.0.1";
   const { command, args: entryArgs, cwd } = resolveServerCommand(env);
   // Set once the port is known, before the first spawn.
   let port = 0;
   let args: string[] = [];
-  const events = new NodeEvents.EventEmitter<{
-    restart: [attempt: number];
-    exit: [code: number | null, signal: NodeJS.Signals | null];
-    fatal: [message: string];
-  }>();
-  const restartOnExit = options.restartOnExit ?? true;
+  const events = new NodeEvents.EventEmitter<ManagedServerEvents>();
   const restartDelayMs = options.restartDelayMs ?? 750;
   let child: NodeChildProcess.ChildProcess | null = null;
+  let childRunning = false;
   let stopped = false;
   let ready = false;
   let stateDirOwned = false;
   let fatalStartupError: string | null = null;
-  let restartAttempt = 0;
+  /** Rejects the initial start when the first child ends before it is ready. */
+  let onStartupEnd: ((reason: string) => void) | undefined;
+  let failures = 0;
+  /** When the current child became ready, if it has. */
+  let readyAt: number | undefined;
   let restartTimer: ReturnType<typeof setTimeout> | null = null;
-  let generation = 0;
 
   const spawnChild = (): NodeChildProcess.ChildProcess => {
     fatalStartupError = null;
-    generation += 1;
-    const bootstrapToken = randomToken();
+    readyAt = undefined;
     const spawned = spawnImpl(command, args, {
       cwd,
       env: stripReservedLaunchEnv(env),
       stdio: ["pipe", "pipe", "pipe"] as const,
     });
     child = spawned;
+    // No pid means the spawn failed; its `error` event is still to come.
+    childRunning = spawned.pid !== undefined;
+    let ended = false;
+    const onEnd = (code: number | null, reason: string) => {
+      if (ended) return;
+      ended = true;
+      if (child === spawned) childRunning = false;
+      onStartupEnd?.(reason);
+      handleEnd(code, reason);
+    };
+    // A failed spawn (ENOENT, EAGAIN) emits `error` and never `exit`.
+    spawned.on("error", (error) => {
+      if (spawned.pid === undefined) onEnd(null, error.message);
+    });
+    spawned.once("exit", (code, signal) =>
+      onEnd(code, code === null ? `signal ${signal}` : `exit code ${code}`),
+    );
+
     const envelope = buildBootstrapEnvelope({
-      host,
+      host: HOST,
       port,
       baseDir: options.baseDir,
-      bootstrapToken,
+      bootstrapToken: randomToken(),
     });
     spawned.stdin?.on("error", () => {});
     spawned.stdin?.end(`${JSON.stringify(envelope)}\n`);
-
-    options.onLog?.("server.spawned", { pid: spawned.pid ?? null, host, port, generation });
-
-    const watchOutput = (stream: NodeJS.ReadableStream | null | undefined, event: string) => {
-      stream?.on("data", (chunk) => {
-        const output = String(chunk).trimEnd();
-        options.onLog?.(event, { chunk: output });
-        if (!ready) fatalStartupError = extractFatalStartupError(output) ?? fatalStartupError;
-      });
-    };
-    watchOutput(spawned.stdout, "server.stdout");
-    watchOutput(spawned.stderr, "server.stderr");
-
-    spawned.once("exit", (code, signal) => {
-      options.onLog?.("server.exit", { code, signal: signal ?? null });
-      events.emit("exit", code, signal);
-      if (stopped) return;
-      if (code === SERVER_EXIT_CODE_STATE_DIR_OWNED) {
-        stateDirOwned = true;
-        const message = new StateDirOwnedError(options.baseDir).message;
-        fatalStartupError = message;
-        if (ready) events.emit("fatal", message);
-        return;
-      }
-      if (!restartOnExit || !ready) return;
-      restartAttempt += 1;
-      options.onLog?.("server.restart", { attempt: restartAttempt });
-      events.emit("restart", restartAttempt);
-      restartTimer = setTimeoutImpl(() => {
-        restartTimer = null;
-        if (!stopped) spawnChild();
-      }, restartDelayMs);
+    // Drain stdout so a chatty server never blocks on a full pipe.
+    spawned.stdout?.resume();
+    spawned.stderr?.on("data", (chunk) => {
+      const output = String(chunk).trimEnd();
+      options.onStderr?.(output);
+      if (!ready) fatalStartupError = extractFatalStartupError(output) ?? fatalStartupError;
     });
     return spawned;
+  };
+
+  const handleEnd = (code: number | null, reason: string) => {
+    if (stopped) return;
+    if (code === SERVER_EXIT_CODE_STATE_DIR_OWNED) {
+      stateDirOwned = true;
+      const message = new StateDirOwnedError(options.baseDir).message;
+      fatalStartupError = message;
+      if (ready) events.emit("fatal", message);
+      return;
+    }
+    if (!ready) return;
+    if (readyAt !== undefined && Date.now() - readyAt >= STABLE_RUN_MS) failures = 0;
+    failures += 1;
+    if (failures >= MAX_RAPID_FAILURES) {
+      events.emit("fatal", `The T3 server failed ${failures} times in a row (${reason}).`);
+      return;
+    }
+    const delayMs = Math.min(restartDelayMs * 2 ** (failures - 1), MAX_RESTART_DELAY_MS);
+    events.emit("restart", failures, delayMs, reason);
+    restartTimer = setTimeoutImpl(() => {
+      restartTimer = null;
+      if (!stopped) restart();
+    }, delayMs);
+  };
+
+  const restart = () => {
+    let restarted: NodeChildProcess.ChildProcess;
+    try {
+      restarted = spawnChild();
+    } catch (error) {
+      childRunning = false;
+      handleEnd(null, error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (restarted.pid === undefined) return;
+    waitUntilReady({ httpBaseUrl, timeoutMs: READY_TIMEOUT_MS, process: restarted }).then(
+      () => {
+        if (child === restarted && childRunning) readyAt = Date.now();
+      },
+      () => {},
+    );
   };
 
   const stop = async () => {
@@ -299,11 +336,11 @@ export async function startManagedServer(
       restartTimer = null;
     }
     const current = child;
-    if (!current || current.exitCode !== null || current.signalCode !== null) return;
+    if (!current || !childRunning) return;
     const exited = new Promise<void>((resolve) => current.once("exit", () => resolve()));
     current.kill("SIGTERM");
     const escalate = setTimeoutImpl(() => {
-      if (current.exitCode === null && current.signalCode === null) current.kill("SIGKILL");
+      if (childRunning) current.kill("SIGKILL");
     }, killGraceMs);
     await exited;
     clearTimeoutImpl(escalate);
@@ -314,17 +351,27 @@ export async function startManagedServer(
   const onAbort = () => void stop();
   options.signal?.addEventListener("abort", onAbort, { once: true });
   if (options.signal?.aborted) stopped = true;
+  let httpBaseUrl = "";
   let first: NodeChildProcess.ChildProcess | null = null;
   let environment: EnvironmentSummary;
   try {
     port = options.port ?? (await reservePort());
-    args = buildServerArgs({ entryArgs, host, port, baseDir: options.baseDir });
+    args = buildServerArgs({ entryArgs, host: HOST, port, baseDir: options.baseDir });
+    httpBaseUrl = buildServerEndpoint(HOST, port).httpBaseUrl;
     if (stopped) throw new Error("Aborted while the server started.");
-    first = spawnChild();
-    environment = await waitUntilReady({
-      httpBaseUrl: buildServerEndpoint(host, port).httpBaseUrl,
-      timeoutMs: options.readyTimeoutMs ?? 30_000,
-      process: first,
+    const spawned = spawnChild();
+    first = spawned;
+    if (spawned.pid === undefined) {
+      const error = await new Promise<Error>((resolve) => spawned.once("error", resolve));
+      throw new Error(`Could not start the T3 server (${error.message}).`);
+    }
+    environment = await new Promise<EnvironmentSummary>((resolve, reject) => {
+      onStartupEnd = (reason) =>
+        reject(new Error(`Server exited before becoming ready (${reason}).`));
+      waitUntilReady({ httpBaseUrl, timeoutMs: READY_TIMEOUT_MS, process: spawned }).then(
+        resolve,
+        reject,
+      );
     });
     if (stopped) throw new Error("Aborted while the server started.");
   } catch (error) {
@@ -334,19 +381,18 @@ export async function startManagedServer(
     if (fatalStartupError) throw new Error(fatalStartupError, { cause: error });
     throw error;
   } finally {
+    onStartupEnd = undefined;
     options.signal?.removeEventListener("abort", onAbort);
   }
   ready = true;
-  options.onLog?.("server.ready", { host, port, serverVersion: environment.serverVersion });
+  readyAt = Date.now();
   const spawnedFirst = first;
 
   return {
     get process() {
       return child ?? spawnedFirst;
     },
-    host,
-    port,
-    ...buildServerEndpoint(host, port),
+    ...buildServerEndpoint(HOST, port),
     environment,
     events,
     stop,

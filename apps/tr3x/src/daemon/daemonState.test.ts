@@ -3,7 +3,7 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   currentProcessStartedAt,
@@ -18,6 +18,7 @@ import {
 const dirs: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const dir of dirs.splice(0)) NodeFS.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -74,6 +75,14 @@ describe("daemon state", () => {
     const anHourBeforeThisProcess = new Date(Date.parse(currentProcessStartedAt()) - 3_600_000);
     writeDaemonState(path, state({ startedAt: anHourBeforeThisProcess.toISOString() }));
     expect(readLiveDaemonState(path)).toBeUndefined();
+  });
+
+  it("still names a live owner after the wall clock stepped back", () => {
+    const path = statePath();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() - 3_600_000);
+    writeDaemonState(path, state());
+    expect(readLiveDaemonState(path)?.pid).toBe(process.pid);
   });
 
   it("ignores a missing or corrupt file", () => {

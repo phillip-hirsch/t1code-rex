@@ -31,6 +31,33 @@ export async function fetchEnvironmentSummary(
   };
 }
 
+/** The server answering at a recorded URL isn't the recorded one, so the record is stale. */
+export class StaleServerError extends Error {}
+
+/**
+ * Reads the descriptor at a recorded URL and checks that it is the recorded
+ * environment. Call this before trusting the URL with a credential.
+ */
+export async function fetchRecordedEnvironment(recorded: {
+  readonly httpBaseUrl: string;
+  readonly environmentId: string;
+}): Promise<EnvironmentSummary> {
+  const summary = await fetchEnvironmentSummary(recorded.httpBaseUrl);
+  const stale = describeStaleServer(recorded, summary);
+  if (stale !== undefined) throw new StaleServerError(stale);
+  return summary;
+}
+
+/** Why `summary` isn't the recorded server, or `undefined` when it is. */
+export function describeStaleServer(
+  recorded: { readonly httpBaseUrl: string; readonly environmentId: string },
+  summary: EnvironmentSummary,
+): string | undefined {
+  return summary.environmentId === recorded.environmentId
+    ? undefined
+    : `the server at ${recorded.httpBaseUrl} is environment ${summary.environmentId}, not the recorded ${recorded.environmentId}`;
+}
+
 export function describeServer(environment: EnvironmentSummary, httpBaseUrl: string): string {
   const protocol = environment.orchestrationProtocolVersion ?? "unknown";
   return `T3 server ${environment.serverVersion} (orchestration protocol ${protocol}) at ${httpBaseUrl}`;

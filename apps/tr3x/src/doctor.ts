@@ -15,7 +15,11 @@ import {
   readDaemonState,
   readRecordedServer,
 } from "./daemon/daemonState.ts";
-import { type EnvironmentSummary, fetchEnvironmentSummary } from "./daemon/health.ts";
+import {
+  describeStaleServer,
+  type EnvironmentSummary,
+  fetchEnvironmentSummary,
+} from "./daemon/health.ts";
 import { issueLocalSession } from "./daemon/localSession.ts";
 import type { Tr3xPaths } from "./paths.ts";
 import { describeError } from "./redact.ts";
@@ -53,33 +57,49 @@ export async function runDoctor(options: DoctorOptions): Promise<number> {
   } catch (error) {
     refused = describeError(error);
   }
-  const daemon = state !== undefined && isDaemonAlive(state) ? state : undefined;
-  checks.push(
-    refused !== undefined
-      ? { status: "fail", name: "daemon", detail: `refusing its state file: ${refused}` }
-      : daemon !== undefined
-        ? {
-            status: "ok",
-            name: "daemon",
-            detail: `running (pid ${daemon.pid}, server pid ${daemon.serverPid ?? "unknown"})`,
-          }
-        : {
-            status: "fail",
-            name: "daemon",
-            detail:
-              state === undefined
-                ? "not running. Start it with `tr3x daemon`."
-                : `not running (daemon ${state.pid} exited without cleaning up; the next \`tr3x daemon\` replaces its state). Start it with \`tr3x daemon\`.`,
-          },
-  );
-
-  const serverUrl = daemon?.httpBaseUrl ?? readRecordedServer(paths.serverRuntimeStatePath)?.origin;
+  const live = state !== undefined && isDaemonAlive(state) ? state : undefined;
+  const serverUrl = live?.httpBaseUrl ?? readRecordedServer(paths.serverRuntimeStatePath)?.origin;
   const environment =
     serverUrl === undefined
       ? undefined
       : await fetchEnvironmentSummary(serverUrl).catch(() => undefined);
+  // Never send a credential to a server the daemon didn't record.
+  const stale =
+    live !== undefined && environment !== undefined
+      ? describeStaleServer(live, environment)
+      : undefined;
+  const daemon = stale === undefined ? live : undefined;
+  checks.push(
+    refused !== undefined
+      ? { status: "fail", name: "daemon", detail: `refusing its state file: ${refused}` }
+      : stale !== undefined
+        ? {
+            status: "fail",
+            name: "daemon",
+            detail: `running (pid ${live?.pid}), but its state is stale: ${stale}`,
+          }
+        : daemon !== undefined
+          ? {
+              status: "ok",
+              name: "daemon",
+              detail: `running (pid ${daemon.pid}, server pid ${daemon.serverPid ?? "unknown"})`,
+            }
+          : {
+              status: "fail",
+              name: "daemon",
+              detail:
+                state === undefined
+                  ? "not running. Start it with `tr3x daemon`."
+                  : `not running (daemon ${state.pid} exited without cleaning up; the next \`tr3x daemon\` replaces its state). Start it with \`tr3x daemon\`.`,
+            },
+  );
+
   checks.push(serverCheck(serverUrl, environment, daemon !== undefined));
-  checks.push(await providersCheck(paths, env, daemon, environment));
+  checks.push(
+    stale !== undefined
+      ? { status: "fail", name: "providers", detail: "skipped: the daemon's state is stale" }
+      : await providersCheck(paths, env, daemon, environment),
+  );
   checks.push(rexCliCheck(env, options.rexAppBundleClis ?? REX_APP_BUNDLE_CLIS));
   const session = env.REX_SESSION?.trim();
   checks.push({
@@ -209,12 +229,18 @@ function rexCliCheck(env: NodeJS.ProcessEnv, appBundleClis: ReadonlyArray<string
     encoding: "utf8",
     timeout: 3_000,
   });
-  const firstLine = version.status === 0 ? version.stdout.split("\n", 1)[0]?.trim() : undefined;
-  return {
-    status: "ok",
-    name: "rex",
-    detail: firstLine ? `${cli} (${firstLine})` : `${cli} (version unknown)`,
-  };
+  const firstLine = version.stdout?.trim().split("\n", 1)[0];
+  if (version.status !== 0 || !firstLine) {
+    const outcome = version.error
+      ? version.error.message
+      : version.status === null
+        ? `stopped by ${version.signal}`
+        : version.status === 0
+          ? "printed nothing"
+          : `exit code ${version.status}`;
+    return { status: "fail", name: "rex", detail: `\`${cli} version\` failed (${outcome})` };
+  }
+  return { status: "ok", name: "rex", detail: `${cli} (${firstLine})` };
 }
 
 /** `TR3X_REX_BIN`, then `rex` on PATH, then the CLI inside the macOS app bundle. */

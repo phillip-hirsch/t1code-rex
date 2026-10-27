@@ -25,7 +25,7 @@ class FakeChildProcess extends NodeEvents.EventEmitter {
   pid = 4242;
   /** Signals the fake ignores, like a server that hangs on shutdown. */
   ignoredSignals = new Set<NodeJS.Signals>();
-  stdout = new NodeEvents.EventEmitter();
+  stdout = new NodeStream.PassThrough();
   stderr = new NodeEvents.EventEmitter();
   stdinChunks: string[] = [];
   stdinEnded = false;
@@ -44,6 +44,13 @@ class FakeChildProcess extends NodeEvents.EventEmitter {
     this.exit(null, signal);
     return true;
   });
+  /** What a real child does when `spawn` fails: no pid, an `error` event, and no `exit`. */
+  failSpawn(code: string) {
+    (this as { pid: number | undefined }).pid = undefined;
+    queueMicrotask(() =>
+      this.emit("error", Object.assign(new Error(`spawn /opt/node ${code}`), { code })),
+    );
+  }
   exit(code: number | null, signal: NodeJS.Signals | null = null) {
     this.exitCode = code;
     this.signalCode = signal;
@@ -51,7 +58,7 @@ class FakeChildProcess extends NodeEvents.EventEmitter {
   }
 }
 
-function fakeSpawn() {
+function fakeSpawn(onSpawn?: (child: FakeChildProcess, index: number) => void) {
   const children: FakeChildProcess[] = [];
   const calls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
   const spawnImpl = (
@@ -60,6 +67,7 @@ function fakeSpawn() {
     options: { env: NodeJS.ProcessEnv },
   ): NodeChildProcess.ChildProcess => {
     const child = new FakeChildProcess();
+    onSpawn?.(child, children.length);
     children.push(child);
     calls.push({ command, args, env: options.env });
     return child as unknown as NodeChildProcess.ChildProcess;
@@ -288,5 +296,78 @@ describe("startManagedServer", () => {
     );
     await vi.advanceTimersByTimeAsync(25);
     expect(calls).toHaveLength(1);
+  });
+
+  it("backs off while a restarted server keeps crashing, then gives up", async () => {
+    vi.useFakeTimers();
+    const { children, spawnImpl } = fakeSpawn();
+    const server = await startManagedServer(
+      { baseDir: "/tmp/.tr3x", port: 43121, restartDelayMs: 100 },
+      { spawnImpl, waitUntilReady: ready, env: {} },
+    );
+    const delays: number[] = [];
+    const fatal = vi.fn();
+    server.events.on("restart", (_attempt, delayMs) => delays.push(delayMs));
+    server.events.on("fatal", fatal);
+
+    for (let crash = 0; crash < 5; crash += 1) {
+      children.at(-1)!.exit(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+    }
+    expect(delays).toEqual([100, 200, 400, 800]);
+    expect(fatal).toHaveBeenCalledWith("The T3 server failed 5 times in a row (exit code 1).");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(children).toHaveLength(5);
+  });
+
+  it("resets the backoff once a restarted server has stayed up", async () => {
+    vi.useFakeTimers();
+    const { children, spawnImpl } = fakeSpawn();
+    const server = await startManagedServer(
+      { baseDir: "/tmp/.tr3x", port: 43122, restartDelayMs: 100 },
+      { spawnImpl, waitUntilReady: ready, env: {} },
+    );
+    const delays: number[] = [];
+    server.events.on("restart", (_attempt, delayMs) => delays.push(delayMs));
+
+    children.at(-1)!.exit(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    children.at(-1)!.exit(1);
+    await vi.advanceTimersByTimeAsync(31_000);
+    children.at(-1)!.exit(1);
+    expect(delays).toEqual([100, 200, 100]);
+    await server.stop();
+  });
+
+  it("backs off when a restart can't spawn the server, without throwing", async () => {
+    vi.useFakeTimers();
+    const { children, spawnImpl } = fakeSpawn((child, index) => {
+      if (index > 0) child.failSpawn("EAGAIN");
+    });
+    const server = await startManagedServer(
+      { baseDir: "/tmp/.tr3x", port: 43123, restartDelayMs: 25 },
+      { spawnImpl, waitUntilReady: ready, env: {} },
+    );
+    const delays: number[] = [];
+    const fatal = vi.fn();
+    server.events.on("restart", (_attempt, delayMs) => delays.push(delayMs));
+    server.events.on("fatal", fatal);
+
+    children[0]!.exit(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(delays).toEqual([25, 50, 100, 200]);
+    expect(fatal).toHaveBeenCalledWith(
+      "The T3 server failed 5 times in a row (spawn /opt/node EAGAIN).",
+    );
+    await server.stop();
+  });
+
+  it("rejects the start when the server can't be spawned", async () => {
+    await expect(
+      startManagedServer(
+        { baseDir: "/tmp/.tr3x", port: 43124 },
+        { env: { TR3X_NODE_BIN: "/nonexistent/tr3x-node" } },
+      ),
+    ).rejects.toThrow("Could not start the T3 server (spawn /nonexistent/tr3x-node ENOENT).");
   });
 });

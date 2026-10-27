@@ -1,18 +1,22 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Real files and processes, outside any Effect runtime.
 import * as NodeFS from "node:fs";
+import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { ServerProvider } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
+import { currentProcessStartedAt, writeDaemonState } from "./daemon/daemonState.ts";
 import { runDoctor, summarizeProviders } from "./doctor.ts";
 import { resolveTr3xPaths } from "./paths.ts";
 
 const dirs: string[] = [];
+const servers: NodeHttp.Server[] = [];
 
 afterEach(() => {
   for (const dir of dirs.splice(0)) NodeFS.rmSync(dir, { recursive: true, force: true });
+  for (const server of servers.splice(0)) server.close();
 });
 
 function tempDir(): string {
@@ -80,10 +84,58 @@ describe("tr3x doctor", () => {
     );
   });
 
-  it("refuses T3 Code's own home as TR3X_HOME", () => {
-    expect(() => resolveTr3xPaths({ TR3X_HOME: "/Users/me/.t3/" }, "/Users/me")).toThrow(
-      "TR3X_HOME points at T3 Code's own data",
+  it("fails when `rex version` exits non-zero", async () => {
+    const bin = tempDir();
+    NodeFS.writeFileSync(NodePath.join(bin, "rex"), '#!/bin/sh\necho "rex 9.9.9"\nexit 3\n', {
+      mode: 0o755,
+    });
+    const { lines } = await doctor({ TR3X_HOME: NodePath.join(tempDir(), "home"), PATH: bin });
+    expect(lines).toContainEqual(
+      expect.stringMatching(/fail\s+rex\s+`.*\/rex version` failed \(exit code 3\)$/u),
     );
+  });
+
+  it("sends no credential when the recorded URL answers as another environment", async () => {
+    const authorizations: Array<string | undefined> = [];
+    const server = NodeHttp.createServer((request, response) => {
+      authorizations.push(request.headers.authorization);
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          environmentId: "env-other",
+          label: "Other",
+          platform: { os: "darwin", arch: "arm64" },
+          serverVersion: "0.1.3",
+          orchestrationProtocolVersion: 2,
+          capabilities: { repositoryIdentity: false },
+        }),
+      );
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+    const home = NodePath.join(tempDir(), "home");
+    writeDaemonState(resolveTr3xPaths({ TR3X_HOME: home }).daemonStatePath, {
+      version: 1,
+      pid: process.pid,
+      startedAt: currentProcessStartedAt(),
+      serverPid: null,
+      httpBaseUrl: `http://127.0.0.1:${port}`,
+      wsBaseUrl: `ws://127.0.0.1:${port}`,
+      environmentId: "env-recorded",
+    });
+
+    const { code, lines } = await doctor({ TR3X_HOME: home, PATH: "" });
+    expect(code).toBe(1);
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /fail\s+daemon\s+running \(pid \d+\), but its state is stale: the server at \S+ is environment env-other, not the recorded env-recorded$/u,
+      ),
+    );
+    expect(lines).toContainEqual(
+      expect.stringMatching(/fail\s+providers\s+skipped: the daemon's state is stale$/u),
+    );
+    expect(authorizations).toEqual([undefined]);
   });
 });
 

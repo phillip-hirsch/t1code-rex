@@ -19,11 +19,15 @@ export function resolveTr3xPaths(
 ): Tr3xPaths {
   const configured = env.TR3X_HOME?.trim();
   const home = NodePath.resolve(configured || NodePath.join(userHome, ".tr3x"));
-  const t3Home = NodePath.join(userHome, ".t3");
-  if (realPath(home) === realPath(t3Home)) {
-    throw new Error(
-      `TR3X_HOME points at T3 Code's own data (${t3Home}). tr3x keeps its server and data apart; pick another directory.`,
-    );
+  const t3Homes = [NodePath.join(userHome, ".t3"), env.T3CODE_HOME?.trim()].filter(
+    (dir): dir is string => Boolean(dir),
+  );
+  for (const t3Home of t3Homes) {
+    if (overlaps(resolveReal(home), resolveReal(NodePath.resolve(t3Home)))) {
+      throw new Error(
+        `TR3X_HOME (${home}) overlaps T3 Code's own data (${t3Home}). tr3x keeps its server and data apart; pick another directory.`,
+      );
+    }
   }
   const daemonDir = NodePath.join(home, "daemon");
   return {
@@ -34,10 +38,25 @@ export function resolveTr3xPaths(
   };
 }
 
-function realPath(path: string): string {
-  try {
-    return NodeFS.realpathSync(path);
-  } catch {
-    return path;
+/**
+ * The real path of the nearest existing ancestor, with the rest of `path`
+ * appended. The native call also returns the on-disk case, so `~/.T3` on a
+ * case-insensitive volume resolves to `~/.t3`.
+ */
+function resolveReal(path: string): string {
+  const missing: string[] = [];
+  for (let dir = path; ; dir = NodePath.dirname(dir)) {
+    try {
+      return NodePath.join(NodeFS.realpathSync.native(dir), ...missing);
+    } catch {
+      if (NodePath.dirname(dir) === dir) return path;
+      missing.unshift(NodePath.basename(dir));
+    }
   }
+}
+
+/** Whether either directory is the other or inside it. */
+function overlaps(a: string, b: string): boolean {
+  const withSep = (dir: string) => (dir.endsWith(NodePath.sep) ? dir : `${dir}${NodePath.sep}`);
+  return withSep(a).startsWith(withSep(b)) || withSep(b).startsWith(withSep(a));
 }

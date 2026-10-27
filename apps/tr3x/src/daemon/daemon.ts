@@ -13,7 +13,7 @@ import {
   removeDaemonState,
   writeDaemonState,
 } from "./daemonState.ts";
-import { describeServer, fetchEnvironmentSummary } from "./health.ts";
+import { describeServer, fetchRecordedEnvironment, StaleServerError } from "./health.ts";
 import { type ManagedServer, StateDirOwnedError, startManagedServer } from "./serverLauncher.ts";
 
 export interface DaemonOptions {
@@ -69,9 +69,8 @@ async function acquire(options: DaemonOptions): Promise<Acquired | undefined> {
         {
           baseDir: paths.home,
           signal,
-          onLog: (event, details) => {
-            if (event !== "server.stderr" || typeof details?.chunk !== "string") return;
-            stderrTail.push(...redactSecrets(details.chunk).split("\n"));
+          onStderr: (chunk) => {
+            stderrTail.push(...redactSecrets(chunk).split("\n"));
             stderrTail.splice(0, Math.max(0, stderrTail.length - STDERR_TAIL_LINES));
           },
         },
@@ -116,17 +115,27 @@ async function runOwner(
     log(
       `started ${describeServer(server.environment, server.httpBaseUrl)} (server pid ${server.process.pid}, daemon pid ${process.pid})`,
     );
-    server.events.on("restart", (attempt) => {
-      log(`server exited unexpectedly; restarting (attempt ${attempt})`);
+    const logStderrTail = () => {
       if (stderrTail.length > 0) log(`server output:\n${stderrTail.join("\n")}`);
+    };
+    server.events.on("restart", (attempt, delayMs, reason) => {
+      log(
+        `server stopped unexpectedly (${redactSecrets(reason)}); restarting in ${delayMs} ms (attempt ${attempt})`,
+      );
+      logStderrTail();
     });
     const fatalSignal = new Promise<void>((resolve) => {
       server.events.once("fatal", (message) => {
-        fatal = message;
+        fatal = redactSecrets(message);
+        logStderrTail();
         resolve();
       });
     });
-    stopHealth = reportHealth(options, server.httpBaseUrl, () => {
+    const recorded = {
+      httpBaseUrl: server.httpBaseUrl,
+      environmentId: server.environment.environmentId,
+    };
+    stopHealth = reportHealth(options, recorded, () => {
       // A restarted server has a new pid.
       if (server.process.pid !== written.serverPid) written = publishState(paths, server);
     });
@@ -158,18 +167,20 @@ function publishState(paths: Tr3xPaths, server: ManagedServer): DaemonState {
 
 async function watchOwner(options: DaemonOptions, owner: DaemonState): Promise<void> {
   const { log, signal } = options;
-  const summary = await fetchEnvironmentSummary(owner.httpBaseUrl).catch(() => undefined);
-  log(
-    `attached to daemon ${owner.pid}: ${
-      summary === undefined
-        ? `T3 server at ${owner.httpBaseUrl} (not responding yet)`
-        : describeServer(summary, owner.httpBaseUrl)
-    }`,
-  );
+  let server: string;
+  try {
+    server = describeServer(await fetchRecordedEnvironment(owner), owner.httpBaseUrl);
+  } catch (error) {
+    server =
+      error instanceof StaleServerError
+        ? `its state is stale: ${error.message}`
+        : `T3 server at ${owner.httpBaseUrl} (not responding yet)`;
+  }
+  log(`attached to daemon ${owner.pid}: ${server}`);
   log(
     `this daemon doesn't own the server and won't stop it; it takes over if daemon ${owner.pid} exits`,
   );
-  const stopHealth = reportHealth(options, owner.httpBaseUrl);
+  const stopHealth = reportHealth(options, owner);
   await Promise.race([abortPromise(signal), waitForOwnerExit(owner, signal)]);
   stopHealth();
 }
@@ -196,7 +207,7 @@ export function waitForOwnerExit(
 /** Checks the server on an interval and logs only when its health changes. */
 function reportHealth(
   options: DaemonOptions,
-  httpBaseUrl: string,
+  recorded: Parameters<typeof fetchRecordedEnvironment>[0],
   onHealthy?: () => void,
 ): () => void {
   let healthy = true;
@@ -205,7 +216,7 @@ function reportHealth(
     if (running) return;
     running = true;
     try {
-      await fetchEnvironmentSummary(httpBaseUrl);
+      await fetchRecordedEnvironment(recorded);
       if (!healthy) options.log("server healthy again");
       healthy = true;
       onHealthy?.();
