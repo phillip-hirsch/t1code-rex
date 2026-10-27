@@ -7,7 +7,6 @@ Goal: bring T1Code to feature parity with the latest T3 Code desktop (Electron) 
 - Base branch: `rex-parity`. Base PR: `rex-parity` -> `main`.
 - Each step is a sub-PR into `rex-parity`. Merge a sub-PR into `rex-parity` once it has proof and a Sol review.
 - When every sub-PR is merged, run the base PR through council, then merge it into `main`.
-- Merging to `main` runs `.github/workflows/publish-npm.yml`, which publishes `@maria_rcks/t1code` with the `dev` tag.
 
 ## Steps
 
