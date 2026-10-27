@@ -670,8 +670,9 @@ function Shell(props: AppProps) {
         {props.prefsLockedOut ? (
           <text
             wrapMode="none"
-            content={status ? `${PREFS_LOCKED_OUT_NOTE}  ·  ` : PREFS_LOCKED_OUT_NOTE}
-            style={{ fg: palette.subtle }}
+            content={status ? `  ${PREFS_LOCKED_OUT_NOTE}  ·  ` : `  ${PREFS_LOCKED_OUT_NOTE}`}
+            // The hints truncate first, so the note always shows whole.
+            style={{ fg: palette.subtle, flexShrink: 0 }}
           />
         ) : null}
         {status ? (
