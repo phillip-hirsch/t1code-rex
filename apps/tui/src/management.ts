@@ -166,7 +166,7 @@ export interface ManagementOptions {
   /** Deleting a thread drops the messages still queued for it. */
   readonly sender: Pick<ComposerSender, "pendingCount" | "forget">;
   readonly logger: T1Logger;
-  readonly setStatus: (status: string) => void;
+  readonly setStatus: (status: string | null) => void;
   /** Opens a new-thread draft in the project and focuses the composer. */
   readonly openNewThread: (projectId: string) => void;
 }
@@ -424,6 +424,7 @@ export function useManagement(options: ManagementOptions) {
     if (!sidebar.projectsById.has(projectId)) return;
     setStatus("Counting the project's threads…");
     const archived = await connection.fetchArchivedShellSnapshot();
+    setStatus(null);
     const project = sidebar.projectsById.get(projectId);
     if (!project) return;
     const archivedIds = archived.ok

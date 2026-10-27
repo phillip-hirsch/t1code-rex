@@ -82,7 +82,7 @@ describe("projectRemovalSteps", () => {
     const steps = projectRemovalSteps("alpha", { listed: 0, archived: 2 });
     expect(labels(steps)).toEqual(["Continue", "Remove project"]);
     expect(steps[0]?.body).toBe(
-      "Removing this project also deletes its 2 threads (2 archived). Continue to confirm.",
+      "This also deletes its 2 threads (2 archived). Continue to confirm.",
     );
     expect(steps[1]?.title).toBe('Remove project "alpha" and 2 threads?');
   });

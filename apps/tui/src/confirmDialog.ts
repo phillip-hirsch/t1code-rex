@@ -153,7 +153,7 @@ export function projectRemovalSteps(
   return [
     {
       title: `Remove project "${projectTitle}"?`,
-      body: `Removing this project also deletes ${counted}. Continue to confirm.`,
+      body: `This also deletes ${counted}. Continue to confirm.`,
       confirmLabel: "Continue",
       destructive: true,
     },

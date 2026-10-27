@@ -153,7 +153,7 @@ function setup(input: {
     olderSettledAtom: Atom.make<OrchestrationV2ShellSnapshot["olderSettled"]>(undefined),
   };
   const initialPrefs: TuiPrefs = {};
-  const statuses: Array<string> = [];
+  const statuses: Array<string | null> = [];
   const logger: T1Logger = { log: () => undefined };
   const hook = renderHook(() => {
     const sidebar = useSidebarController({
