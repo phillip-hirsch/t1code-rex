@@ -105,7 +105,7 @@ import {
 import type { TuiServerSession } from "../serverLauncher.ts";
 import * as Platform from "./platform.ts";
 import * as Runtime from "./runtime.ts";
-import { createWorkspaceGuard } from "./workspaceGuard.ts";
+import { createWorkspaceGuard, type WorkspaceGuardOptions } from "./workspaceGuard.ts";
 
 export interface TuiConnectionOptions {
   readonly session: TuiServerSession;
@@ -477,7 +477,10 @@ export function createTuiConnection(options: TuiConnectionOptions) {
      * may start on it now: its worktree isn't there. Undefined until the server's state is
      * known; see `createWorkspaceGuard`.
      */
-    guardWorkspace: (threadId: ThreadId): WorkspaceGuard =>
+    guardWorkspace: (
+      threadId: ThreadId,
+      schedule: WorkspaceGuardOptions["schedule"],
+    ): WorkspaceGuard =>
       createWorkspaceGuard({
         registry,
         stateAtom: threadDetails.stateAtom({ environmentId, threadId }),
@@ -490,6 +493,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
           ).then((result) =>
             AsyncResult.isSuccess(result) ? result.value : { _tag: "unavailable" as const },
           ),
+        schedule,
       }),
     /** Runs a failed worktree preparation again, for the message that started it. */
     retryWorkspacePreparation: (input: RetryWorkspacePreparationInput) =>

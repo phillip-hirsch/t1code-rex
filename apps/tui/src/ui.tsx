@@ -178,6 +178,12 @@ export interface AppProps {
 /** Footer note in a main window that another window's prefs lock keeps from saving. */
 const PREFS_LOCKED_OUT_NOTE = "prefs not saved here";
 
+/** Runs `run` after `delayMs`; returns a cancel. Retries and stall checks use it. */
+function scheduleTimer(run: () => void, delayMs: number): () => void {
+  const timer = setTimeout(run, delayMs);
+  return () => clearTimeout(timer);
+}
+
 interface PaletteAction {
   readonly id: string;
   readonly label: string;
@@ -454,10 +460,7 @@ function Shell(props: AppProps) {
       respondToApproval: connection.respondToApproval,
       respondToUserInput: connection.respondToUserInput,
       dismissUserInput: connection.dismissUserInput,
-      schedule: (run, delayMs) => {
-        const timer = setTimeout(run, delayMs);
-        return () => clearTimeout(timer);
-      },
+      schedule: scheduleTimer,
       onFailure: (requestId, error, action) =>
         logger.log("request.respond.failed", {
           requestId,
@@ -482,13 +485,10 @@ function Shell(props: AppProps) {
       setRuntimeMode: connection.setRuntimeMode,
       setInteractionMode: connection.setInteractionMode,
       threadSettings: settingsOfThread,
-      schedule: (run, delayMs) => {
-        const timer = setTimeout(run, delayMs);
-        return () => clearTimeout(timer);
-      },
+      schedule: scheduleTimer,
       resumeQueue: connection.resumeQueue,
       // Every thread with pending jobs, selected or not: nothing starts without its worktree.
-      guardWorkspace: connection.guardWorkspace,
+      guardWorkspace: (threadId) => connection.guardWorkspace(threadId, scheduleTimer),
       declineApprovals: createRedirectDecliner({
         responder,
         pendingApprovalIds: pendingApprovalIdsOf,

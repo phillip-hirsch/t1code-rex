@@ -43,7 +43,7 @@ import { createComposerSend, type ComposerSend } from "../composerSend.ts";
 import { createComposerSender } from "../composerSender.ts";
 import { createComposerStore } from "../composerStore.ts";
 import { WORKTREE_FAILED_NOTICE } from "../worktreeLaunch.ts";
-import { createWorkspaceGuard } from "./workspaceGuard.ts";
+import { checkFailedNotice, createWorkspaceGuard, SNAPSHOT_RETRY_MS } from "./workspaceGuard.ts";
 
 const TARGET = new PrimaryConnectionTarget({
   environmentId: EnvironmentId.make("environment-1"),
@@ -252,8 +252,10 @@ const setup = Effect.fn("WorkspaceGuardTest.setup")(function* () {
     Effect.sync(() => AtomRegistry.make({ defaultIdleTTL: 60_000, timeoutResolution: 1 })),
     (registry) => Effect.sync(() => registry.dispose()),
   );
-  const server: { snapshot: Projection } = { snapshot: BEFORE };
-  const snapshotLoads: Projection[] = [];
+  const server: { snapshot: Projection | "unavailable" } = { snapshot: BEFORE };
+  const snapshotLoads: Array<Projection | "unavailable"> = [];
+  /** The guard's snapshot retries, run when the test says so. */
+  const guardTimers: Array<() => void> = [];
 
   const store = createComposerStore({ initialPrefs: {}, persist: null });
   const sent = yield* Queue.unbounded<string>();
@@ -275,11 +277,20 @@ const setup = Effect.fn("WorkspaceGuardTest.setup")(function* () {
             registry,
             stateAtom,
             loadSnapshot: (): Promise<ThreadSnapshotLoadResult> => {
-              snapshotLoads.push(server.snapshot);
-              return Promise.resolve({
-                _tag: "present",
-                snapshot: { snapshotSequence: 1, projection: server.snapshot },
-              });
+              const { snapshot } = server;
+              snapshotLoads.push(snapshot);
+              return Promise.resolve(
+                snapshot === "unavailable"
+                  ? { _tag: "unavailable" }
+                  : { _tag: "present", snapshot: { snapshotSequence: 1, projection: snapshot } },
+              );
+            },
+            schedule: (run) => {
+              guardTimers.push(run);
+              return () => {
+                const index = guardTimers.indexOf(run);
+                if (index >= 0) guardTimers.splice(index, 1);
+              };
             },
           }),
         schedule: (run) => {
@@ -305,6 +316,20 @@ const setup = Effect.fn("WorkspaceGuardTest.setup")(function* () {
     Stream.filter((value) => value.status === "live"),
     Stream.runHead,
   );
+  /** The thread was on screen a moment ago as `kept`: loaded, caught up, then left. */
+  const viewThenLeave = Effect.fn("WorkspaceGuardTest.viewThenLeave")(function* (kept: Projection) {
+    const unmount = registry.mount(stateAtom);
+    const viewed = yield* Queue.take(subscriptions);
+    yield* replay(viewed, kept, 1);
+    yield* live;
+    unmount();
+    yield* Deferred.await(viewed.closed);
+  });
+  /** Runs the guard's pending snapshot retry, then lets its answer land. */
+  const retrySnapshot = Effect.gen(function* () {
+    for (const run of guardTimers.splice(0)) run();
+    yield* settle;
+  });
 
   return {
     registry,
@@ -313,6 +338,9 @@ const setup = Effect.fn("WorkspaceGuardTest.setup")(function* () {
     live,
     server,
     snapshotLoads,
+    guardTimers,
+    retrySnapshot,
+    viewThenLeave,
     store,
     sender,
     sent,
@@ -320,6 +348,11 @@ const setup = Effect.fn("WorkspaceGuardTest.setup")(function* () {
     subscriptions,
     replay,
   };
+});
+
+/** Lets queued promise callbacks run; no clock involved. */
+const settle = Effect.promise(async () => {
+  for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
 });
 
 let commandCount = 0;
@@ -390,6 +423,68 @@ describe("createWorkspaceGuard on client-runtime's thread atoms", () => {
       expect(h.sender.pendingCount()).toBe(0);
       // It never fell back to waiting out a retry timer.
       expect(h.timers).toHaveLength(0);
+    }),
+  );
+
+  it.effect("PR 20 S2: retries a snapshot it can't load, and trusts the replay once it ran", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.viewThenLeave(FAILED);
+
+      // A retry made the worktree, but the server's snapshot can't be loaded.
+      h.server.snapshot = "unavailable";
+      const first = message("first");
+      const done = h.sender.send(first);
+      const remount = yield* Queue.take(h.subscriptions);
+      yield* settle;
+      // It asks again, backing off, while the job waits.
+      expect(h.guardTimers).toHaveLength(1);
+      yield* h.retrySnapshot;
+      yield* h.retrySnapshot;
+      expect(h.snapshotLoads).toEqual(["unavailable", "unavailable", "unavailable"]);
+      expect(yield* Queue.size(h.sent)).toBe(0);
+      expect(h.sender.pendingCount()).toBe(1);
+
+      // The replay shows the worktree: the message goes out, without the snapshot.
+      yield* h.replay(remount, READY, 2);
+      expect(yield* Queue.take(h.sent)).toBe(first.commandId);
+      yield* Effect.promise(() => done);
+      expect(h.sender.pendingCount()).toBe(0);
+      expect(h.timers).toHaveLength(0);
+    }),
+  );
+
+  it.effect("PR 20 S2: hands the message back with a reason once it can't check in time", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.viewThenLeave(BEFORE);
+
+      // Nothing new happened on the thread, so no replay shows, and the snapshot never loads.
+      h.server.snapshot = "unavailable";
+      const first = message("first");
+      const done = h.sender.send(first);
+      const remount = yield* Queue.take(h.subscriptions);
+      yield* settle;
+      for (let retry = 0; retry < SNAPSHOT_RETRY_MS.length; retry += 1) yield* h.retrySnapshot;
+      yield* Effect.promise(() => done);
+      expect(h.snapshotLoads).toHaveLength(SNAPSHOT_RETRY_MS.length + 1);
+      expect(h.guardTimers).toHaveLength(0);
+      expect(yield* Queue.size(h.sent)).toBe(0);
+      expect(h.sender.pendingCount()).toBe(0);
+      expect(h.store.getDraft(THREAD_ID).text).toBe("first");
+      expect(h.store.snapshot(THREAD_ID).notice).toBe(
+        checkFailedNotice("the server didn't send it"),
+      );
+      yield* Deferred.await(remount.closed);
+
+      // Sending again checks again.
+      h.server.snapshot = BEFORE;
+      const second = message("second");
+      const secondDone = h.sender.send(second);
+      yield* Queue.take(h.subscriptions);
+      expect(yield* Queue.take(h.sent)).toBe(second.commandId);
+      yield* Effect.promise(() => secondDone);
+      expect(h.snapshotLoads.at(-1)).toBe(BEFORE);
     }),
   );
 });

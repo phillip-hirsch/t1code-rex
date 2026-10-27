@@ -84,6 +84,8 @@ interface JobState {
   status: ComposerSendStatus;
   /** Set while a command is in flight; stops waiting on it (to resend, or to drop it). */
   abandon: (() => void) | null;
+  /** Its command that can't be called back went out: the message, or the resume. */
+  dispatched: boolean;
 }
 
 /** A message and the commands it was planned to issue, frozen when it was sent. */
@@ -93,8 +95,6 @@ interface SendJob extends JobState {
   readonly stages: ReadonlyArray<ComposerStage>;
   /** Stages before this one were accepted; a retry resumes here. */
   next: number;
-  /** The message itself went out unconfirmed: it may have landed. */
-  dispatched: boolean;
 }
 
 type ResumeJob = JobState & { readonly kind: "resume" };
@@ -308,9 +308,9 @@ export function createComposerSender(options: ComposerSenderOptions) {
     });
     return Promise.race([reason, timedOut]).then((answer) => {
       cancelWait();
-      // The answer took a moment: anything that changed meanwhile wins.
+      // The answer took a moment: anything that changed meanwhile wins, Stop included.
       if (disposed || !queue.jobs.includes(job)) return ABANDONED;
-      if (job.kind === "send" && (queue.held || queue.jobs[0] !== job)) return HELD;
+      if (queue.held || (job.kind === "send" && queue.jobs[0] !== job)) return HELD;
       return gated(answer);
     });
   };
@@ -356,6 +356,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
       const gated = checked instanceof Promise ? await checked : checked;
       if (gated !== null) return gated;
       mark(job, "sending");
+      job.dispatched = true;
       return attempt(job, () =>
         options.resumeQueue({ commandId: job.commandId, threadId: job.threadId }),
       );
@@ -505,9 +506,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
   /** The job whose command is going out now, if any. */
   const inFlight = (queue: ThreadQueue): Job | undefined => queue.current ?? undefined;
 
-  /** A command in flight that must finish where it is: a resume, or a message that went out. */
-  const committed = (job: Job | undefined): job is Job =>
-    job !== undefined && (job.kind === "resume" || job.dispatched);
+  /** A command in flight that must finish where it is: a resume or message that went out. */
+  const committed = (job: Job | undefined): job is Job => job?.dispatched === true;
 
   const resumeJob = (threadId: ThreadId): ResumeJob => ({
     kind: "resume",
@@ -516,6 +516,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
     attempt: 0,
     status: "sending",
     abandon: null,
+    dispatched: false,
   });
 
   /**

@@ -217,6 +217,10 @@ try {
     );
   }
 
+  const schedule = (run: () => void, delayMs: number) => {
+    const timer = setTimeout(run, delayMs);
+    return () => clearTimeout(timer);
+  };
   // The TUI's sender with the connection's guard, as the shell wires it. It knows nothing of
   // which thread is selected: the guard watches every thread it has jobs for.
   const store = createComposerStore({ initialPrefs: {}, persist: null });
@@ -226,12 +230,9 @@ try {
     setRuntimeMode: connection.setRuntimeMode,
     setInteractionMode: connection.setInteractionMode,
     resumeQueue: connection.resumeQueue,
-    guardWorkspace: connection.guardWorkspace,
+    guardWorkspace: (threadId) => connection.guardWorkspace(threadId, schedule),
     threadSettings: () => settings,
-    schedule: (run, delayMs) => {
-      const timer = setTimeout(run, delayMs);
-      return () => clearTimeout(timer);
-    },
+    schedule,
   });
 
   if (PAID) settings = HAIKU;
@@ -333,7 +334,7 @@ try {
     check("S3: the held run is still held, unstarted", heldRuns(after)[0]?.id, heldRunId);
     console.log("skip S3: the held run follows in order, in the worktree (TR3X_CHECK_PROVIDER=1)");
   }
-  const guard = connection.guardWorkspace(threadId);
+  const guard = connection.guardWorkspace(threadId, schedule);
   check("S3: the guard lets sends through now", await guard.blockedReason(), null);
   guard.dispose();
   const next = message(threadId, OK_PROMPT, "queue");

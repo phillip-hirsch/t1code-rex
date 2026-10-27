@@ -1255,6 +1255,45 @@ describe("composer sender, worktree setup", () => {
     expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["held"]);
   });
 
+  /** A guard whose every answer waits until the test gives it. */
+  const slowGuard = () => {
+    let answer: (value: WorkspaceBlock) => void = () => {};
+    const harness = setup([], {
+      blockedReason: () =>
+        new Promise<WorkspaceBlock>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    return { ...harness, answer: (value: WorkspaceBlock) => answer(value) };
+  };
+
+  it("PR 20 S1: a Stop that lands while a resume waits on its answer keeps the queue held", async () => {
+    const { sender, calls, answer } = slowGuard();
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    sender.hold("t1");
+    answer(null);
+    await settle();
+    expect(calls).toEqual([]);
+    // /resume releases it again.
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    answer(null);
+    await settle();
+    expect(calls.map((call) => call.kind)).toEqual(["queue.resume"]);
+  });
+
+  it("PR 20 S1: /discard drops a resume still waiting on its answer", async () => {
+    const { sender, calls, answer, watched } = slowGuard();
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(sender.discard("t1")).toEqual({ messages: 0, resumes: 1 });
+    answer(null);
+    await settle();
+    expect(calls).toEqual([]);
+    expect(watched).toEqual(new Set());
+  });
+
   it("never holds back a draft's own launch, nor watches its thread before it exists", async () => {
     const launchReply = deferred();
     const { sender, calls, store, watched } = setup([launchReply.promise], {
