@@ -37,6 +37,18 @@ Keys match upstream T3 Code's web app:
 - A message that gets no reply for 30 seconds shows as stuck. `/resume` sends it again with the same ids, so the server doesn't take it twice, and `/discard` puts it back in the composer. If it may already have been sent, the composer says so.
 - On quit, unsent messages go back into their thread's composer. A message that went out without a reply yet is saved by id; on the next launch tr3x looks for it on the thread, and if it isn't there, puts it back in the composer with a note that it may not have been sent. tr3x never sends anything again on its own. A window that can't save prefs (a Rex thread tab, or a second main window) asks you to quit again before dropping unsent messages.
 
+## Queued messages
+
+Messages queued behind a running turn show above the composer under **Up next**, in the order they'll run. 󰏤 marks messages the server holds, and the header says why: after Stop, after a failed run, or while the thread's worktree isn't set up. `/resume` or **▶** releases them.
+
+- **Tab** from the composer, a click, or the palette's **Manage queued messages** focuses the list. **↑↓** or **j**/**k** select.
+- **Enter** or **e** edits the selected message in place. Enter saves, Shift+Enter adds a newline, Esc cancels; images stay as they were. If the message starts or is removed elsewhere before you save, a changed edit goes into the composer.
+- **s** steers the running turn with the message, or sends it now when nothing runs. Both wait until the thread's worktree is ready, as sending does. From anywhere, **Cmd+Shift+Enter** (Ctrl+Shift+Enter on Windows and Linux) does this for the first message, and **Alt+↑** in the composer edits the last one. These are upstream's keybindings, so `keybindings.json` changes them.
+- **Shift+↑/↓** (or **J**/**K**) moves the selected message.
+- **x**, Delete or Backspace removes it; press it again to confirm.
+- **Esc** goes back to the composer, and typing a letter goes there too.
+- A message that already started, or was removed in another window, is never sent twice: the composer says what happened to it.
+
 ## Server and data
 
 tr3x starts upstream's T3 Code server in `desktop` mode on `127.0.0.1` and keeps its data under `~/.tr3x` (`TR3X_HOME`), so it never shares a data directory with a T3 Code install in `~/.t3`. The server needs Node 24 or newer on your `PATH`; set `TR3X_NODE_BIN` to use another binary.

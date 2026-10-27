@@ -172,6 +172,57 @@ describe("Ctrl+D with upstream's default bindings (diff.toggle is mod+d)", () =>
   });
 });
 
+describe("upstream's queue bindings, under OpenTUI's key names", () => {
+  it("steers with the first queued message on Cmd+Shift+Enter (Ctrl on Linux)", () => {
+    expect(
+      resolveTuiShortcutCommand(
+        { keyName: "return", sequence: "\r", super: true, shift: true },
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "darwin" },
+      ),
+    ).toBe("thread.steerQueuedMessage");
+    expect(
+      resolveTuiShortcutCommand(
+        { keyName: "return", ctrl: true, shift: true },
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "linux" },
+      ),
+    ).toBe("thread.steerQueuedMessage");
+    // Not in a focused terminal.
+    expect(
+      resolveTuiShortcutCommand(
+        { keyName: "return", super: true, shift: true },
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "darwin", context: { terminalFocus: true } },
+      ),
+    ).toBeNull();
+  });
+
+  it("edits the last queued message on Alt+Up, only from the composer", () => {
+    const altUp = { keyName: "up", alt: true };
+    expect(
+      resolveTuiShortcutCommand(altUp, DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "darwin",
+        context: { composerFocus: true },
+      }),
+    ).toBe("thread.editQueuedMessage");
+    expect(
+      resolveTuiShortcutCommand(altUp, DEFAULT_RESOLVED_KEYBINDINGS, { platform: "darwin" }),
+    ).toBeNull();
+  });
+
+  it("leaves plain Enter and arrows alone", () => {
+    for (const keyName of ["return", "up", "down"]) {
+      expect(
+        resolveTuiShortcutCommand({ keyName }, DEFAULT_RESOLVED_KEYBINDINGS, {
+          platform: "darwin",
+          context: { composerFocus: true },
+        }),
+      ).toBeNull();
+    }
+  });
+});
+
 describe("keys in a focused terminal with upstream's default bindings", () => {
   const inTerminal = (platform: NodeJS.Platform) => ({
     platform,

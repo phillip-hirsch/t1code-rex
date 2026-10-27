@@ -38,7 +38,7 @@ import {
 
 import packageJson from "../package.json" with { type: "json" };
 import { copyTextToClipboard } from "./clipboardText.ts";
-import { QueuedMessages, type ProviderBadge } from "./composer.tsx";
+import type { ProviderBadge } from "./composer.tsx";
 import { ComposerDock, type ComposerDockHandle } from "./composerDock.tsx";
 import {
   DEFAULT_FOLLOW_UP_BEHAVIOR,
@@ -47,6 +47,8 @@ import {
 } from "./composerSend.ts";
 import { checkUnconfirmedSends } from "./composerRecovery.ts";
 import { createComposerSender } from "./composerSender.ts";
+import { createQueueController } from "./queueController.ts";
+import { QueuePanel, type QueuePanelHandle } from "./queuePanel.tsx";
 import {
   applySettingsPatch,
   interactionModeLabel,
@@ -220,9 +222,10 @@ function filterPaletteActions(
 
 /**
  * "requests" is the request panel above the composer, reached with Tab or a click;
+ * "queue" is the list of queued messages above it, next after the composer in Tab order;
  * "terminal" is the drawer's active terminal, which gets every key but its own.
  */
-type FocusArea = "sidebar" | "thread" | "composer" | "requests" | "terminal";
+type FocusArea = "sidebar" | "thread" | "composer" | "requests" | "queue" | "terminal";
 
 function threadSettings(thread: SidebarThread): ComposerSettings {
   return {
@@ -503,6 +506,27 @@ function Shell(props: AppProps) {
     }),
   );
   useEffect(() => () => sender.dispose(), [sender]);
+  // Edits, removals, moves, steers and starts of the messages the server queued.
+  const [queue] = useState(() =>
+    createQueueController({
+      registry: connection.registry,
+      view: (threadId) => connection.registry.get(connection.thread(threadId).queueViewAtom),
+      runStatus: connection.runStatus,
+      queuedRuns: (threadId) => connection.thread(threadId).queuedRunsAtom,
+      editQueuedRun: connection.editQueuedRun,
+      cancelQueuedRun: connection.cancelQueuedRun,
+      reorderQueuedRun: connection.reorderQueuedRun,
+      promoteQueuedRun: connection.promoteQueuedRun,
+      sender,
+      guardWorkspace: (threadId) => connection.guardWorkspace(threadId, scheduleTimer),
+      schedule: scheduleTimer,
+      store: composerStore,
+      onStatus: (next) => setStatus(next),
+    }),
+  );
+  const queuePanelRef = useRef<QueuePanelHandle | null>(null);
+  const [queueShown, setQueueShown] = useState(false);
+  const [queueHints, setQueueHints] = useState("");
   // A request can resolve anywhere: here, another window or client, an interrupt, the run ending.
   useEffect(
     () =>
@@ -586,13 +610,14 @@ function Shell(props: AppProps) {
   const finishExit = useCallback(() => {
     if (composerStore.canPersist) {
       sender.handOff();
+      queue.handOff();
     } else {
       const pending = sender.pendingCount();
       if (pending > 0) logger.log("composer.sends.dropped", { count: pending });
     }
     composerStore.flush();
     onRequestExit?.();
-  }, [composerStore, logger, onRequestExit, sender]);
+  }, [composerStore, logger, onRequestExit, queue, sender]);
   const requestExit = useCallback(() => {
     const pending = composerStore.canPersist ? 0 : sender.pendingCount();
     if (pending > 0 && !exitArmed) {
@@ -770,6 +795,27 @@ function Shell(props: AppProps) {
   const activeRunId = activeThread?.runtime?.activeRunId ?? null;
   const stopRequested = running && stopRequestedRunId === (activeRunId ?? "unknown");
   const diffShown = diff.open && composerTarget?.kind === "thread";
+  const queueVisible = queueShown && composerTarget?.kind === "thread" && !diffShown;
+  const queueFocused = focusArea === "queue" && queueVisible;
+  // An emptied (or hidden) queue list hands its focus back to the composer.
+  if (focusArea === "queue" && !queueVisible) {
+    setFocusArea(composerTarget === null ? "thread" : "composer");
+  }
+  const focusQueue = () => {
+    setContextMenu(null);
+    setFocusArea("queue");
+  };
+  const focusComposer = () => setFocusArea(composerTarget === null ? "thread" : "composer");
+  const sendFirstQueued = useEventCallback(() => {
+    if (!queuePanelRef.current?.sendFirst(false)) {
+      setStatus("The first queued message can't be sent now");
+    }
+  });
+  const editLastQueued = useEventCallback(() => {
+    if (!queuePanelRef.current?.editLast(false)) {
+      setStatus("The last queued message can't be edited now");
+    }
+  });
   const toggleDiff = () => {
     if (!diff.open && composerTarget?.kind !== "thread") {
       setStatus("Select a thread first");
@@ -1323,6 +1369,32 @@ function Shell(props: AppProps) {
       });
     }
   }
+  if (composerTarget?.kind === "thread") {
+    const nothingQueued = queueVisible ? null : "Nothing queued";
+    actions.push(
+      {
+        id: "queue:focus",
+        label: "Manage queued messages",
+        description: nothingQueued ?? "Edit, reorder, steer or remove  tab from the composer",
+        disabled: !queueVisible,
+        run: focusQueue,
+      },
+      {
+        id: "queue:send-first",
+        label: "Send first queued message",
+        description: nothingQueued ?? `Steers the run, or starts one  ${modShortcutLabel("⇧⏎")}`,
+        disabled: !queueVisible,
+        run: sendFirstQueued,
+      },
+      {
+        id: "queue:edit-last",
+        label: "Edit last queued message",
+        description: nothingQueued ?? "⌥↑ in the composer",
+        disabled: !queueVisible,
+        run: editLastQueued,
+      },
+    );
+  }
   actions.push({
     id: "model:pick",
     label: "Pick model",
@@ -1401,6 +1473,7 @@ function Shell(props: AppProps) {
     const order: FocusArea[] = [
       ...(sidebarVisible ? (["sidebar"] as const) : []),
       ...(composerTarget !== null ? (["composer"] as const) : []),
+      ...(queueVisible ? (["queue"] as const) : []),
       "thread",
       ...(terminalDrawer.open ? (["terminal"] as const) : []),
     ];
@@ -1474,7 +1547,13 @@ function Shell(props: AppProps) {
     const shortcut = resolveTuiShortcutCommand(
       tuiShortcutEvent(key),
       serverConfig?.keybindings ?? [],
-      { context: { terminalFocus: terminalFocused, terminalOpen: terminalDrawer.open } },
+      {
+        context: {
+          terminalFocus: terminalFocused,
+          terminalOpen: terminalDrawer.open,
+          composerFocus: composerFocused,
+        },
+      },
     );
     // In the terminal, Ctrl+K is the shell's; the palette waits until focus leaves.
     if ((!terminalFocused && isPaletteShortcut(key)) || shortcut === "commandPalette.toggle") {
@@ -1494,6 +1573,23 @@ function Shell(props: AppProps) {
     }
     if (shortcut === "chat.new" || shortcut === "chat.newLocal") {
       openNewThread(newThreadProjectId);
+      return true;
+    }
+    // Upstream's queue keys: with nothing to act on, the key does what it did before.
+    if (
+      !paletteOpen &&
+      contextMenu === null &&
+      shortcut === "thread.steerQueuedMessage" &&
+      queuePanelRef.current?.sendFirst(key.repeated === true)
+    ) {
+      return true;
+    }
+    if (
+      !paletteOpen &&
+      contextMenu === null &&
+      shortcut === "thread.editQueuedMessage" &&
+      queuePanelRef.current?.editLast(key.repeated === true)
+    ) {
       return true;
     }
     if (paletteOpen) {
@@ -1557,6 +1653,7 @@ function Shell(props: AppProps) {
       return true;
     }
     if (dockFocused && dockRef.current?.handleKey(key)) return true;
+    if (queueFocused && queuePanelRef.current?.handleKey(key)) return true;
     if (key.ctrl && key.name === "c") {
       // A held Ctrl+C's repeats never quit; quitting takes a fresh press.
       if (!key.repeated) requestExit();
@@ -1567,7 +1664,7 @@ function Shell(props: AppProps) {
       return true;
     }
     // Everything else is typing.
-    if (dockFocused) return false;
+    if (dockFocused || queueFocused) return false;
     if (sidebarFocused) {
       const action = resolveSidebarKey(key, {
         hasMultiSelection: sidebar.multiSelection.threadIds.size > 0,
@@ -1636,6 +1733,13 @@ function Shell(props: AppProps) {
     writeToComposer((dock) => dock.paste(event));
   });
 
+  // Overlays with their own text box take OpenTUI's focus from the dock and the queue list.
+  const overlayFocused =
+    modelPicker !== null ||
+    paletteOpen ||
+    git.overlay !== null ||
+    management.dialogOpen ||
+    archivedSelected !== null;
   const toneColor = {
     success: palette.success,
     warning: palette.warning,
@@ -1665,13 +1769,15 @@ function Shell(props: AppProps) {
           ? sidebar.multiSelection.threadIds.size > 0
             ? `${sidebar.multiSelection.threadIds.size} selected  ⇧↑↓ extend  ⇧F10 menu  del delete  esc clear`
             : "↑↓ move  ⏎ open  ⇧↑↓ select  ⇧F10 menu  F2 rename  del delete  type to compose  ⌘K palette"
-          : requestsFocused
-            ? panelHints
-            : composerFocused
-              ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
-              : diffShown
-                ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
-                : `↑↓ scroll  PgUp/PgDn page  g/G top/bottom  ${THREAD_PANE_SHORTCUT_HINTS}  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
+          : queueFocused
+            ? queueHints
+            : requestsFocused
+              ? panelHints
+              : composerFocused
+                ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : queueVisible ? "tab queue" : "tab focus"}  ⌘K palette`
+                : diffShown
+                  ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
+                  : `↑↓ scroll  PgUp/PgDn page  g/G top/bottom  ${THREAD_PANE_SHORTCUT_HINTS}  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -1797,10 +1903,19 @@ function Shell(props: AppProps) {
                 />
               ) : null}
               {composerTarget.kind === "thread" && !diffShown ? (
-                <QueuedMessages
+                <QueuePanel
                   key={`queue:${composerTarget.threadId}`}
-                  queueAtom={connection.thread(composerTarget.threadId).queueAtom}
+                  ref={queuePanelRef}
+                  threadId={composerTarget.threadId}
+                  viewAtom={connection.thread(composerTarget.threadId).queueViewAtom}
+                  controller={queue}
                   theme={theme}
+                  focused={queueFocused && !overlayFocused}
+                  onFocus={focusQueue}
+                  onLeave={focusComposer}
+                  onType={typeIntoComposer}
+                  onShown={setQueueShown}
+                  onHints={setQueueHints}
                 />
               ) : null}
               <ComposerDock
@@ -1834,6 +1949,12 @@ function Shell(props: AppProps) {
                     launchWorktree: git.launchWorktree,
                     sendBlockedReason: git.sendBlockedReason,
                   },
+                  ...(composerTarget.kind === "thread"
+                    ? {
+                        queuedMessageIds: connection.thread(composerTarget.threadId)
+                          .queuedMessageIdsAtom,
+                      }
+                    : {}),
                   mentionSearch: {
                     cwd: activeThread
                       ? threadWorkspacePath(activeThread, activeProject ?? undefined)
@@ -1859,11 +1980,7 @@ function Shell(props: AppProps) {
                 focus={
                   // Overlays with their own text box take OpenTUI's focus; releasing the
                   // dock's here makes it take focus back when they close.
-                  modelPicker !== null ||
-                  paletteOpen ||
-                  git.overlay !== null ||
-                  management.dialogOpen ||
-                  archivedSelected !== null
+                  overlayFocused
                     ? null
                     : composerFocused
                       ? "composer"

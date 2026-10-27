@@ -1,5 +1,12 @@
 import { Connection, EnvironmentSupervisor } from "@t3tools/client-runtime/connection";
-import type { ResumeThreadQueueInput } from "@t3tools/client-runtime/operations";
+import type {
+  CancelQueuedRunInput,
+  EditQueuedRunInput,
+  PromoteQueuedRunInput,
+  ReorderQueuedRunInput,
+  ResumeThreadQueueInput,
+} from "@t3tools/client-runtime/operations";
+import { makeQueuedRunsAtom, type QueuedRunsAtom } from "@t3tools/client-runtime/queued-run-edit";
 import { createEnvironmentCatalogAtoms } from "@t3tools/client-runtime/state/connections";
 import { createFilesystemEnvironmentAtoms } from "@t3tools/client-runtime/state/filesystem";
 import { createOrchestrationEnvironmentAtoms } from "@t3tools/client-runtime/state/orchestration";
@@ -74,6 +81,7 @@ import type {
   OrchestrationV2ShellSnapshot,
   ProjectCloneStartInput,
   ProjectSearchEntriesInput,
+  RunId,
   ServerSettingsPatch,
   SourceControlCloneRepositoryInput,
   ThreadId,
@@ -96,6 +104,7 @@ import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 import type { ComposerCommandResult, WorkspaceGuard } from "../composerSender.ts";
 import { deriveDiffTurns, NO_DIFF_TURNS, type DiffRange, type DiffTurns } from "../diffTurns.ts";
 import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
+import { createQueueViewSelector, queuedMessageIdsKey, type QueueView } from "../queueView.ts";
 import { branchRefsInput, mergeRefPages, type BranchRefPages } from "../branchPicker.ts";
 import {
   deriveWorktreeLaunch,
@@ -190,6 +199,40 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       select(Option.getOrNull(get(threadDetails.stateAtom({ environmentId, threadId })).data)),
     ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-requests:${threadId}`));
   });
+  // The messages the server queued, as the queue list shows them; the same view while a
+  // streaming run changes only the transcript.
+  const queueViewAtom = Atom.family((threadId: ThreadId) => {
+    const ref = { environmentId, threadId };
+    const select = createQueueViewSelector();
+    return Atom.make((get): QueueView | null => {
+      const workflow = get(threadDetails.queueWorkflowAtom(ref));
+      const projection = Option.getOrNull(get(threadDetails.stateAtom(ref)).data);
+      return select(
+        workflow === null || projection === null
+          ? null
+          : { workflow, runs: projection.runs, worktreePath: projection.thread.worktreePath },
+      );
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-queue:${threadId}`));
+  });
+  const queuedMessageIdsAtom = Atom.family((threadId: ThreadId) =>
+    Atom.make((get) => queuedMessageIdsKey(get(queueViewAtom(threadId)))).pipe(
+      Atom.setIdleTTL(0),
+      Atom.withLabel(`tr3x:thread-queued-ids:${threadId}`),
+    ),
+  );
+  // What an open queued-message edit watches for its run leaving the queue, as on web.
+  const queuedRunsAtom = Atom.family((threadId: ThreadId): QueuedRunsAtom =>
+    makeQueuedRunsAtom({
+      threadId,
+      snapshot: snapshotAtom(environmentId),
+      detailStatus: threadDetails.statusAtom({ environmentId, threadId }),
+      runs: Atom.make(
+        (get) =>
+          Option.getOrNull(get(threadDetails.stateAtom({ environmentId, threadId })).data)?.runs ??
+          null,
+      ),
+    }),
+  );
   // The turns the diff panel can show; a new list only when checkpoints or runs change.
   const diffTurnsAtom = Atom.family((threadId: ThreadId) => {
     let previous: { checkpoints: unknown; runs: unknown } | null = null;
@@ -385,9 +428,17 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         errorAtom: threadDetails.errorAtom(ref),
         historyAtom: threadDetails.historyAtom(ref),
         requestQueueAtom: requestQueueAtom(threadId),
-        queueAtom: threadDetails.queueWorkflowAtom(ref),
+        queueViewAtom: queueViewAtom(threadId),
+        /** The queued messages' ids as one key, for hiding pending sends the server lists. */
+        queuedMessageIdsAtom: queuedMessageIdsAtom(threadId),
+        queuedRunsAtom: queuedRunsAtom(threadId),
       };
     },
+    /** A run's status as the thread's subscription has it now; null when it isn't known. */
+    runStatus: (threadId: ThreadId, runId: RunId): string | null =>
+      Option.getOrNull(
+        registry.get(threadDetails.stateAtom({ environmentId, threadId })).data,
+      )?.runs.find((run) => run.id === runId)?.status ?? null,
     /** The turns a thread's diff panel can show, live from its subscription. */
     diffTurnsAtom: (threadId: ThreadId) => diffTurnsAtom(threadId),
     /** A checkpoint range's unified diff; from turn 0 it is the full thread diff, as on web. */
@@ -421,6 +472,14 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       runThreadCommand(threadCommands.interruptTurn, input),
     resumeQueue: (input: ResumeThreadQueueInput) =>
       runThreadCommand(threadCommands.resumeThreadQueue, input),
+    editQueuedRun: (input: EditQueuedRunInput) =>
+      runThreadCommand(threadCommands.editQueuedRun, input),
+    cancelQueuedRun: (input: CancelQueuedRunInput) =>
+      runThreadCommand(threadCommands.cancelQueuedRun, input),
+    reorderQueuedRun: (input: ReorderQueuedRunInput) =>
+      runThreadCommand(threadCommands.reorderQueuedRun, input),
+    promoteQueuedRun: (input: PromoteQueuedRunInput) =>
+      runThreadCommand(threadCommands.promoteQueuedRun, input),
     setRuntimeMode: (input: SetThreadRuntimeModeInput) =>
       runThreadCommand(threadCommands.setRuntimeMode, input),
     setInteractionMode: (input: SetThreadInteractionModeInput) =>

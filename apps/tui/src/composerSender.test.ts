@@ -5,6 +5,7 @@ import {
   OrchestrationV2DispatchCommandError,
   ProjectId,
   ProviderInstanceId,
+  RunId,
   ThreadId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -1310,5 +1311,95 @@ describe("composer sender, worktree setup", () => {
     // The follow-up is checked once the launch made the thread.
     expect(ids(calls)).toEqual(["cmd-1"]);
     expect(store.getDraft("new-1").text).toBe("follow-up");
+  });
+});
+
+describe("composer sender, send now from the queue", () => {
+  const second = { commandId: CommandId.make("cmd-2"), messageId: MessageId.make("msg-2") };
+  const runId = RunId.make("run-queued");
+  const starts = (calls: ReturnType<typeof setup>["calls"]) =>
+    calls
+      .filter((call) => call.kind === "queue.resume")
+      .map((call) => (call.input as { runId?: string }).runId ?? "all");
+
+  it("sends queued-run.start for that run", async () => {
+    const { sender, calls } = setup([]);
+    expect(sender.startQueued(ThreadId.make("t1"), runId)).toBe(true);
+    await settle();
+    expect(starts(calls)).toEqual(["run-queued"]);
+  });
+
+  it("goes ahead of messages held here and releases them, as a resume does", async () => {
+    const inFlight = deferred();
+    const { sender, calls, store } = setup([inFlight.promise]);
+    const first = sender.send(send());
+    void sender.send(send(second));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    expect(store.snapshot("t1").sends.map((entry) => entry.status)).toEqual(["held"]);
+    sender.startQueued(ThreadId.make("t1"), runId);
+    await settle();
+    expect(calls.map((call) => call.kind)).toEqual(["start-turn", "queue.resume", "start-turn"]);
+    expect(starts(calls)).toEqual(["run-queued"]);
+    expect(ids(calls).at(-1)).toBe("cmd-2");
+  });
+
+  it("replaces a resume that hasn't gone out, and a second press sends nothing more", async () => {
+    let answer: (value: WorkspaceBlock) => void = () => {};
+    const { sender, calls } = setup([], {
+      blockedReason: () =>
+        new Promise<WorkspaceBlock>((resolve) => {
+          answer = resolve;
+        }),
+    });
+    sender.resume(ThreadId.make("t1"));
+    await settle();
+    expect(sender.startQueued(ThreadId.make("t1"), runId)).toBe(true);
+    expect(sender.startQueued(ThreadId.make("t1"), runId)).toBe(false);
+    answer(null);
+    await settle();
+    answer(null);
+    await settle();
+    expect(starts(calls)).toEqual(["run-queued"]);
+  });
+
+  it("won't go out while the worktree isn't there", async () => {
+    const { sender, calls, store } = setup([], { blockedReason: () => "Worktree setup failed" });
+    sender.startQueued(ThreadId.make("t1"), runId);
+    await settle();
+    expect(calls).toEqual([]);
+    expect(store.snapshot("t1").notice).toBe("Worktree setup failed");
+  });
+
+  it("says why when the server turns it down, e.g. the run already started", async () => {
+    const started: ComposerCommandResult = {
+      ok: false,
+      error: new OrchestrationV2DispatchCommandError({
+        commandId: CommandId.make("start"),
+        commandType: "queued-run.start",
+        message: "A queued user message can only be sent now while the thread is stopped.",
+      }),
+      interrupted: false,
+    };
+    const { sender, calls, store } = setup([started]);
+    sender.startQueued(ThreadId.make("t1"), runId);
+    await settle();
+    expect(starts(calls)).toEqual(["run-queued"]);
+    expect(store.snapshot("t1").notice).toBe(
+      "Couldn't send it now: A queued user message can only be sent now while the thread is stopped.",
+    );
+    expect(sender.pendingCount()).toBe(0);
+  });
+
+  it("retries a dropped start with the same id, so the server runs it once", async () => {
+    const { sender, calls, elapse } = setup([dropped]);
+    sender.startQueued(ThreadId.make("t1"), runId);
+    await settle();
+    elapse(retryDelayMs(0));
+    await settle();
+    const commandIds = calls.map((call) => (call.input as { commandId: string }).commandId);
+    expect(commandIds).toHaveLength(2);
+    expect(commandIds[1]).toBe(commandIds[0]);
   });
 });

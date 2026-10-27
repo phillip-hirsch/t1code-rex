@@ -122,11 +122,23 @@ function controlKeyFromSequence(sequence: string | undefined): string | null {
   return String.fromCharCode(code + 96);
 }
 
+/** OpenTUI's names for keys whose upstream bindings use the browser's (`alt+arrowup`). */
+const BROWSER_KEY_NAMES: Readonly<Record<string, string>> = {
+  up: "arrowup",
+  down: "arrowdown",
+  left: "arrowleft",
+  right: "arrowright",
+  return: "enter",
+  kpenter: "enter",
+};
+
 function normalizeEventKey(event: TuiShortcutEventLike): string {
   const { keyName, sequence } = event;
   const normalizedName = keyName.toLowerCase();
   if (normalizedName === "esc") return "escape";
   if (normalizedName === "space") return " ";
+  const browserName = BROWSER_KEY_NAMES[normalizedName];
+  if (browserName !== undefined) return browserName;
   if (event.ctrl || event.alt || event.super) return normalizedName;
   const controlKey = controlKeyFromSequence(sequence);
   if (controlKey) return controlKey;

@@ -6,7 +6,7 @@ import type {
   SetThreadRuntimeModeInput,
   StartThreadTurnInput,
 } from "@t3tools/client-runtime/state/threads";
-import { CommandId, type ThreadId } from "@t3tools/contracts";
+import { CommandId, type RunId, type ThreadId } from "@t3tools/contracts";
 
 import {
   buildStartTurnInput,
@@ -75,7 +75,29 @@ export interface WorkspaceGuard {
 
 export type WorkspaceBlock = string | null | undefined;
 
-/** A message, or the `queue.resume` that releases the server's held queue after Stop. */
+/** How long a guard's answer may take before the job waits and asks again, as offline. */
+const GUARD_WAIT_MS = 5_000;
+
+/** A guard's answer, or undefined (unknown, as offline) when none comes in time. */
+export function awaitWorkspaceBlock(
+  answer: Promise<WorkspaceBlock>,
+  schedule: (run: () => void, delayMs: number) => () => void,
+): Promise<WorkspaceBlock> {
+  let cancelWait = () => {};
+  const timedOut = new Promise<undefined>((resolve) => {
+    cancelWait = schedule(() => resolve(undefined), GUARD_WAIT_MS);
+  });
+  return Promise.race([answer, timedOut]).then((value) => {
+    cancelWait();
+    return value;
+  });
+}
+
+/**
+ * A message, or the `queue.resume` that releases the server's held queue after Stop. A resume
+ * with a run is upstream's "Send now" (`queued-run.start`): it releases the queue too, with
+ * that message first.
+ */
 interface JobState {
   readonly kind: "send" | "resume";
   readonly threadId: ThreadId;
@@ -97,7 +119,7 @@ interface SendJob extends JobState {
   next: number;
 }
 
-type ResumeJob = JobState & { readonly kind: "resume" };
+type ResumeJob = JobState & { readonly kind: "resume"; readonly runId?: RunId };
 
 export type ComposerJob = Pick<JobState, "kind" | "threadId" | "commandId">;
 
@@ -124,8 +146,6 @@ interface ThreadQueue {
 }
 
 const OK: ComposerCommandResult = { ok: true };
-/** How long a guard's answer may take before the job waits and asks again, as offline. */
-const GUARD_WAIT_MS = 5_000;
 const ABANDONED = Symbol("abandoned");
 const HELD = Symbol("held");
 /** The thread's runs aren't loaded yet, so whether its worktree is there is unknown. */
@@ -302,12 +322,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
     queue.guard ??= guardWorkspace(job.threadId);
     const reason = queue.guard.blockedReason();
     if (!(reason instanceof Promise)) return gated(reason);
-    let cancelWait = () => {};
-    const timedOut = new Promise<undefined>((resolve) => {
-      cancelWait = options.schedule(() => resolve(undefined), GUARD_WAIT_MS);
-    });
-    return Promise.race([reason, timedOut]).then((answer) => {
-      cancelWait();
+    return awaitWorkspaceBlock(reason, options.schedule).then((answer) => {
       // The answer took a moment: anything that changed meanwhile wins, Stop included.
       if (disposed || !queue.jobs.includes(job)) return ABANDONED;
       if (queue.held || (job.kind === "send" && queue.jobs[0] !== job)) return HELD;
@@ -357,8 +372,13 @@ export function createComposerSender(options: ComposerSenderOptions) {
       if (gated !== null) return gated;
       mark(job, "sending");
       job.dispatched = true;
+      const { runId } = job;
       return attempt(job, () =>
-        options.resumeQueue({ commandId: job.commandId, threadId: job.threadId }),
+        options.resumeQueue({
+          commandId: job.commandId,
+          threadId: job.threadId,
+          ...(runId === undefined ? {} : { runId }),
+        }),
       );
     }
     while (job.next < job.stages.length) {
@@ -482,7 +502,12 @@ export function createComposerSender(options: ComposerSenderOptions) {
               // The server still holds its queue, so the messages held here stay held.
               queue.jobs.splice(queue.jobs.indexOf(job), 1);
               queue.held = true;
-              store.setNotice(job.threadId, `Resume failed: ${reason} (/resume, /discard)`);
+              store.setNotice(
+                job.threadId,
+                job.runId === undefined
+                  ? `Resume failed: ${reason} (/resume, /discard)`
+                  : `Couldn't send it now: ${reason}`,
+              );
               break;
             }
             restoreMessages(queue, reason);
@@ -509,9 +534,10 @@ export function createComposerSender(options: ComposerSenderOptions) {
   /** A command in flight that must finish where it is: a resume or message that went out. */
   const committed = (job: Job | undefined): job is Job => job?.dispatched === true;
 
-  const resumeJob = (threadId: ThreadId): ResumeJob => ({
+  const resumeJob = (threadId: ThreadId, runId?: RunId): ResumeJob => ({
     kind: "resume",
     threadId,
+    ...(runId === undefined ? {} : { runId }),
     commandId: CommandId.make(NodeCrypto.randomUUID()),
     attempt: 0,
     status: "sending",
@@ -593,6 +619,33 @@ export function createComposerSender(options: ComposerSenderOptions) {
       if (current === undefined) void drain(threadId, queue);
       else if (current.status === "stuck") current.abandon?.();
       return sendJobs(queue).length;
+    },
+
+    /**
+     * Upstream's "Send now" for a message the server queued: `queued-run.start`, which also
+     * releases the server's held queue. So it goes where a resume would, ahead of the messages
+     * held here, and releases them too; it replaces a resume that hasn't gone out. False when
+     * a resume or start already went out, or this one is already on its way.
+     */
+    startQueued(threadId: ThreadId, runId: RunId): boolean {
+      const queue = queueFor(threadId);
+      const current = inFlight(queue);
+      if (current?.kind === "resume" && current.dispatched && current.status !== "stuck") {
+        return false;
+      }
+      const at = committed(current) ? queue.jobs.indexOf(current) + 1 : 0;
+      const pending = queue.jobs[at];
+      if (pending?.kind === "resume") {
+        if (pending.runId === runId) return false;
+        // Not out yet: a resume waiting on its guard sees it's gone and steps aside.
+        queue.jobs.splice(at, 1);
+      }
+      queue.jobs.splice(at, 0, resumeJob(threadId, runId));
+      queue.held = false;
+      for (const job of sendJobs(queue)) if (job.status === "held") mark(job, "sending");
+      if (current === undefined) void drain(threadId, queue);
+      else if (current.status === "stuck") current.abandon?.();
+      return true;
     },
 
     /**

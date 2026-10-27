@@ -10,7 +10,6 @@ import {
   type TextareaRenderable,
 } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
-import type { ThreadQueueWorkflowState } from "@t3tools/client-runtime/state/thread-workflows";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import {
@@ -67,6 +66,7 @@ import {
 import type { ComposerSendEntry, ComposerStore } from "./composerStore.ts";
 import { pastedImagePath, resolveImageAttachmentFromPath } from "./composerSubmit.ts";
 import { truncateToolbarLabel } from "./composerControlLabels.ts";
+import { unlistedSends } from "./queueView.ts";
 import { cursorStringOffset, replaceBeforeCursor } from "./textareaOffsets.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 
@@ -148,8 +148,12 @@ export interface ComposerProps {
   /** `/git`, `/branch` and `/worktree`, where the window has the branch toolbar. */
   readonly git?: ComposerGitCommands;
   readonly mentionSearch: ComposerMentionSearch;
+  /** The server's queued message ids (`queuedMessageIdsKey`); the queue list shows those. */
+  readonly queuedMessageIds?: Atom.Atom<string>;
   readonly ref?: Ref<ComposerHandle>;
 }
+
+const NO_QUEUED_IDS: Atom.Atom<string> = Atom.make("");
 
 function newId(): string {
   return NodeCrypto.randomUUID();
@@ -167,6 +171,7 @@ export function Composer(props: ComposerProps) {
   const { target, store, sender, theme, baseSettings, running, stopRequested, ref } = props;
   const palette = theme.palette;
   const threadId = target.threadId;
+  const queuedIds = useAtomValue(props.queuedMessageIds ?? NO_QUEUED_IDS);
   const snapshot = useSyncExternalStore(
     useCallback(
       (listener: () => void) => store.subscribeThread(threadId, listener),
@@ -574,7 +579,7 @@ export function Composer(props: ComposerProps) {
 
   return (
     <box style={{ flexDirection: "column", flexShrink: 0 }}>
-      {snapshot.sends.map((entry) => (
+      {unlistedSends(snapshot.sends, queuedIds).map((entry) => (
         <PendingSendRow key={entry.send.commandId} entry={entry} running={running} theme={theme} />
       ))}
       {snapshot.notice ? (
@@ -1021,43 +1026,6 @@ function PendingSendRow(props: { entry: ComposerSendEntry; running: boolean; the
         content={`${preview}${images}`}
         style={{ fg: palette.muted }}
       />
-    </box>
-  );
-}
-
-const QUEUED_ROWS_MAX = 3;
-
-/**
- * Messages waiting behind the running turn. They aren't timeline items until they start,
- * so without this a queued send would seem to vanish. Editing the queue comes later.
- */
-export function QueuedMessages(props: {
-  readonly queueAtom: Atom.Atom<ThreadQueueWorkflowState | null>;
-  readonly theme: TuiTheme;
-}) {
-  const queue = useAtomValue(props.queueAtom);
-  const palette = props.theme.palette;
-  const queued = queue?.queuedRuns ?? [];
-  if (queued.length === 0) return null;
-  const hidden = queued.length - QUEUED_ROWS_MAX;
-  return (
-    <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
-      {queued.slice(0, QUEUED_ROWS_MAX).map((entry, index) => (
-        <box key={entry.run.id} style={{ flexDirection: "row", height: 1 }}>
-          <text
-            wrapMode="none"
-            content={index === 0 && queue?.isHeld ? "󰏤 Queued, held: " : "󰒲 Queued: "}
-            style={{ fg: palette.subtle, flexShrink: 0 }}
-          />
-          <text
-            wrapMode="none"
-            truncate
-            content={entry.text.replace(/\s+/gu, " ").trim()}
-            style={{ fg: palette.muted }}
-          />
-        </box>
-      ))}
-      {hidden > 0 ? <text content={`  and ${hidden} more`} style={{ fg: palette.subtle }} /> : null}
     </box>
   );
 }
