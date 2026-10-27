@@ -3,7 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { type CliRenderer, decodePasteBytes, type KeyEvent } from "@opentui/core";
-import { usePaste, useTerminalDimensions } from "@opentui/react";
+import { useTerminalDimensions } from "@opentui/react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import {
   connectionProjectionPhase,
@@ -122,7 +122,7 @@ import {
 } from "./modelPicker.ts";
 import { ModelPickerView } from "./modelPickerView.tsx";
 import { NewThreadView } from "./newThreadView.tsx";
-import { useSyncKeyboard } from "./syncKeyboard.ts";
+import { useSyncKeyboard, useSyncPaste } from "./syncKeyboard.ts";
 import { createRequestPanelStore } from "./requestPanelStore.ts";
 import { NO_PENDING_REQUESTS, type PendingRequest } from "./requestQueue.ts";
 import { createRedirectDecliner } from "./requestRedirect.ts";
@@ -1491,8 +1491,9 @@ function Shell(props: AppProps) {
     if (handleKey(key)) key.preventDefault();
   });
   // A bracketed paste is one event, not keys: with the sidebar focused it goes to the
-  // composer too. Dialogs, menus and the palette keep theirs (their inputs take pastes).
-  usePaste((event) => {
+  // composer too, and the focus it moves there holds for an Enter in the same input chunk.
+  // Dialogs, menus and the palette keep theirs (their inputs take pastes).
+  useSyncPaste((event) => {
     const overlayOpen =
       modelPickerRef.current !== null ||
       management.dialogOpen ||

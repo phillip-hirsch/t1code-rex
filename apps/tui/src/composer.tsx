@@ -25,6 +25,7 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -32,7 +33,7 @@ import {
 } from "react";
 
 import { saveClipboardImageToFile } from "./clipboardImage.ts";
-import { resolveComposerKey, type ComposerKeyState } from "./composerKeys.ts";
+import { createEnterStopGuard, resolveComposerKey, type ComposerKeyState } from "./composerKeys.ts";
 import {
   MENTION_SEARCH_DEBOUNCE_MS,
   MENTION_SEARCH_LIMIT,
@@ -208,6 +209,12 @@ export function Composer(props: ComposerProps) {
     props.focused && mention !== null && dismissedMention !== mention.query && mentionCwd !== null;
   const mentionMenuOpen = mentionActive && mentionEntries.length > 0;
   const attachments = snapshot.attachments;
+
+  // Taking focus arms it in a layout effect, so the next key of the same input chunk sees it.
+  const [enterStop] = useState(createEnterStopGuard);
+  useLayoutEffect(() => {
+    if (props.focused) enterStop.arm();
+  }, [enterStop, props.focused]);
 
   const heldCount = snapshot.sends.filter((entry) => entry.status === "held").length;
   /** What the send button shows, and what Enter on an empty composer does. */
@@ -394,10 +401,11 @@ export function Composer(props: ComposerProps) {
     // Enters must find them already sent.
     const draftAttachments = store.getDraft(threadId).attachments;
     if (text.trim().length === 0 && draftAttachments.length === 0) {
-      // Like before, Enter on an empty composer stops a running turn, but only one that
-      // showed empty; a second quick Enter after a send must not stop the run. Once the
-      // run stopped, it sends what Stop held, like upstream's "Resume thread" button.
-      if (primary === "stop" && !stopRequested) props.onStop();
+      // Like before, Enter on an empty composer stops a running turn, but never right
+      // after a send or after Enter focused the composer (see the guard). Once the run
+      // stopped, it sends what Stop held, like upstream's "Resume thread" button.
+      const mayStop = enterStop.pressEmptyEnter();
+      if (primary === "stop" && !stopRequested && mayStop) props.onStop();
       if (primary === "resume") resumeHeld();
       return;
     }
@@ -422,6 +430,7 @@ export function Composer(props: ComposerProps) {
         settings,
       }),
     );
+    enterStop.arm();
     store.clearDraft(threadId);
     if (requested === undefined) replaceText("");
     setRemoveArmed(false);

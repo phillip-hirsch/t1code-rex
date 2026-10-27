@@ -6,7 +6,6 @@
  *   bun apps/tui/scripts/check-transcript.tsx
  */
 import { getTreeSitterClient, type ScrollBoxRenderable } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import {
   act,
@@ -23,6 +22,7 @@ import { MessageMarkdown, useMarkdownStyles } from "../src/messageMarkdownView.t
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
 import { resolveScrollKey } from "../src/threadScroll.ts";
 import { timelineRowId, useTranscriptScrollbox } from "../src/threadScrollbox.ts";
+import { useSyncKeyboard } from "../src/syncKeyboard.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -65,7 +65,7 @@ function useTranscriptHarness(initial: ReadonlyArray<Row>, ref: Ref<TranscriptHa
       return scrollRef.current;
     },
   }));
-  useKeyboard((key) => {
+  useSyncKeyboard((key) => {
     const scrollbox = scrollRef.current;
     if (focus !== "thread" || !scrollbox) return;
     const action = resolveScrollKey(key, scrollbox.viewport.height);

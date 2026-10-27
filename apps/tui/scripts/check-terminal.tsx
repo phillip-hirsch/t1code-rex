@@ -6,7 +6,6 @@
  *   bun apps/tui/scripts/check-terminal.tsx
  */
 import { decodePasteBytes, parseKeypress, type KeyEvent } from "@opentui/core";
-import { useKeyboard, usePaste } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import {
   applyTerminalAttachStreamEvent,
@@ -25,6 +24,7 @@ import { createTerminalEmulator } from "../src/terminalEmulator.ts";
 import { encodeTerminalKey } from "../src/terminalKeys.ts";
 import { TerminalPaneRenderable } from "../src/terminalPane.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
+import { useSyncKeyboard, useSyncPaste } from "../src/syncKeyboard.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -319,7 +319,7 @@ function Harness() {
   useEffect(() => {
     controls.actions = drawer.actions;
   });
-  useKeyboard((key: KeyEvent) => {
+  useSyncKeyboard((key: KeyEvent) => {
     const shortcut = resolveTuiShortcutCommand(
       tuiShortcutEvent(key),
       DEFAULT_RESOLVED_KEYBINDINGS,
@@ -330,7 +330,7 @@ function Harness() {
     );
     if (drawer.handleKey(key, shortcut)) key.preventDefault();
   });
-  usePaste((event) => {
+  useSyncPaste((event) => {
     if (drawer.paste(decodePasteBytes(event.bytes))) event.preventDefault();
   });
   return (

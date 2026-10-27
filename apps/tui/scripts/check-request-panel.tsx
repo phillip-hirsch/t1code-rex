@@ -5,7 +5,6 @@
  * Needs Bun. Run: bun apps/tui/scripts/check-request-panel.tsx
  */
 import type { KeyEvent } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import type { StartThreadTurnInput } from "@t3tools/client-runtime/state/threads";
 import { ProjectId, ProviderInstanceId, RunId, ThreadId } from "@t3tools/contracts";
@@ -37,6 +36,7 @@ import {
   source,
 } from "../src/requestTestFixtures.ts";
 import { DEFAULT_TUI_THEME } from "../src/theme.ts";
+import { useSyncKeyboard } from "../src/syncKeyboard.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -100,7 +100,7 @@ function Shell(props: {
   const [focus, setFocus] = useState<DockFocus>("composer");
   const ref = useRef<ComposerDockHandle | null>(null);
   useImperativeHandle(props.controls, () => ({ setQueue, focus }), [focus]);
-  useKeyboard((key: KeyEvent) => {
+  useSyncKeyboard((key: KeyEvent) => {
     props.keys.push(key);
     if (ref.current?.handleKey(key)) key.preventDefault();
   });

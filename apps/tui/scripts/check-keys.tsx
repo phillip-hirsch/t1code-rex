@@ -1,13 +1,14 @@
 // @effect-diagnostics globalConsole:off -- A Bun check script; it runs outside the Effect runtime.
-// Drives useSyncKeyboard through OpenTUI's real input parser: several keys arriving in one
-// stdin chunk must each see the state the previous key left, as the palette and context
-// menu need. Plain useKeyboard runs alongside as the control that shows the failure.
-import type { KeyEvent } from "@opentui/core";
-import { useKeyboard } from "@opentui/react";
+// Drives useSyncKeyboard and useSyncPaste through OpenTUI's real input parser: several keys
+// arriving in one stdin chunk must each see the state the previous key left, as the palette
+// and context menu need, and Enter after a paste must see the focus the paste moved. Plain
+// useKeyboard and usePaste are the controls that show the failures.
+import { decodePasteBytes, type KeyEvent, type PasteEvent } from "@opentui/core";
+import { useKeyboard, usePaste } from "@opentui/react";
 import { testRender } from "@opentui/react/test-utils";
 import { act, useEffect, useState } from "react";
 
-import { useSyncKeyboard } from "../src/syncKeyboard.ts";
+import { useSyncKeyboard, useSyncPaste } from "../src/syncKeyboard.ts";
 
 let failures = 0;
 function check(label: string, actual: unknown, expected: unknown): void {
@@ -87,6 +88,67 @@ check(
   plain[0]?.picked === "d",
   false,
 );
+
+interface PasteState {
+  readonly focus: "sidebar" | "composer";
+  readonly sent: string | null;
+  readonly opened: number;
+}
+let pasteLatest: PasteState = { focus: "sidebar", sent: null, opened: 0 };
+
+/**
+ * As ui.tsx routes them: a paste with the sidebar focused goes to the composer and focuses it;
+ * Enter sends from the composer and opens the row from the sidebar.
+ */
+function PasteShell(props: {
+  readonly useKeys: (handler: (key: KeyEvent) => void) => void;
+  readonly usePastes: (handler: (event: PasteEvent) => void) => void;
+}) {
+  const [focus, setFocus] = useState<"sidebar" | "composer">("sidebar");
+  const [draft, setDraft] = useState("");
+  const [sent, setSent] = useState<string | null>(null);
+  const [opened, setOpened] = useState(0);
+  useEffect(() => {
+    pasteLatest = { focus, sent, opened };
+  });
+  props.usePastes((event) => {
+    if (focus !== "sidebar") return;
+    setDraft(draft + decodePasteBytes(event.bytes));
+    setFocus("composer");
+  });
+  props.useKeys((key) => {
+    if (key.name !== "return") return;
+    if (focus === "composer") {
+      setSent(draft);
+      setDraft("");
+    } else setOpened(opened + 1);
+  });
+  return <text content={`${focus} ${sent} ${opened}`} />;
+}
+
+async function runPaste(
+  useKeys: (handler: (key: KeyEvent) => void) => void,
+  usePastes: (handler: (event: PasteEvent) => void) => void,
+): Promise<PasteState> {
+  pasteLatest = { focus: "sidebar", sent: null, opened: 0 };
+  const setup = await testRender(<PasteShell useKeys={useKeys} usePastes={usePastes} />, {
+    width: 40,
+    height: 3,
+  });
+  act(() => {
+    setup.renderer.stdin.emit("data", Buffer.from("\u001b[200~hello\u001b[201~\r"));
+  });
+  await setup.renderOnce();
+  setup.renderer.destroy();
+  return pasteLatest;
+}
+
+const pasted = await runPaste(useSyncKeyboard, useSyncPaste);
+check("sidebar: a paste and Enter in one chunk send the pasted text", pasted.sent, "hello");
+check("…and Enter doesn't reach the sidebar", pasted.opened, 0);
+// a550bb341's Shell: synced keys, but a plain paste.
+const plainPaste = await runPaste(useSyncKeyboard, usePaste);
+check("control: a plain usePaste leaves Enter on the sidebar", plainPaste.opened, 1);
 
 console.log(failures === 0 ? "\nall key checks passed" : `\n${failures} key check(s) failed`);
 process.exit(failures === 0 ? 0 : 1);
