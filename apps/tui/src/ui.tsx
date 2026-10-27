@@ -122,6 +122,7 @@ import {
 } from "./modelPicker.ts";
 import { ModelPickerView } from "./modelPickerView.tsx";
 import { NewThreadView } from "./newThreadView.tsx";
+import { usePaletteNavigation, type PaletteKey } from "./paletteNavigation.ts";
 import { createRequestPanelStore } from "./requestPanelStore.ts";
 import { NO_PENDING_REQUESTS, type PendingRequest } from "./requestQueue.ts";
 import { createRedirectDecliner } from "./requestRedirect.ts";
@@ -389,8 +390,13 @@ function Shell(props: AppProps) {
   const serverConfig = useAtomValue(connection.serverConfigAtom);
   const { width: viewportColumns, height: viewportRows } = useTerminalDimensions();
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [paletteIndex, setPaletteIndex] = useState(0);
-  const [paletteQuery, setPaletteQuery] = useState("");
+  const {
+    query: paletteQuery,
+    index: paletteIndex,
+    reset: resetPalette,
+    live: livePalette,
+    press: pressPalette,
+  } = usePaletteNavigation();
   /** The archived-threads view's highlighted row; null while the view is closed. */
   const [archivedSelection, setArchivedSelection] = useState<ArchivedSelection | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
@@ -1282,7 +1288,7 @@ function Shell(props: AppProps) {
   useEffect(() => {
     if (layout.showSidebar && !wasDocked.current) setSidebarOverlayOpen(false);
     wasDocked.current = layout.showSidebar;
-  }, [layout.showSidebar]);
+  }, [layout.showSidebar, wasDocked]);
 
   const composerFocused = focusArea === "composer" && composerTarget !== null;
   const requestsFocused = focusArea === "requests" && composerTarget !== null;
@@ -1368,8 +1374,7 @@ function Shell(props: AppProps) {
     // In the terminal, Ctrl+K is the shell's; the palette waits until focus leaves.
     if ((!terminalFocused && isPaletteShortcut(key)) || shortcut === "commandPalette.toggle") {
       setContextMenu(null);
-      setPaletteIndex(0);
-      setPaletteQuery("");
+      resetPalette();
       setPaletteOpen((open) => !open);
       return true;
     }
@@ -1387,21 +1392,22 @@ function Shell(props: AppProps) {
     }
     if (paletteOpen) {
       if (key.name === "escape" || (key.ctrl && key.name === "c")) setPaletteOpen(false);
-      else if (key.name === "up") setPaletteIndex(Math.max(0, paletteSelected - 1));
-      else if (key.name === "down")
-        setPaletteIndex(Math.min(paletteActions.length - 1, paletteSelected + 1));
-      else if (isEnter(key.name)) {
-        const action = paletteActions[paletteSelected];
-        if (action && !key.repeated) runAction(action);
-      } else if (key.name === "backspace") {
-        setPaletteQuery((query) => query.slice(0, -1));
-        setPaletteIndex(0);
-      } else {
-        // Typing filters the list.
+      else {
         const text = printableText(key);
-        if (text !== null) {
-          setPaletteQuery((query) => query + text);
-          setPaletteIndex(0);
+        const paletteKey: PaletteKey | null =
+          key.name === "up" || key.name === "down" || key.name === "backspace"
+            ? { kind: key.name }
+            : // Typing filters the list.
+              text !== null
+              ? { kind: "text", text }
+              : null;
+        if (isEnter(key.name)) {
+          const { query, index } = livePalette();
+          const rows = filterPaletteActions(actions, query);
+          const action = rows[Math.min(index, rows.length - 1)];
+          if (action && !key.repeated) runAction(action);
+        } else if (paletteKey !== null) {
+          pressPalette(paletteKey, (query) => filterPaletteActions(actions, query).length);
         }
       }
       return true;
