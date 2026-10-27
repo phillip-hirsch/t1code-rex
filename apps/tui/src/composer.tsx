@@ -47,6 +47,7 @@ import {
   type ComposerAttachment,
   type ComposerDispatch,
   type ComposerTarget,
+  type LaunchWorktree,
 } from "./composerSend.ts";
 import type { ComposerSender } from "./composerSender.ts";
 import {
@@ -106,6 +107,14 @@ export const NO_MENTION_SEARCH_SOURCE: ComposerMentionSearch = {
   searchAtom: () => NO_MENTION_SEARCH,
 };
 
+export interface ComposerGitCommands {
+  readonly openMenu: () => void;
+  readonly openBranchPicker: (query: string) => void;
+  readonly toggleWorktree: () => void;
+  /** The new worktree a draft's first send makes; undefined launches it locally. */
+  readonly launchWorktree: () => LaunchWorktree | undefined;
+}
+
 export interface ComposerProps {
   readonly target: ComposerTarget;
   readonly store: ComposerStore;
@@ -133,6 +142,8 @@ export interface ComposerProps {
   readonly onClone: (args: string) => Promise<string | null>;
   /** `/diff`, where the window has a diff panel. */
   readonly onToggleDiff?: () => void;
+  /** `/git`, `/branch` and `/worktree`, where the window has the branch toolbar. */
+  readonly git?: ComposerGitCommands;
   readonly mentionSearch: ComposerMentionSearch;
   readonly ref?: Ref<ComposerHandle>;
 }
@@ -367,6 +378,18 @@ export function Composer(props: ComposerProps) {
             if (props.onToggleDiff) props.onToggleDiff();
             else props.onStatus("No diff here");
             return;
+          case "git-menu":
+            if (props.git) props.git.openMenu();
+            else props.onStatus("No git here");
+            return;
+          case "branch-picker":
+            if (props.git) props.git.openBranchPicker(action.query);
+            else props.onStatus("No git here");
+            return;
+          case "toggle-worktree":
+            if (props.git) props.git.toggleWorktree();
+            else props.onStatus("No git here");
+            return;
           case "clone":
             props.onStatus("Starting clone…");
             void props.onClone(action.args).then((error) => {
@@ -409,9 +432,11 @@ export function Composer(props: ComposerProps) {
       store.setNotice(threadId, "No provider is ready yet");
       return;
     }
+    const worktree = target.kind === "draft" ? props.git?.launchWorktree() : undefined;
     void sender.send(
       createComposerSend({
         target,
+        ...(worktree === undefined ? {} : { worktree }),
         text,
         attachments: draftAttachments,
         dispatch: chooseDispatch({

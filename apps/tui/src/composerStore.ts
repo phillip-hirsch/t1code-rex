@@ -1,6 +1,7 @@
 // @effect-diagnostics globalTimers:off -- The TUI runs on Bun outside the Effect runtime.
 import { ThreadId, type ProjectId } from "@t3tools/contracts";
 
+import type { EnvMode } from "./branchToolbar.ts";
 import type { ComposerAttachment, ComposerSend, UnconfirmedComposerSend } from "./composerSend.ts";
 import {
   applySettingsPatch,
@@ -57,6 +58,23 @@ export interface ComposerThreadSnapshot {
 export interface NewThreadDraft {
   readonly threadId: ThreadId;
   readonly projectId: ProjectId;
+  /** Picked in the branch toolbar; absent uses the server's default env mode. */
+  readonly envMode?: EnvMode;
+  /** A new worktree's base branch; absent starts from the checkout's branch. */
+  readonly baseBranch?: string;
+}
+
+function readNewThreadDraft(persisted: PersistedDraftThreadState): NewThreadDraft {
+  return {
+    threadId: ThreadId.make(persisted.id),
+    projectId: persisted.projectId as ProjectId,
+    ...(persisted.envMode === "local" || persisted.envMode === "worktree"
+      ? { envMode: persisted.envMode }
+      : {}),
+    ...(typeof persisted.baseBranch === "string" && persisted.baseBranch.length > 0
+      ? { baseBranch: persisted.baseBranch }
+      : {}),
+  };
 }
 
 export interface ComposerStoreOptions {
@@ -141,7 +159,7 @@ export function createComposerStore(options: ComposerStoreOptions) {
   const newThreadDrafts = new Map<string, NewThreadDraft>(
     Object.values(initialPrefs.draftThreadsByProjectId ?? {}).map((draft) => [
       draft.projectId,
-      { threadId: ThreadId.make(draft.id), projectId: draft.projectId as ProjectId },
+      readNewThreadDraft(draft),
     ]),
   );
   let defaults: ComposerSettingsDefaults = {
@@ -201,7 +219,12 @@ export function createComposerStore(options: ComposerStoreOptions) {
           : Object.fromEntries(
               [...newThreadDrafts.values()].map((draft): [string, PersistedDraftThreadState] => [
                 draft.projectId,
-                { id: draft.threadId, projectId: draft.projectId },
+                {
+                  id: draft.threadId,
+                  projectId: draft.projectId,
+                  ...(draft.envMode === undefined ? {} : { envMode: draft.envMode }),
+                  ...(draft.baseBranch === undefined ? {} : { baseBranch: draft.baseBranch }),
+                },
               ]),
             );
     }
@@ -374,6 +397,23 @@ export function createComposerStore(options: ComposerStoreOptions) {
       schedulePersist("newThreads");
       notifyGlobal();
       return draft;
+    },
+
+    /** Where the draft's thread will work: its env mode and a new worktree's base branch. */
+    setNewThreadDraftWorkspace(
+      threadId: string,
+      workspace: { readonly envMode: EnvMode; readonly baseBranch: string | null },
+    ) {
+      const draft = [...newThreadDrafts.values()].find((entry) => entry.threadId === threadId);
+      if (!draft) return;
+      newThreadDrafts.set(draft.projectId, {
+        threadId: draft.threadId,
+        projectId: draft.projectId,
+        envMode: workspace.envMode,
+        ...(workspace.baseBranch === null ? {} : { baseBranch: workspace.baseBranch }),
+      });
+      schedulePersist("newThreads");
+      notifyGlobal();
     },
 
     /** The draft became a real thread; its text moved with the send. */

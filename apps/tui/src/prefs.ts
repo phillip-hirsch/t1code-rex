@@ -41,6 +41,10 @@ export interface PersistedComposerDraft {
 export interface PersistedDraftThreadState {
   readonly id: string;
   readonly projectId: string;
+  /** "worktree" when the thread launches in a new worktree; absent uses the server default. */
+  readonly envMode?: "local" | "worktree";
+  /** The new worktree's base branch, once picked. */
+  readonly baseBranch?: string;
 }
 
 export interface TuiPrefs {

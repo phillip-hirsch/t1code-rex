@@ -74,3 +74,15 @@ describe("/clone", () => {
     expect(resolveComposerSlashAction("/clone")).toMatchObject({ type: "error" });
   });
 });
+
+describe("/git, /branch and /worktree", () => {
+  it("open the git menu and branch picker, and flip a draft's env mode", () => {
+    expect(resolveComposerSlashAction("/git")).toEqual({ type: "git-menu" });
+    expect(resolveComposerSlashAction("/branch")).toEqual({ type: "branch-picker", query: "" });
+    expect(resolveComposerSlashAction("/branch feat/x")).toEqual({
+      type: "branch-picker",
+      query: "feat/x",
+    });
+    expect(resolveComposerSlashAction("/worktree")).toEqual({ type: "toggle-worktree" });
+  });
+});

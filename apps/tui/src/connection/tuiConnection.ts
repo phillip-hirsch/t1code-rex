@@ -16,6 +16,12 @@ import {
   createShellEnvironmentAtoms,
 } from "@t3tools/client-runtime/state/shell";
 import { createServerEnvironmentAtoms } from "@t3tools/client-runtime/state/server";
+import {
+  createVcsActionManager,
+  createVcsEnvironmentAtoms,
+  type RunVcsStackedActionInput,
+  type VcsActionState,
+} from "@t3tools/client-runtime/state/vcs";
 import { createEnvironmentSessionAtoms } from "@t3tools/client-runtime/state/session";
 import {
   ShellSnapshotLoader,
@@ -49,6 +55,7 @@ import {
   type SetThreadRuntimeModeInput,
   type SettleThreadInput,
   type StartThreadTurnInput,
+  type StopThreadSessionInput,
   type ThreadSnapshotLoadResult,
   type UnarchiveThreadInput,
   type UnpinThreadInput,
@@ -64,8 +71,16 @@ import type {
   OrchestrationV2ShellSnapshot,
   ProjectCloneStartInput,
   ProjectSearchEntriesInput,
+  ServerSettingsPatch,
   SourceControlCloneRepositoryInput,
   ThreadId,
+  VcsCreateRefInput,
+  VcsInitInput,
+  VcsListRefsResult,
+  VcsPullInput,
+  VcsStatusResult,
+  VcsSwitchRefInput,
+  WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
 import { ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -94,6 +109,15 @@ const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
 export type CheckpointDiffAtom = Atom.Atom<
   AsyncResult.AsyncResult<OrchestrationGetTurnDiffResult, unknown>
 >;
+
+/** A checkout's live status; null when the server has none for it yet. */
+export type VcsStatusAtom = Atom.Atom<AsyncResult.AsyncResult<VcsStatusResult | null, unknown>>;
+export type VcsRefsAtom = Atom.Atom<AsyncResult.AsyncResult<VcsListRefsResult, unknown>>;
+export type WorktreeSetupAtom = Atom.Atom<
+  AsyncResult.AsyncResult<WorktreeSetupSnapshot | null, unknown>
+>;
+/** How many refs the branch picker lists; it filters them locally as you type. */
+export const BRANCH_PICKER_REF_LIMIT = 200;
 
 /** A management action's outcome: its value, or the failure to show. */
 export type TuiActionResult<A> =
@@ -248,6 +272,23 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     label: "tr3x:orchestration:archived-shell-snapshot",
     tag: ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
   });
+  // Branch status, refs and worktree setup, plus git actions with their streamed progress.
+  const vcs = createVcsEnvironmentAtoms(runtime);
+  const vcsActions = createVcsActionManager(runtime);
+  const vcsTarget = (cwd: string) => ({ environmentId, cwd });
+  /** Runs a VCS command while the checkout's action state shows it as busy. */
+  const trackVcs = <Input, A, E>(
+    cwd: string,
+    operation: "pull" | "switch_ref" | "create_ref" | "init",
+    label: string,
+    command: AtomCommand<{ environmentId: EnvironmentId; input: Input }, A, E>,
+    input: Input,
+  ) =>
+    vcsActions
+      .track(registry, vcsTarget(cwd), { operation, label }, () =>
+        runAtomCommand(registry, command, { environmentId, input }, { reportFailure: false }),
+      )
+      .then(toActionResult);
   const serverConfigsAtom = createEnvironmentServerConfigsAtom({
     catalogValueAtom: catalog.catalogValueAtom,
     serverConfigValueAtom: server.configValueAtom,
@@ -362,6 +403,34 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     refreshArchivedThreads: () => registry.refresh(archivedShellSnapshotAtom),
     /** The archived threads as the server has them now, never from cache. */
     fetchArchivedShellSnapshot: () => runAction(archivedShellSnapshot, {}),
+    /** Live status of a checkout, from `subscribeVcsStatus` while something reads it. */
+    vcsStatusAtom: (cwd: string): VcsStatusAtom => vcs.status({ environmentId, input: { cwd } }),
+    /** The branch picker's refs: one cached page, filtered locally. */
+    vcsRefsAtom: (cwd: string): VcsRefsAtom =>
+      vcs.listRefs({ environmentId, input: { cwd, limit: BRANCH_PICKER_REF_LIMIT } }),
+    /** What a checkout's git action is doing now: its phase, hook and last output line. */
+    vcsActionStateAtom: (cwd: string): Atom.Atom<VcsActionState> =>
+      vcsActions.stateAtom(vcsTarget(cwd)),
+    worktreeSetupAtom: (threadId: ThreadId): WorktreeSetupAtom =>
+      vcs.worktreeSetup({ environmentId, input: { threadId } }),
+    cancelWorktreeSetup: (threadId: ThreadId) => runAction(vcs.cancelWorktreeSetup, { threadId }),
+    refreshVcsStatus: (cwd: string) => runAction(vcs.refreshStatus, { cwd }),
+    switchRef: (input: VcsSwitchRefInput) =>
+      trackVcs(input.cwd, "switch_ref", "Switching branch", vcs.switchRef, input),
+    createRef: (input: VcsCreateRefInput) =>
+      trackVcs(input.cwd, "create_ref", "Creating branch", vcs.createRef, input),
+    initRepository: (input: VcsInitInput) =>
+      trackVcs(input.cwd, "init", "Initializing repository", vcs.init, input),
+    pull: (input: VcsPullInput) => trackVcs(input.cwd, "pull", "Pulling", vcs.pull, input),
+    /** Commit, push or open a PR; progress lands in `vcsActionStateAtom(cwd)` as it streams. */
+    runStackedAction: (cwd: string, input: RunVcsStackedActionInput) =>
+      runAtomCommand(registry, vcsActions.runStackedAction(vcsTarget(cwd)), input, {
+        reportFailure: false,
+      }).then(toActionResult),
+    stopThreadSession: (input: StopThreadSessionInput) =>
+      runAction(threadCommands.stopSession, input),
+    updateServerSettings: (patch: ServerSettingsPatch) =>
+      runAction(server.updateSettings, { patch }),
     retryNow: catalog.retryNow,
     dispose: () => {
       registry.dispose();

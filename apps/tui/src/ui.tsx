@@ -59,6 +59,13 @@ import {
 } from "./composerSettings.ts";
 import { createComposerStore } from "./composerStore.ts";
 import { DiffPanel, useDiffPanelControls, type DiffPanelHandle } from "./diffPanel.tsx";
+import { useGitControls } from "./gitController.ts";
+import {
+  BranchToolbar,
+  GitOverlay,
+  WorktreeSetupPanel,
+  type GitOverlayHandle,
+} from "./gitViews.tsx";
 import { DIFF_KEY_HINTS } from "./diffNavigation.ts";
 import type { TuiPaths } from "./config.ts";
 import type { TuiConnection } from "./connection/tuiConnection.ts";
@@ -399,6 +406,8 @@ function Shell(props: AppProps) {
   const [modelPicker, modelPickerRef, setModelPicker] = useSyncedState<ModelPickerState | null>(
     null,
   );
+  /** What the open model picker sets: the composer's model, or git's commit-message model. */
+  const [modelPickerPurpose, setModelPickerPurpose] = useState<"composer" | "commit">("composer");
   const [stopRequestedRunId, setStopRequestedRunId] = useState<string | null>(null);
   // Drafts are saved only by the window that owns prefs.json.
   const [composerStore] = useState(() => {
@@ -780,6 +789,46 @@ function Shell(props: AppProps) {
     openNewThread,
   });
 
+  const commitModelSelection = serverConfig?.settings.textGenerationModelSelection ?? null;
+  const gitOverlayRef = useRef<GitOverlayHandle | null>(null);
+  const git = useGitControls({
+    overlayRef: gitOverlayRef,
+    connection,
+    store: composerStore,
+    target: composerTarget,
+    thread: activeThread,
+    project: activeProject ?? null,
+    defaultEnvMode: serverConfig?.settings.defaultThreadEnvMode ?? "local",
+    startFromOrigin: serverConfig?.settings.newWorktreesStartFromOrigin ?? false,
+    setStatus,
+    onPickCommitModel: () => {
+      setContextMenu(null);
+      setPaletteOpen(false);
+      setModelPickerPurpose("commit");
+      setModelPicker(openModelPicker(pickerProviders, commitModelSelection));
+    },
+    onFocusComposer: () => setFocusArea(composerTarget === null ? "thread" : "composer"),
+  });
+  const commitModelLabel =
+    commitModelSelection === null
+      ? "server default"
+      : modelSelectionLabel(pickerProviders, commitModelSelection);
+  const pickCommitModel = (instanceId: ServerProvider["instanceId"], model: string) => {
+    setModelPicker(null);
+    setModelPickerPurpose("composer");
+    void connection
+      .updateServerSettings({
+        textGenerationModelSelection: { instanceId, model, options: [] },
+      })
+      .then((result) =>
+        setStatus(
+          result.ok
+            ? `Commit messages: ${modelSelectionLabel(pickerProviders, createModelSelection(instanceId, model))}`
+            : `Couldn't set the commit model: ${errorMessage(result.error)}`,
+        ),
+      );
+  };
+
   const threadPath = (threadId: string) => {
     const thread = threadsById.get(threadId);
     return thread ? threadWorkspacePath(thread, projectsById.get(thread.projectId)) : null;
@@ -1000,7 +1049,13 @@ function Shell(props: AppProps) {
     }
     setContextMenu(null);
     setPaletteOpen(false);
+    setModelPickerPurpose("composer");
     setModelPicker(openModelPicker(pickerProviders, effectiveSettings?.modelSelection ?? null));
+  };
+
+  const pickFromModelPicker = (instanceId: ServerProvider["instanceId"], model: string) => {
+    if (modelPickerPurpose === "commit") pickCommitModel(instanceId, model);
+    else pickModel(instanceId, model);
   };
 
   const stopRun = () => {
@@ -1104,6 +1159,50 @@ function Shell(props: AppProps) {
         : ["d in the thread", modShortcutLabel("d")].filter((hint) => hint !== null).join("  "),
     disabled: !diff.open && composerTarget?.kind !== "thread",
     run: toggleDiff,
+  });
+  actions.push(
+    {
+      id: "git:menu",
+      label: "Git actions",
+      description: "Commit, push, PR, pull  g in the thread  /git",
+      disabled: git.cwd === null,
+      run: git.openMenu,
+    },
+    {
+      id: "git:branch",
+      label: "Switch branch",
+      description: "b in the thread  /branch",
+      disabled: git.cwd === null,
+      run: () => git.openBranchPicker(),
+    },
+  );
+  if (composerTarget?.kind === "draft") {
+    actions.push({
+      id: "git:worktree",
+      label:
+        git.envMode === "worktree"
+          ? "Start this thread locally"
+          : "Start this thread in a new worktree",
+      description: "/worktree",
+      run: git.toggleWorktree,
+    });
+  }
+  if (git.setupThreadId !== null) {
+    actions.push({
+      id: "git:cancel-setup",
+      label: "Cancel worktree setup",
+      description: "Stops a new worktree's setup",
+      run: git.cancelWorktreeSetup,
+    });
+  }
+  actions.push({
+    id: "git:commit-model",
+    label: "Commit message model",
+    description: commitModelLabel,
+    run: () => {
+      setModelPickerPurpose("commit");
+      setModelPicker(openModelPicker(pickerProviders, commitModelSelection));
+    },
   });
   actions.push({
     id: "archive:open",
@@ -1263,11 +1362,12 @@ function Shell(props: AppProps) {
       const outcome = reduceModelPickerKey(pickerProviders, picker, key);
       if (outcome?.type === "close") setModelPicker(null);
       else if (outcome?.type === "state") setModelPicker(outcome.state);
-      else if (outcome?.type === "select") pickModel(outcome.instanceId, outcome.model);
+      else if (outcome?.type === "select") pickFromModelPicker(outcome.instanceId, outcome.model);
       return true;
     }
     // A dialog owns the keyboard: its text box gets the keys it doesn't use.
     if (management.dialogOpen) return management.handleDialogKey(key);
+    if (git.handleKey(key)) return true;
     if (archivedSelected !== null) {
       const row = archivedRow;
       if (key.name === "escape" || (key.ctrl && key.name === "c")) setArchivedSelection(null);
@@ -1402,6 +1502,16 @@ function Shell(props: AppProps) {
       toggleDiff();
       return true;
     }
+    if (
+      composerTarget !== null &&
+      !key.ctrl &&
+      !key.meta &&
+      (key.name === "g" || key.name === "b")
+    ) {
+      if (key.name === "g") git.openMenu();
+      else git.openBranchPicker();
+      return true;
+    }
     if (composerTarget !== null && (key.name === "i" || isEnter(key.name))) {
       setFocusArea("composer");
       return true;
@@ -1420,6 +1530,7 @@ function Shell(props: AppProps) {
       management.dialogOpen ||
       archivedSelected !== null ||
       paletteOpen ||
+      git.overlay !== null ||
       contextMenu !== null;
     if (!sidebarFocused || overlayOpen) return;
     event.preventDefault();
@@ -1443,18 +1554,24 @@ function Shell(props: AppProps) {
   const emptyLabel = sidebar.hasSnapshot ? "No projects yet" : "Loading projects…";
   const statusText = resolveFooterStatus(status, activeThread);
   const footerHints = modelPicker
-    ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
-    : sidebarFocused
-      ? sidebar.multiSelection.threadIds.size > 0
-        ? `${sidebar.multiSelection.threadIds.size} selected  ⇧↑↓ extend  ⇧F10 menu  del delete  esc clear`
-        : "↑↓ move  ⏎ open  ⇧↑↓ select  ⇧F10 menu  F2 rename  del delete  type to compose  ⌘K palette"
-      : requestsFocused
-        ? panelHints
-        : composerFocused
-          ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
-          : diffShown
-            ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
-            : `↑↓ scroll  PgUp/PgDn page  End bottom  d diff  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
+    ? modelPickerPurpose === "commit"
+      ? "Commit message model  ←→ provider  ↑↓ move  ⏎ pick  esc close"
+      : "←→ provider  ↑↓ move  ⏎ pick  esc close"
+    : git.overlay !== null
+      ? git.overlay.kind === "branches"
+        ? "type to filter  ↑↓ move  ⏎ pick  esc close"
+        : "↑↓ move  ⏎ run  esc close"
+      : sidebarFocused
+        ? sidebar.multiSelection.threadIds.size > 0
+          ? `${sidebar.multiSelection.threadIds.size} selected  ⇧↑↓ extend  ⇧F10 menu  del delete  esc clear`
+          : "↑↓ move  ⏎ open  ⇧↑↓ select  ⇧F10 menu  F2 rename  del delete  type to compose  ⌘K palette"
+        : requestsFocused
+          ? panelHints
+          : composerFocused
+            ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  ${requestsShown ? "tab respond" : "tab focus"}  ⌘K palette`
+            : diffShown
+              ? `${DIFF_KEY_HINTS}  ↑↓ scroll  i compose`
+              : `↑↓ scroll  PgUp/PgDn page  End bottom  d diff  g git  b branch  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -1570,6 +1687,15 @@ function Shell(props: AppProps) {
                   onOpenDiff={openDiffForRun}
                 />
               )}
+              {git.setupThreadId !== null && !diffShown ? (
+                <WorktreeSetupPanel
+                  key={`setup:${git.setupThreadId}`}
+                  source={connection}
+                  threadId={git.setupThreadId}
+                  theme={theme}
+                  onCancel={git.cancelWorktreeSetup}
+                />
+              ) : null}
               {composerTarget.kind === "thread" && !diffShown ? (
                 <QueuedMessages
                   key={`queue:${composerTarget.threadId}`}
@@ -1600,6 +1726,12 @@ function Shell(props: AppProps) {
                   onStatus: setStatus,
                   onClone: management.clone,
                   onToggleDiff: toggleDiff,
+                  git: {
+                    openMenu: git.openMenu,
+                    openBranchPicker: git.openBranchPicker,
+                    toggleWorktree: git.toggleWorktree,
+                    launchWorktree: git.launchWorktree,
+                  },
                   mentionSearch: {
                     cwd: activeThread
                       ? threadWorkspacePath(activeThread, activeProject ?? undefined)
@@ -1627,6 +1759,7 @@ function Shell(props: AppProps) {
                   // dock's here makes it take focus back when they close.
                   modelPicker !== null ||
                   paletteOpen ||
+                  git.overlay !== null ||
                   management.dialogOpen ||
                   archivedSelected !== null
                     ? null
@@ -1639,6 +1772,18 @@ function Shell(props: AppProps) {
                 onFocus={setFocusArea}
                 onPanelShown={setRequestsShown}
               />
+              {git.cwd !== null ? (
+                <BranchToolbar
+                  source={connection}
+                  cwd={git.cwd}
+                  draft={git.draft}
+                  envMode={git.envMode}
+                  worktreePath={git.worktreePath}
+                  threadBranch={git.threadBranch}
+                  theme={theme}
+                  onPress={git.pressToolbar}
+                />
+              ) : null}
             </>
           ) : (
             <ServerSummary
@@ -1764,9 +1909,33 @@ function Shell(props: AppProps) {
         <ModelPickerView
           providers={pickerProviders}
           state={modelPicker}
-          current={effectiveSettings?.modelSelection ?? null}
+          current={
+            modelPickerPurpose === "commit"
+              ? commitModelSelection
+              : (effectiveSettings?.modelSelection ?? null)
+          }
           theme={theme}
-          onPick={pickModel}
+          onPick={pickFromModelPicker}
+        />
+      ) : null}
+      {git.overlay !== null && git.cwd !== null && git.projectCwd !== null ? (
+        <GitOverlay
+          ref={gitOverlayRef}
+          source={connection}
+          cwd={git.cwd}
+          mode={git.overlay}
+          projectCwd={git.projectCwd}
+          envMode={git.envMode}
+          worktreePath={git.worktreePath}
+          threadBranch={git.threadBranch}
+          pickingWorktreeBase={git.pickingWorktreeBase}
+          commitModelLabel={commitModelLabel}
+          armedId={git.armedId}
+          left={(layout.showSidebar ? sidebarWidth : 0) + 2}
+          theme={theme}
+          onMenuItem={git.runMenuItem}
+          onBranchItem={git.pickBranch}
+          onClose={git.closeOverlay}
         />
       ) : null}
       {paletteOpen ? (

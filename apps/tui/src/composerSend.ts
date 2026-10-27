@@ -53,6 +53,15 @@ export interface ComposerSend {
   readonly createdAt: string;
   /** Approvals it declines before it goes out; see `requestRedirect.ts`. */
   readonly declines?: ComposerDeclines;
+  /** A draft that launches its thread in a new worktree, made from this base. */
+  readonly worktree?: LaunchWorktree;
+}
+
+/** The new worktree a draft's first send asks the server to make, as web's "New worktree". */
+export interface LaunchWorktree {
+  readonly projectCwd: string;
+  readonly baseBranch: string;
+  readonly startFromOrigin: boolean;
 }
 
 /**
@@ -177,6 +186,15 @@ export function buildStartTurnInput(send: ComposerSend): StartThreadTurnInput {
               worktreePath: null,
               createdAt: send.createdAt,
             },
+            ...(send.worktree === undefined
+              ? {}
+              : {
+                  prepareWorktree: {
+                    projectCwd: send.worktree.projectCwd,
+                    baseBranch: send.worktree.baseBranch,
+                    startFromOrigin: send.worktree.startFromOrigin,
+                  },
+                }),
           },
         }
       : {}),
