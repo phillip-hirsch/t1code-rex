@@ -14,6 +14,7 @@ import {
   describeSendFailure,
   retryDelayMs,
   settingsCommandsForSend,
+  type ComposerDeclines,
   type ComposerSend,
   type ComposerStage,
   type UnconfirmedComposerSend,
@@ -25,6 +26,14 @@ export type ComposerCommandResult =
   | { readonly ok: true }
   | { readonly ok: false; readonly error: unknown; readonly interrupted: boolean };
 
+/** A message's declines, run as the first stage of its job; see `requestRedirect.ts`. */
+export interface DeclineApprovalsInput {
+  readonly threadId: ThreadId;
+  /** The message's command id; each decline's id derives from it, so a retry reuses it. */
+  readonly commandId: CommandId;
+  readonly declines: ComposerDeclines;
+}
+
 export interface ComposerSenderOptions {
   readonly store: ComposerStore;
   readonly startTurn: (input: StartThreadTurnInput) => Promise<ComposerCommandResult>;
@@ -34,6 +43,8 @@ export interface ComposerSenderOptions {
   ) => Promise<ComposerCommandResult>;
   /** Releases the queue the server holds after Stop (upstream's `queue.resume`). */
   readonly resumeQueue: (input: ResumeThreadQueueInput) => Promise<ComposerCommandResult>;
+  /** Declines the approvals a message redirects past, before its other commands. */
+  readonly declineApprovals?: (input: DeclineApprovalsInput) => Promise<ComposerCommandResult>;
   /** The thread's settings as the shell lists them now; null for threads it doesn't list. */
   readonly threadSettings: (threadId: ThreadId) => ComposerSettings | null;
   readonly schedule: (run: () => void, delayMs: number) => () => void;
@@ -95,6 +106,11 @@ export const DISCARD_NOTICE = "Not sent; edit it and send again";
 export const MAYBE_SENT_NOTICE =
   "A message may already have been sent; check the thread before sending it again";
 export const QUIT_NOTICE = "Not sent before tr3x quit; edit it and send again";
+const NO_DECLINER: ComposerCommandResult = {
+  ok: false,
+  error: new Error("Not sent: this window can't decline the approval first"),
+  interrupted: false,
+};
 const RESUME_NOTICES: Partial<Record<ComposerSendStatus, string>> = {
   waiting: "Resuming the queue once connected",
   stuck: "Resume got no reply (/resume retries, /discard drops it)",
@@ -187,7 +203,14 @@ export function createComposerSender(options: ComposerSenderOptions) {
       threadId,
       commandId: send.commandId,
       send: planned,
-      stages: [...settingsCommandsForSend(planned, base), { kind: "start-turn" }],
+      stages: [
+        // Declines go first: the message steers the run they kept waiting.
+        ...(planned.declines !== undefined && planned.declines.requestIds.length > 0
+          ? [{ kind: "decline-approvals", declines: planned.declines } as const]
+          : []),
+        ...settingsCommandsForSend(planned, base),
+        { kind: "start-turn" },
+      ],
       next: 0,
       dispatched: false,
       attempt: 0,
@@ -198,6 +221,14 @@ export function createComposerSender(options: ComposerSenderOptions) {
 
   const runStage = (send: ComposerSend, stage: ComposerStage): Promise<ComposerCommandResult> => {
     if (stage.kind === "start-turn") return options.startTurn(buildStartTurnInput(send));
+    if (stage.kind === "decline-approvals") {
+      const input = {
+        threadId: send.target.threadId,
+        commandId: send.commandId,
+        declines: stage.declines,
+      };
+      return options.declineApprovals?.(input) ?? Promise.resolve(NO_DECLINER);
+    }
     const { commandId } = stage;
     const command = { commandId, threadId: send.target.threadId, createdAt: send.createdAt };
     return stage.kind === "runtime-mode"
@@ -455,7 +486,8 @@ export function createComposerSender(options: ComposerSenderOptions) {
       queue.held = false;
       if (current !== kept) {
         // A mode command in flight may still apply: don't plan the next send on stale modes.
-        if (current?.kind === "send" && current.stages[current.next]?.kind !== "start-turn") {
+        const stage = current?.kind === "send" ? current.stages[current.next] : undefined;
+        if (stage?.kind === "runtime-mode" || stage?.kind === "interaction-mode") {
           unsure.add(threadId);
           accepted.delete(threadId);
         }

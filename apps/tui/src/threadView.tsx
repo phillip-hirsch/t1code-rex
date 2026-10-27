@@ -2,7 +2,6 @@
 import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
-import type { PendingThreadRequests } from "@t3tools/client-runtime/state/thread-requests";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
 import type { OrchestrationProjectShell, ThreadId, TimestampFormat } from "@t3tools/contracts";
 import {
@@ -41,7 +40,6 @@ import { PULSE_TICKER, RELATIVE_TIME_TICKER, useTicker } from "./ticker.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 
 const WORK_ROW_MAX_WIDTH = "88%";
-const PENDING_REQUEST_DETAIL_MAX = 160;
 const WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
 
 function workingFrame(tick: number): string {
@@ -66,11 +64,6 @@ export interface ThreadViewProps {
   readonly onActivate: () => void;
   readonly onCopy: (value: string, message: string) => void;
   readonly ref?: Ref<ThreadViewHandle>;
-}
-
-function truncate(value: string, max: number): string {
-  const flat = value.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 function readMetrics(scrollbox: ScrollBoxRenderable): ScrollMetrics {
@@ -105,7 +98,6 @@ export function ThreadView(props: ThreadViewProps) {
   const syncStatus = useAtomValue(atoms.statusAtom);
   const syncError = useAtomValue(atoms.errorAtom);
   const history = useAtomValue(atoms.historyAtom);
-  const pending = useAtomValue(atoms.pendingRequestsAtom);
 
   const rows = useMemo(() => buildTimelineRows(visibleItems), [visibleItems]);
 
@@ -249,7 +241,6 @@ export function ThreadView(props: ThreadViewProps) {
         />
       ) : null}
       {runStatus ? <RunStatusRow status={runStatus} theme={theme} /> : null}
-      <PendingRequestsNotice pending={pending} theme={theme} />
     </box>
   );
 }
@@ -573,50 +564,6 @@ function WorkingStatusRow(props: { status: RunStatusLine; theme: TuiTheme }) {
         truncate
         content={`${status.label}${elapsed ? ` · ${elapsed}` : ""}`}
         style={{ fg: theme.palette.muted }}
-      />
-    </box>
-  );
-}
-
-function PendingRequestsNotice(props: { pending: PendingThreadRequests | null; theme: TuiTheme }) {
-  const { pending, theme } = props;
-  if (pending === null || (pending.approvals.length === 0 && pending.userInputs.length === 0)) {
-    return null;
-  }
-  const palette = theme.palette;
-  return (
-    <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
-      {pending.approvals.map((approval) => (
-        <box
-          key={approval.requestId}
-          style={{ backgroundColor: palette.surfaceWarn, paddingLeft: 1, paddingRight: 1 }}
-        >
-          <text
-            wrapMode="none"
-            truncate
-            content={`Approval needed (${approval.requestKind})${approval.detail ? `: ${truncate(approval.detail, PENDING_REQUEST_DETAIL_MAX)}` : ""}`}
-            style={{ fg: palette.text }}
-          />
-        </box>
-      ))}
-      {pending.userInputs.map((input) => (
-        <box
-          key={input.requestId}
-          style={{ backgroundColor: palette.surfaceInfo, paddingLeft: 1, paddingRight: 1 }}
-        >
-          <text
-            wrapMode="none"
-            truncate
-            content={`Question waiting: ${truncate(input.questions.map((question) => question.question).join(" · "), PENDING_REQUEST_DETAIL_MAX)}`}
-            style={{ fg: palette.text }}
-          />
-        </box>
-      ))}
-      <text
-        wrapMode="none"
-        truncate
-        content="Answering from tr3x isn't ported yet; respond in T3 Code web or mobile."
-        style={{ fg: palette.subtle }}
       />
     </box>
   );

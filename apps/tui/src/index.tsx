@@ -49,7 +49,8 @@ function shouldUseKittyKeyboard(env: NodeJS.ProcessEnv = process.env): boolean {
   const forced = readBooleanEnv(env.TR3X_USE_KITTY_KEYBOARD);
   if (forced !== undefined) return forced;
   const identity = terminalIdentity(env);
-  return ["ghostty", "kitty", "wezterm", "iterm"].some((token) => identity.includes(token));
+  // Rex (TERM_PROGRAM=rex) speaks the kitty keyboard protocol, which reports key repeats.
+  return ["ghostty", "kitty", "wezterm", "iterm", "rex"].some((token) => identity.includes(token));
 }
 
 function shouldUseAlternateScreen(env: NodeJS.ProcessEnv = process.env): boolean {

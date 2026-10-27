@@ -25,7 +25,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vp test run",
     "check:transcript": "bun scripts/check-transcript.tsx",
-    "check:composer": "bun scripts/check-composer.tsx"
+    "check:composer": "bun scripts/check-composer.tsx",
+    "check:requests": "bun scripts/check-request-panel.tsx"
   },
   "dependencies": {
     "@effect/atom-react": "catalog:",

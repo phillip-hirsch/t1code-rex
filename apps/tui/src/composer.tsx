@@ -350,6 +350,8 @@ export function Composer(props: ComposerProps) {
         case "exit":
           props.onExit();
           return true;
+        case "ignore":
+          return true;
         case "paste-image":
           pasteClipboardImage();
           return true;

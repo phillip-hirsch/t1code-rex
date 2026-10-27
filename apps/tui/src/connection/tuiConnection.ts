@@ -23,8 +23,11 @@ import {
   createEnvironmentThreadShellAtoms,
   createEnvironmentThreadStateAtoms,
   createThreadEnvironmentAtoms,
+  type DismissThreadUserInputInput,
   fetchEnvironmentThreadSnapshot,
   type InterruptThreadTurnInput,
+  type RespondToThreadApprovalInput,
+  type RespondToThreadUserInputInput,
   type SetThreadInteractionModeInput,
   type SetThreadRuntimeModeInput,
   type StartThreadTurnInput,
@@ -44,6 +47,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import type { ComposerCommandResult } from "../composerSender.ts";
+import { createRequestQueueSelector, type PendingRequest } from "../requestQueue.ts";
 import type { TuiServerSession } from "../serverLauncher.ts";
 import * as Platform from "./platform.ts";
 import * as Runtime from "./runtime.ts";
@@ -97,6 +101,13 @@ export function createTuiConnection(options: TuiConnectionOptions) {
   });
   const threadStates = createEnvironmentThreadStateAtoms(runtime);
   const threadDetails = createEnvironmentThreadDetailAtoms(threadStates.stateAtom);
+  // Pending approvals and questions, oldest first, with what each is about.
+  const requestQueueAtom = Atom.family((threadId: ThreadId) => {
+    const select = createRequestQueueSelector();
+    return Atom.make((get): ReadonlyArray<PendingRequest> =>
+      select(Option.getOrNull(get(threadDetails.stateAtom({ environmentId, threadId })).data)),
+    ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-requests:${threadId}`));
+  });
   // One page request per thread at a time; repeats while it runs share its result.
   const loadEarlierHistory = createRuntimeCommand(runtime, {
     label: "tr3x:thread:load-earlier",
@@ -178,7 +189,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         statusAtom: threadDetails.statusAtom(ref),
         errorAtom: threadDetails.errorAtom(ref),
         historyAtom: threadDetails.historyAtom(ref),
-        pendingRequestsAtom: threadDetails.pendingRequestsAtom(ref),
+        requestQueueAtom: requestQueueAtom(threadId),
         queueAtom: threadDetails.queueWorkflowAtom(ref),
       };
     },
@@ -202,6 +213,12 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       runThreadCommand(threadCommands.setRuntimeMode, input),
     setInteractionMode: (input: SetThreadInteractionModeInput) =>
       runThreadCommand(threadCommands.setInteractionMode, input),
+    respondToApproval: (input: RespondToThreadApprovalInput) =>
+      runThreadCommand(threadCommands.respondToApproval, input),
+    respondToUserInput: (input: RespondToThreadUserInputInput) =>
+      runThreadCommand(threadCommands.respondToUserInput, input),
+    dismissUserInput: (input: DismissThreadUserInputInput) =>
+      runThreadCommand(threadCommands.dismissUserInput, input),
     retryNow: catalog.retryNow,
     dispose: () => {
       registry.dispose();

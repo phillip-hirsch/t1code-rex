@@ -48,6 +48,21 @@ describe("resolveComposerKey", () => {
     expect(resolveComposerKey(ctrlC, idle)).toEqual({ type: "exit" });
   });
 
+  // Round 3, N4: a held Ctrl+C or Esc must not clear, then stop, then quit.
+  it("ignores a held Ctrl+C's or Esc's repeats", () => {
+    for (const name of ["c", "escape"]) {
+      const held = { name, ctrl: name === "c", repeated: true };
+      for (const state of [
+        { ...idle, hasText: true, running: true },
+        { ...idle, running: true },
+        { ...idle, running: true, stopRequested: true },
+        idle,
+      ]) {
+        expect(resolveComposerKey(held, state)).toEqual({ type: "ignore" });
+      }
+    }
+  });
+
   it("stops a running turn on Esc and otherwise leaves Esc alone", () => {
     expect(resolveComposerKey({ name: "escape" }, { ...idle, running: true })).toEqual({
       type: "stop",
