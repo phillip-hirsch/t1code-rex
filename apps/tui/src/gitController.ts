@@ -66,7 +66,10 @@ type GitCommands = Pick<
 
 export interface GitControlsOptions {
   readonly connection: GitCommands;
-  readonly store: Pick<ComposerStore, "findNewThreadDraft" | "setNewThreadDraftWorkspace">;
+  readonly store: Pick<
+    ComposerStore,
+    "findNewThreadDraft" | "setNewThreadDraftWorkspace" | "setNotice"
+  >;
   readonly target: GitTarget | null;
   readonly thread: SidebarThread | null;
   readonly project: OrchestrationProjectShell | null;
@@ -210,6 +213,8 @@ export function useGitControls(options: GitControlsOptions) {
     const threadId = target.threadId;
     // A retry puts it back on the worktree, whatever it chose before.
     setWorkingLocally((current) => new Set([...current].filter((id) => id !== threadId)));
+    // The composer's "setup failed" notice is answered.
+    store.setNotice(threadId, null);
     const result = await connection.retryWorkspacePreparation({ threadId, runId: launch.runId });
     setStatus(failed(result, "Retrying worktree setup") ?? "Retrying worktree setup");
   };
@@ -222,6 +227,7 @@ export function useGitControls(options: GitControlsOptions) {
     }
     const threadId = target.threadId;
     setWorkingLocally((current) => new Set(current).add(threadId));
+    store.setNotice(threadId, null);
     setStatus("This thread now works in the project checkout");
   };
 

@@ -338,6 +338,7 @@ function Harness() {
         store.setNewThreadDraftWorkspace(threadId, workspace);
         setVersion((version) => version + 1);
       },
+      setNotice: store.setNotice,
     },
     target: scene.target,
     thread: scene.thread,
@@ -744,8 +745,10 @@ check(
   true,
 );
 act(() => git.setLaunch(REOPENED, { runId: RUN, status: "failed", baseRef: "main" }));
+act(() => store.setNotice(REOPENED, WORKTREE_FAILED_NOTICE));
 await render();
 await press("c", "down", "RETURN");
+check("S1: and clears the composer's notice", store.snapshot(REOPENED).notice, null);
 check(
   "S1: working locally says so",
   harness.footer,
