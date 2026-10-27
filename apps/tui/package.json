@@ -26,7 +26,8 @@
     "test": "vp test run",
     "check:transcript": "bun scripts/check-transcript.tsx",
     "check:composer": "bun scripts/check-composer.tsx",
-    "check:requests": "bun scripts/check-request-panel.tsx"
+    "check:requests": "bun scripts/check-request-panel.tsx",
+    "screenshot": "node scripts/screenshot.mjs"
   },
   "dependencies": {
     "@effect/atom-react": "catalog:",
