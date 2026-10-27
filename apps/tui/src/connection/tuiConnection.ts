@@ -1,4 +1,4 @@
-import { Connection } from "@t3tools/client-runtime/connection";
+import { Connection, EnvironmentSupervisor } from "@t3tools/client-runtime/connection";
 import type { ResumeThreadQueueInput } from "@t3tools/client-runtime/operations";
 import { createEnvironmentCatalogAtoms } from "@t3tools/client-runtime/state/connections";
 import { createEnvironmentServerConfigsAtom } from "@t3tools/client-runtime/state/shell";
@@ -8,7 +8,9 @@ import {
   ShellSnapshotLoader,
   createEnvironmentShellAtoms,
 } from "@t3tools/client-runtime/state/shell";
+import { ManagedRelay } from "@t3tools/client-runtime/relay";
 import {
+  createEnvironmentCommand,
   createRuntimeCommand,
   runAtomCommand,
   type AtomCommand,
@@ -21,10 +23,12 @@ import {
   createEnvironmentThreadShellAtoms,
   createEnvironmentThreadStateAtoms,
   createThreadEnvironmentAtoms,
+  fetchEnvironmentThreadSnapshot,
   type InterruptThreadTurnInput,
   type SetThreadInteractionModeInput,
   type SetThreadRuntimeModeInput,
   type StartThreadTurnInput,
+  type ThreadSnapshotLoadResult,
 } from "@t3tools/client-runtime/state/threads";
 import type {
   EnvironmentId,
@@ -36,6 +40,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
 import type { ComposerCommandResult } from "../composerSender.ts";
@@ -101,6 +106,29 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         Effect.flatMap((controller) => controller.loadEarlier(environmentId, threadId)),
       ),
   });
+  // The thread's whole history over HTTP, not the bounded window the socket and
+  // `orchestration.getThreadProjection` send: only this proves a message is missing.
+  const fullThreadSnapshot = createEnvironmentCommand(runtime, {
+    label: "tr3x:thread:full-snapshot",
+    execute: Effect.fn("tr3x.fullThreadSnapshot")(function* (threadId: ThreadId) {
+      const supervisor = yield* EnvironmentSupervisor.EnvironmentSupervisor;
+      const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+      if (Option.isNone(prepared)) {
+        return { _tag: "unavailable" } satisfies ThreadSnapshotLoadResult;
+      }
+      return yield* fetchEnvironmentThreadSnapshot({
+        prepared: prepared.value,
+        threadId,
+        signer: yield* Effect.serviceOption(ManagedRelay.ManagedRelayDpopSigner),
+      }).pipe(
+        Effect.map((snapshot): ThreadSnapshotLoadResult => ({ _tag: "present", snapshot })),
+        Effect.catchTags({
+          EnvironmentResourceNotFoundError: () =>
+            Effect.succeed<ThreadSnapshotLoadResult>({ _tag: "missing" }),
+        }),
+      );
+    }),
+  });
   // Upstream's thread commands, serialized per thread like web and mobile.
   const threadCommands = createThreadEnvironmentAtoms(runtime, snapshotAtom);
   const runThreadCommand = <Input, A, E>(
@@ -155,6 +183,16 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       };
     },
     loadEarlierHistory,
+    /** A failed request reads as "unavailable": nothing is decided from it. */
+    fetchFullThreadSnapshot: (threadId: ThreadId): Promise<ThreadSnapshotLoadResult> =>
+      runAtomCommand(
+        registry,
+        fullThreadSnapshot,
+        { environmentId, input: threadId },
+        { reportFailure: false },
+      ).then((result) =>
+        AsyncResult.isSuccess(result) ? result.value : { _tag: "unavailable" as const },
+      ),
     startTurn: (input: StartThreadTurnInput) => runThreadCommand(threadCommands.startTurn, input),
     interruptTurn: (input: InterruptThreadTurnInput) =>
       runThreadCommand(threadCommands.interruptTurn, input),

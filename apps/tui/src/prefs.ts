@@ -34,6 +34,8 @@ export interface PersistedComposerDraft {
   readonly text: string;
   readonly attachments: readonly PersistedComposerImageAttachment[];
   readonly mentions?: readonly PersistedComposerMention[];
+  /** Why tr3x put the text back (e.g. "maybe not sent"), until it's edited or sent. */
+  readonly notice?: string;
 }
 
 export interface PersistedDraftThreadState {

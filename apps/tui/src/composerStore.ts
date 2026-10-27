@@ -27,6 +27,8 @@ import type {
 export interface ComposerDraft {
   readonly text: string;
   readonly attachments: ReadonlyArray<ComposerAttachment>;
+  /** Why the text was put back; saved with it until the draft is edited or sent. */
+  readonly notice?: string;
 }
 
 /**
@@ -72,9 +74,13 @@ function readUnconfirmedSends(value: unknown): Array<UnconfirmedComposerSend> {
   if (!Array.isArray(value)) return [];
   return value.filter((entry: unknown): entry is UnconfirmedComposerSend => {
     if (typeof entry !== "object" || entry === null) return false;
-    const { threadId, launch, messageId, text, attachments } = entry as Record<string, unknown>;
+    const { threadId, projectId, launch, messageId, text, attachments } = entry as Record<
+      string,
+      unknown
+    >;
     return (
       typeof threadId === "string" &&
+      (projectId === undefined || typeof projectId === "string") &&
       typeof launch === "boolean" &&
       typeof messageId === "string" &&
       typeof text === "string" &&
@@ -89,6 +95,7 @@ function isEmptyDraft(draft: ComposerDraft): boolean {
 
 function readDraft(persisted: PersistedComposerDraft): ComposerDraft {
   return {
+    ...(typeof persisted.notice === "string" ? { notice: persisted.notice } : {}),
     text: persisted.text ?? "",
     attachments: (persisted.attachments ?? []).map((attachment, index) => ({
       id: attachment.id ?? `restored-${index}-${attachment.name}`,
@@ -103,6 +110,7 @@ function readDraft(persisted: PersistedComposerDraft): ComposerDraft {
 
 function writeDraft(draft: ComposerDraft): PersistedComposerDraft {
   return {
+    ...(draft.notice === undefined ? {} : { notice: draft.notice }),
     text: draft.text,
     attachments: draft.attachments.map((attachment) => ({
       id: attachment.id,
@@ -150,7 +158,11 @@ export function createComposerStore(options: ComposerStoreOptions) {
   };
   const patches = new Map<string, ComposerSettingsPatch>();
   const sends = new Map<string, ReadonlyArray<ComposerSendEntry>>();
-  const notices = new Map<string, string>();
+  const notices = new Map<string, string>(
+    [...drafts].flatMap(([threadId, draft]) =>
+      draft.notice === undefined ? [] : [[threadId, draft.notice] as const],
+    ),
+  );
   const textRevisions = new Map<string, number>();
   const snapshots = new Map<string, ComposerThreadSnapshot>();
   const threadListeners = new Map<string, Set<() => void>>();
@@ -160,6 +172,9 @@ export function createComposerStore(options: ComposerStoreOptions) {
   // Only the window that owns prefs.json checks these; it's the only one that saves them.
   let unconfirmed: ReadonlyArray<UnconfirmedComposerSend> =
     persist === null ? [] : readUnconfirmedSends(initialPrefs.composerUnconfirmedSends);
+
+  /** Unconfirmed records whose thread and project are gone, this session. */
+  const orphaned = new Set<UnconfirmedComposerSend>();
 
   const clean = { drafts: false, newThreads: false, defaults: false, unconfirmed: false };
   let dirty: Record<keyof typeof clean, boolean> = { ...clean };
@@ -227,12 +242,20 @@ export function createComposerStore(options: ComposerStoreOptions) {
     schedulePersist("drafts");
   };
 
+  /** The draft without its saved note: the user edited or sent it, or a newer note replaced it. */
+  const dropDraftNotice = (threadId: string) => {
+    const draft = drafts.get(threadId);
+    if (draft?.notice === undefined) return;
+    setDraft(threadId, { text: draft.text, attachments: draft.attachments });
+  };
+
   /** Puts text and images back in front of whatever the composer holds, with why. */
   const restoreDraft = (threadId: string, restored: ComposerDraft, notice: string) => {
     const current = drafts.get(threadId) ?? EMPTY_DRAFT;
     setDraft(threadId, {
       text: mergeRestoredText(restored.text, current.text),
       attachments: [...restored.attachments, ...current.attachments],
+      notice,
     });
     textRevisions.set(threadId, (textRevisions.get(threadId) ?? 0) + 1);
     notices.set(threadId, notice);
@@ -256,7 +279,18 @@ export function createComposerStore(options: ComposerStoreOptions) {
     /** Checked against its thread: drops the record (call `flush` to write it with the draft). */
     removeUnconfirmedSend(record: UnconfirmedComposerSend) {
       unconfirmed = unconfirmed.filter((entry) => entry !== record);
+      if (orphaned.delete(record)) notifyGlobal();
       schedulePersist("unconfirmed");
+    },
+
+    /** Records whose thread and project are gone, still saved until /recover takes them. */
+    orphanedSends: (): ReadonlyArray<UnconfirmedComposerSend> =>
+      unconfirmed.filter((record) => orphaned.has(record)),
+
+    markOrphanedSend(record: UnconfirmedComposerSend) {
+      if (!unconfirmed.includes(record) || orphaned.has(record)) return;
+      orphaned.add(record);
+      notifyGlobal();
     },
 
     getDraft: (threadId: string): ComposerDraft => drafts.get(threadId) ?? EMPTY_DRAFT,
@@ -265,19 +299,19 @@ export function createComposerStore(options: ComposerStoreOptions) {
     setDraftText(threadId: string, text: string) {
       const current = drafts.get(threadId) ?? EMPTY_DRAFT;
       if (current.text === text) return;
-      setDraft(threadId, { ...current, text });
+      setDraft(threadId, { text, attachments: current.attachments });
     },
 
     addAttachment(threadId: string, attachment: ComposerAttachment) {
       const current = drafts.get(threadId) ?? EMPTY_DRAFT;
-      setDraft(threadId, { ...current, attachments: [...current.attachments, attachment] });
+      setDraft(threadId, { text: current.text, attachments: [...current.attachments, attachment] });
       notifyThread(threadId);
     },
 
     removeLastAttachment(threadId: string) {
       const current = drafts.get(threadId) ?? EMPTY_DRAFT;
       if (current.attachments.length === 0) return;
-      setDraft(threadId, { ...current, attachments: current.attachments.slice(0, -1) });
+      setDraft(threadId, { text: current.text, attachments: current.attachments.slice(0, -1) });
       notifyThread(threadId);
     },
 
@@ -358,6 +392,7 @@ export function createComposerStore(options: ComposerStoreOptions) {
         { send, status: "sending", attempt: 0 },
       ]);
       notices.delete(threadId);
+      dropDraftNotice(threadId);
       notifyThread(threadId);
     },
 
@@ -398,6 +433,7 @@ export function createComposerStore(options: ComposerStoreOptions) {
 
     setNotice(threadId: string, notice: string | null) {
       if ((notices.get(threadId) ?? null) === notice) return;
+      dropDraftNotice(threadId);
       if (notice === null) notices.delete(threadId);
       else notices.set(threadId, notice);
       notifyThread(threadId);

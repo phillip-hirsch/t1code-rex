@@ -85,6 +85,8 @@ export type ComposerStage = ComposerSettingsCommand | { readonly kind: "start-tu
  */
 export interface UnconfirmedComposerSend {
   readonly threadId: ThreadId;
+  /** Where it goes back if the thread is gone. Absent in records saved before it was added. */
+  readonly projectId?: ProjectId;
   /** It launched a new-thread draft, which stays open until the thread has the message. */
   readonly launch: boolean;
   readonly messageId: MessageId;

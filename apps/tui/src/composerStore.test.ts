@@ -148,7 +148,11 @@ describe("sends", () => {
     store.beginSend(rejected);
     store.setDraftText("t1", "second");
     store.restoreSend(rejected, "Model not available");
-    expect(store.getDraft("t1")).toEqual({ text: "first\n\nsecond", attachments: [image] });
+    expect(store.getDraft("t1")).toEqual({
+      text: "first\n\nsecond",
+      attachments: [image],
+      notice: "Model not available",
+    });
     const snapshot = store.snapshot("t1");
     expect(snapshot.sends).toEqual([]);
     expect(snapshot.notice).toBe("Model not available");

@@ -382,10 +382,20 @@ function Shell(props: AppProps) {
     () =>
       checkUnconfirmedSends({
         store: composerStore,
-        watchThread: (threadId, onState) =>
-          connection.registry.subscribe(connection.thread(threadId).stateAtom, onState, {
-            immediate: true,
-          }),
+        lookupThread: connection.fetchFullThreadSnapshot,
+        projectExists: (projectId) =>
+          connection.registry.get(connection.hasShellSnapshotAtom)
+            ? connection.registry
+                .get(connection.projectsAtom)
+                .some((project) => project.id === projectId)
+            : null,
+        mintThreadId: () => ThreadId.make(NodeCrypto.randomUUID()),
+        schedule: (run, delayMs) => {
+          const timer = setTimeout(run, delayMs);
+          return () => clearTimeout(timer);
+        },
+        onOrphaned: () =>
+          setStatus("An unsent message's thread and project are gone; /recover restores it"),
       }),
     [composerStore, connection],
   );

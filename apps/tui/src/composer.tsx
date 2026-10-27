@@ -22,6 +22,7 @@ import {
 
 import { saveClipboardImageToFile } from "./clipboardImage.ts";
 import { resolveComposerKey, type ComposerKeyState } from "./composerKeys.ts";
+import { recoverOrphanedSends } from "./composerRecovery.ts";
 import {
   chooseDispatch,
   createComposerSend,
@@ -252,6 +253,15 @@ export function Composer(props: ComposerProps) {
             // Sends what's held here, after a `queue.resume`; with nothing here, just that.
             if (resumeHeld() === 0) props.onStatus("Resuming the thread's queue");
             return;
+          case "recover": {
+            const recovered = recoverOrphanedSends(store, threadId);
+            props.onStatus(
+              recovered === 0
+                ? "Nothing to recover"
+                : `${recovered} unsent message${recovered === 1 ? "" : "s"} back in the composer`,
+            );
+            return;
+          }
           case "discard": {
             const { messages, resumes } = sender.discard(threadId);
             props.onStatus(

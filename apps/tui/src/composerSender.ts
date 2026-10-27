@@ -490,6 +490,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
           .filter((job) => job.dispatched)
           .map(({ send }): UnconfirmedComposerSend => ({
             threadId: send.target.threadId,
+            projectId: send.target.projectId,
             launch: send.target.kind === "draft",
             messageId: send.messageId,
             text: send.text,

@@ -9,12 +9,11 @@ import {
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import * as Option from "effect/Option";
-
 import {
   checkUnconfirmedSends,
+  recoverOrphanedSends,
   UNCONFIRMED_NOTICE,
-  type ThreadMessagesState,
+  type ThreadLookup,
 } from "./composerRecovery.ts";
 import { retryDelayMs, type ComposerSend } from "./composerSend.ts";
 import {
@@ -132,6 +131,62 @@ function savingStore(prefs: { current: TuiPrefs; writes?: number }) {
       prefs.current = JSON.parse(JSON.stringify(next)) as TuiPrefs;
     },
   });
+}
+
+/** A thread's whole history, as the server's full thread snapshot returns it. */
+function history(
+  messageIds: ReadonlyArray<string>,
+  options: { readonly deleted?: boolean; readonly projectId?: string } = {},
+): ThreadLookup {
+  return {
+    _tag: "present",
+    snapshot: {
+      projection: {
+        thread: {
+          projectId: ProjectId.make(options.projectId ?? "p"),
+          deletedAt: options.deleted === true ? "2026-10-27T10:05:00.000Z" : null,
+        },
+        messages: messageIds.map((id) => ({ id: MessageId.make(id) })),
+      },
+    },
+  };
+}
+
+/**
+ * Runs the launch check on `store`, answering each thread's lookup from `answers` (a thread
+ * not in it fails to load). Retries wait until the test runs `retry()`.
+ */
+function recovery(
+  store: ComposerStore,
+  answers: Record<string, ThreadLookup | Error>,
+  options: { readonly projects?: ReadonlyArray<string> | null } = {},
+) {
+  const asked: Array<string> = [];
+  const timers: Array<() => void> = [];
+  const orphaned: Array<string> = [];
+  let minted = 0;
+  const stop = checkUnconfirmedSends({
+    store,
+    lookupThread: (threadId) => {
+      asked.push(threadId);
+      const answer = answers[threadId];
+      if (answer instanceof Error) return Promise.reject(answer);
+      return Promise.resolve(answer ?? { _tag: "unavailable" });
+    },
+    projectExists: (projectId) =>
+      options.projects === null ? null : (options.projects ?? ["p", "q"]).includes(projectId),
+    mintThreadId: () => ThreadId.make(`minted-${(minted += 1)}`),
+    schedule: (run) => {
+      timers.push(run);
+      return () => timers.splice(timers.indexOf(run), 1);
+    },
+    onOrphaned: (record) => orphaned.push(record.text),
+  });
+  const retry = async () => {
+    for (const run of timers.splice(0)) run();
+    await settle();
+  };
+  return { asked, timers, orphaned, stop, retry };
 }
 
 const startTurns = (calls: ReturnType<typeof setup>["calls"]) =>
@@ -506,29 +561,12 @@ describe("composer sender, Sol audit round 3", () => {
     }),
     interrupted: false,
   };
-  const live = (...messageIds: Array<string>): ThreadMessagesState => ({
-    status: "live",
-    data: Option.some({ messages: messageIds.map((id) => ({ id: MessageId.make(id) })) }),
-  });
   const statuses = (store: ComposerStore) =>
     store.snapshot("t1").sends.map((entry) => entry.status);
   const resumeIds = (calls: ReturnType<typeof setup>["calls"]) =>
     calls
       .filter((call) => call.kind === "queue.resume")
       .map((call) => (call.input as { commandId: string }).commandId);
-
-  /** Thread state delivered by hand: `push` hands a thread's state to whoever watches it. */
-  function threadWatcher() {
-    const watchers = new Map<string, (state: ThreadMessagesState) => void>();
-    return {
-      watchThread: (threadId: ThreadId, onState: (state: ThreadMessagesState) => void) => {
-        watchers.set(threadId, onState);
-        return () => watchers.delete(threadId);
-      },
-      push: (threadId: string, state: ThreadMessagesState) => watchers.get(threadId)?.(state),
-      watching: () => [...watchers.keys()],
-    };
-  }
 
   /**
    * Quits with one message out unconfirmed (an approval-mode send the server took the mode
@@ -551,7 +589,14 @@ describe("composer sender, Sol audit round 3", () => {
     expect(ids(first.calls)).toEqual(["cmd-1:runtime-mode", "cmd-1"]);
     // No command ids, plan, or modes: nothing to replay.
     expect(prefs.current.composerUnconfirmedSends).toEqual([
-      { threadId: "t1", launch: false, messageId: "msg-1", text: "hello", attachments: [] },
+      {
+        threadId: "t1",
+        projectId: "p",
+        launch: false,
+        messageId: "msg-1",
+        text: "hello",
+        attachments: [],
+      },
     ]);
     expect(prefs.current.composerDraftsByThreadId?.t1?.text).toBe("second");
     expect(first.store.snapshot("t1").notice).toBe(QUIT_NOTICE);
@@ -567,28 +612,27 @@ describe("composer sender, Sol audit round 3", () => {
     expect(ids(relaunched.calls)).toEqual(["cmd-3:runtime-mode", "cmd-3"]);
   });
 
-  it("drops a saved message the thread has, once its live state is in, leaving the composer alone", async () => {
+  it("drops a saved message the thread has, once its history loads, leaving the composer alone", async () => {
     const { prefs, relaunched } = await quitAndRelaunch();
-    const watcher = threadWatcher();
-    checkUnconfirmedSends({ store: relaunched.store, watchThread: watcher.watchThread });
-    expect(watcher.watching()).toEqual(["t1"]);
-    // Cached or still loading: not enough to tell.
-    watcher.push("t1", { status: "cached", data: Option.none() });
-    watcher.push("t1", { status: "synchronizing", data: Option.none() });
+    const answers: Record<string, ThreadLookup> = {};
+    const check = recovery(relaunched.store, answers);
+    await settle();
+    // The lookup failed: not enough to tell.
     expect(relaunched.store.unconfirmedSends()).toHaveLength(1);
-    watcher.push("t1", live("msg-0", "msg-1"));
+    answers.t1 = history(["msg-0", "msg-1"]);
+    await check.retry();
+    expect(check.asked).toEqual(["t1", "t1"]);
     expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
     expect(prefs.current.composerDraftsByThreadId?.t1?.text).toBe("second");
-    expect(watcher.watching()).toEqual([]);
+    expect(check.timers).toEqual([]);
     expect(relaunched.calls).toEqual([]);
   });
 
   it("puts a saved message the thread lacks back in the composer with a note, dropping the record in the same write", async () => {
     const { prefs, relaunched } = await quitAndRelaunch();
-    const watcher = threadWatcher();
-    checkUnconfirmedSends({ store: relaunched.store, watchThread: watcher.watchThread });
     const writes = prefs.writes;
-    watcher.push("t1", live("msg-0"));
+    recovery(relaunched.store, { t1: history(["msg-0"]) });
+    await settle();
     expect(prefs.writes).toBe((writes ?? 0) + 1);
     expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
     expect(prefs.current.composerDraftsByThreadId?.t1?.text).toBe("hello\n\nsecond");
@@ -598,9 +642,8 @@ describe("composer sender, Sol audit round 3", () => {
 
   it("N10: a restored message the user clears never comes back, even after a crash", async () => {
     const { prefs, relaunched } = await quitAndRelaunch();
-    const watcher = threadWatcher();
-    checkUnconfirmedSends({ store: relaunched.store, watchThread: watcher.watchThread });
-    watcher.push("t1", live());
+    recovery(relaunched.store, { t1: history([]) });
+    await settle();
     relaunched.store.clearDraft("t1");
     relaunched.store.flush();
     // No hand-off: the process dies here.
@@ -630,11 +673,9 @@ describe("composer sender, Sol audit round 3", () => {
     ]);
 
     const { store } = setup([], { store: savingStore(prefs) });
-    const watcher = threadWatcher();
-    checkUnconfirmedSends({ store, watchThread: watcher.watchThread });
-    // The server never made new-1; client-runtime reports a thread it lacks as deleted.
-    watcher.push("new-1", { status: "deleted", data: Option.none() });
-    watcher.push("new-2", live("msg-2"));
+    // The server never made new-1.
+    recovery(store, { "new-1": { _tag: "missing" }, "new-2": history(["msg-2"]) });
+    await settle();
     expect(store.getDraft("new-1").text).toBe("lost");
     expect(store.findNewThreadDraft("new-1")).toBeDefined();
     expect(store.getDraft("new-2").text).toBe("");
@@ -788,5 +829,140 @@ describe("composer sender, Sol audit round 4", () => {
     expect(ids(calls)).toEqual(["cmd-1:runtime-mode"]);
     expect(store.getDraft("t1").text).toBe("one");
     expect(store.snapshot("t1").notice).toBe(DISCARD_NOTICE);
+  });
+
+  /** prefs.json as a quit left it: one message to t1 (project p) went out unconfirmed. */
+  const quitPrefs = (): { current: TuiPrefs; writes?: number } => ({
+    current: {
+      composerUnconfirmedSends: [
+        {
+          threadId: ThreadId.make("t1"),
+          projectId: ProjectId.make("p"),
+          launch: false,
+          messageId: MessageId.make("msg-1"),
+          text: "hello",
+          attachments: [],
+        },
+      ],
+    },
+  });
+
+  it("N11: a message the thread has outside the live window is dropped, not restored", async () => {
+    const prefs = quitPrefs();
+    const store = savingStore(prefs);
+    // The live window holds only the latest messages; the whole history has msg-1 first.
+    const latest = Array.from({ length: 300 }, (_, index) => `msg-${index + 2}`);
+    const check = recovery(store, { t1: history(["msg-1", ...latest]) });
+    await settle();
+    expect(check.asked).toEqual(["t1"]);
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+    expect(store.getDraft("t1").text).toBe("");
+    expect(store.snapshot("t1").notice).toBeNull();
+  });
+
+  it("N11: a failed lookup keeps the record and asks again later", async () => {
+    const prefs = quitPrefs();
+    const store = savingStore(prefs);
+    const answers: Record<string, ThreadLookup | Error> = { t1: new Error("socket closed") };
+    const check = recovery(store, answers);
+    await settle();
+    expect(check.timers).toHaveLength(1);
+    answers.t1 = { _tag: "unavailable" };
+    await check.retry();
+    expect(check.timers).toHaveLength(1);
+    store.flush();
+    expect(prefs.current.composerUnconfirmedSends).toHaveLength(1);
+    expect(store.getDraft("t1").text).toBe("");
+    answers.t1 = history([]);
+    await check.retry();
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+    expect(store.getDraft("t1").text).toBe("hello");
+  });
+
+  it("N12: a deleted thread's message goes into a new-thread draft in its project, in one write", async () => {
+    const prefs = quitPrefs();
+    const store = savingStore(prefs);
+    recovery(store, { t1: history([], { deleted: true }) });
+    await settle();
+    expect(prefs.writes).toBe(1);
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+    expect(prefs.current.draftThreadsByProjectId?.p?.id).toBe("minted-1");
+    expect(prefs.current.composerDraftsByThreadId?.["minted-1"]?.text).toBe("hello");
+    expect(store.snapshot("minted-1").notice).toBe(UNCONFIRMED_NOTICE);
+    expect(store.getDraft("t1").text).toBe("");
+  });
+
+  it("N12: a thread the server no longer has counts as deleted", async () => {
+    const prefs = quitPrefs();
+    const store = savingStore(prefs);
+    recovery(store, { t1: { _tag: "missing" } });
+    await settle();
+    expect(store.getNewThreadDraft("p")?.threadId).toBe("minted-1");
+    expect(store.getDraft("minted-1").text).toBe("hello");
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+  });
+
+  it("N12: with its project gone too, the record stays and /recover puts it in a composer", async () => {
+    const prefs = quitPrefs();
+    const store = savingStore(prefs);
+    const check = recovery(store, { t1: history([], { deleted: true }) }, { projects: ["q"] });
+    await settle();
+    expect(check.orphaned).toEqual(["hello"]);
+    expect(store.orphanedSends()).toHaveLength(1);
+    expect(store.getNewThreadDraft("p")).toBeUndefined();
+    store.flush();
+    expect(prefs.current.composerUnconfirmedSends).toHaveLength(1);
+
+    // Still there after a relaunch, and offered again.
+    const relaunched = savingStore(prefs);
+    const again = recovery(relaunched, { t1: { _tag: "missing" } }, { projects: ["q"] });
+    await settle();
+    expect(again.orphaned).toEqual(["hello"]);
+    expect(recoverOrphanedSends(relaunched, ThreadId.make("t9"))).toBe(1);
+    expect(relaunched.getDraft("t9").text).toBe("hello");
+    expect(relaunched.snapshot("t9").notice).toBe(UNCONFIRMED_NOTICE);
+    expect(prefs.current.composerUnconfirmedSends).toBeUndefined();
+    expect(recoverOrphanedSends(relaunched, ThreadId.make("t9"))).toBe(0);
+  });
+
+  it("N12: waits for the shell before deciding a project is gone", async () => {
+    const prefs = quitPrefs();
+    const store = savingStore(prefs);
+    const check = recovery(store, { t1: { _tag: "missing" } }, { projects: null });
+    await settle();
+    expect(check.orphaned).toEqual([]);
+    expect(check.timers).toHaveLength(1);
+    expect(store.unconfirmedSends()).toHaveLength(1);
+  });
+
+  it("N13: the restored note survives relaunches until the draft is edited", async () => {
+    const prefs = quitPrefs();
+    recovery(savingStore(prefs), { t1: history([]) });
+    await settle();
+    for (let relaunch = 0; relaunch < 2; relaunch += 1) {
+      const relaunched = savingStore(prefs);
+      expect(relaunched.unconfirmedSends()).toEqual([]);
+      expect(relaunched.getDraft("t1").text).toBe("hello");
+      expect(relaunched.snapshot("t1").notice).toBe(UNCONFIRMED_NOTICE);
+    }
+    const editing = savingStore(prefs);
+    editing.setDraftText("t1", "hello again");
+    editing.flush();
+    expect(savingStore(prefs).snapshot("t1").notice).toBeNull();
+    expect(prefs.current.composerDraftsByThreadId?.t1).toEqual({
+      text: "hello again",
+      attachments: [],
+    });
+  });
+
+  it("N13: sending the restored draft drops its note", async () => {
+    const prefs = quitPrefs();
+    recovery(savingStore(prefs), { t1: history([]) });
+    await settle();
+    const relaunched = setup([], { store: savingStore(prefs) });
+    await relaunched.sender.send(send({ commandId: CommandId.make("cmd-9"), text: "x" }));
+    relaunched.store.flush();
+    expect(prefs.current.composerDraftsByThreadId?.t1?.notice).toBeUndefined();
+    expect(savingStore(prefs).snapshot("t1").notice).toBeNull();
   });
 });

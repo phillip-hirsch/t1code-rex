@@ -64,6 +64,12 @@ export const COMPOSER_SLASH_COMMANDS: ReadonlyArray<ComposerSlashCommand> = [
     description: "Put unsent messages back in the composer",
     template: "/discard",
   },
+  {
+    command: "recover",
+    usage: "/recover",
+    description: "Put messages whose thread and project are gone here",
+    template: "/recover",
+  },
 ];
 
 export const SLASH_MENU_LIMIT = 8;
@@ -101,6 +107,7 @@ export type ComposerSlashAction =
   | { readonly type: "send"; readonly dispatch: "steer" | "queue"; readonly text: string }
   | { readonly type: "resume" }
   | { readonly type: "discard" }
+  | { readonly type: "recover" }
   | { readonly type: "error"; readonly message: string };
 
 /** What a slash command does; null when the text isn't one of ours and should be sent. */
@@ -127,6 +134,8 @@ export function resolveComposerSlashAction(text: string): ComposerSlashAction | 
       return { type: "resume" };
     case "discard":
       return { type: "discard" };
+    case "recover":
+      return { type: "recover" };
     case "steer":
     case "queue":
       return parsed.args.length === 0
