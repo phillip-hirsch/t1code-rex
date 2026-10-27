@@ -364,7 +364,23 @@ describe("startManagedServer", () => {
     stderr.emit("data", "def rest\r\npartial");
     expect(lines).toEqual(["first", "auth-token=abcdef rest"]);
     await server.stop();
+    stderr.emit("end");
     expect(lines).toEqual(["first", "auth-token=abcdef rest", "partial"]);
+  });
+
+  it("keeps a line whole when its end arrives after the server exited", async () => {
+    const { children, spawnImpl } = fakeSpawn();
+    const lines: string[] = [];
+    await startManagedServer(
+      { baseDir: "/tmp/.tr3x", port: 43127, onStderr: (line) => lines.push(line) },
+      { spawnImpl, waitUntilReady: ready, env: {} },
+    );
+    const child = children[0]!;
+    child.stderr.emit("data", "auth-token=abc");
+    child.exit(1);
+    child.stderr.emit("data", "def\n");
+    child.stderr.emit("end");
+    expect(lines).toEqual(["auth-token=abcdef"]);
   });
 
   it("resets the backoff once a restarted server has stayed up", async () => {

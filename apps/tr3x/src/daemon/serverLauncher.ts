@@ -284,7 +284,8 @@ export async function startManagedServer(
       onStderrLine(line);
     };
     spawned.once("exit", (code, signal) => {
-      flushStderr();
+      // Classify an unfinished last line now, but hand it on only at stderr's end.
+      if (!ready) fatalStartupError = extractFatalStartupError(partialLine) ?? fatalStartupError;
       onEnd(code, code === null ? `signal ${signal}` : `exit code ${code}`);
     });
 
@@ -304,6 +305,7 @@ export async function startManagedServer(
       partialLine = lines.pop() ?? "";
       for (const line of lines) onStderrLine(line);
     });
+    // The last partial line waits for stderr's own end: bytes can still arrive after `exit`.
     spawned.stderr?.on("end", flushStderr);
     return spawned;
   };
