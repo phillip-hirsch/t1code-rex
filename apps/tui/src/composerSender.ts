@@ -122,6 +122,12 @@ export function createComposerSender(options: ComposerSenderOptions) {
   const accepted = new Map<string, ComposerSettings>();
   /** Draft threads this sender launched that the shell doesn't list yet. */
   const launched = new Set<string>();
+  /**
+   * Threads whose modes are unknown: a discard dropped a mode command still in flight, and
+   * the server may apply it anyway. The next send sets both modes explicitly; being sent
+   * later, it lands after the dropped one.
+   */
+  const unsure = new Set<string>();
   let disposed = false;
 
   const mark = (job: Job, status: ComposerSendStatus) => {
@@ -172,7 +178,10 @@ export function createComposerSender(options: ComposerSenderOptions) {
         ? { ...send, target: { ...send.target, kind: "thread" } }
         : send;
     const base =
-      ahead?.send.settings ?? accepted.get(threadId) ?? options.threadSettings(threadId) ?? null;
+      ahead?.send.settings ??
+      (unsure.has(threadId)
+        ? "unknown"
+        : (accepted.get(threadId) ?? options.threadSettings(threadId) ?? null));
     return {
       kind: "send",
       threadId,
@@ -253,6 +262,12 @@ export function createComposerSender(options: ComposerSenderOptions) {
     const { send } = job;
     const threadId = send.target.threadId;
     store.finishSend(send);
+    // It set both modes (or launched with them), so they're known again.
+    const setsBoth =
+      send.target.kind === "draft" ||
+      (job.stages.some((stage) => stage.kind === "runtime-mode") &&
+        job.stages.some((stage) => stage.kind === "interaction-mode"));
+    if (setsBoth) unsure.delete(threadId);
     if (send.target.kind === "draft") {
       // The launch applied every setting; a message to an existing thread applies only
       // the mode commands accepted above.
@@ -370,6 +385,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
     queues.clear();
     accepted.clear();
     launched.clear();
+    unsure.clear();
   };
 
   return {
@@ -437,7 +453,14 @@ export function createComposerSender(options: ComposerSenderOptions) {
       queue.jobs.splice(0, queue.jobs.length, ...(kept === undefined ? [] : [kept]));
       stopRetry(queue);
       queue.held = false;
-      if (current !== kept) current?.abandon?.();
+      if (current !== kept) {
+        // A mode command in flight may still apply: don't plan the next send on stale modes.
+        if (current?.kind === "send" && current.stages[current.next]?.kind !== "start-turn") {
+          unsure.add(threadId);
+          accepted.delete(threadId);
+        }
+        current?.abandon?.();
+      }
       const messages = dropped.filter((job): job is SendJob => job.kind === "send");
       for (const job of dropped) if (job.kind === "resume") mark(job, "sending");
       const notice = messages.some((job) => job.dispatched) ? MAYBE_SENT_NOTICE : DISCARD_NOTICE;

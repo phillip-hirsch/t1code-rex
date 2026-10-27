@@ -101,19 +101,20 @@ export interface UnconfirmedComposerSend {
  */
 export function settingsCommandsForSend(
   send: ComposerSend,
-  base: ComposerSettings | null,
+  /** "unknown": a mode command was dropped mid-flight, so set both modes explicitly. */
+  base: ComposerSettings | null | "unknown",
 ): ReadonlyArray<ComposerSettingsCommand> {
   // A new thread launches with its settings; nothing to change first.
   if (send.target.kind === "draft" || base === null) return [];
   const commands: Array<ComposerSettingsCommand> = [];
-  if (send.settings.runtimeMode !== base.runtimeMode) {
+  if (base === "unknown" || send.settings.runtimeMode !== base.runtimeMode) {
     commands.push({
       kind: "runtime-mode",
       commandId: CommandId.make(`${send.commandId}:runtime-mode`),
       value: send.settings.runtimeMode,
     });
   }
-  if (send.settings.interactionMode !== base.interactionMode) {
+  if (base === "unknown" || send.settings.interactionMode !== base.interactionMode) {
     commands.push({
       kind: "interaction-mode",
       commandId: CommandId.make(`${send.commandId}:interaction-mode`),

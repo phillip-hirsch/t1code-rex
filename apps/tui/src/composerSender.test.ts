@@ -969,3 +969,63 @@ describe("composer sender, Sol audit round 4", () => {
     expect(savingStore(prefs).snapshot("t1").notice).toBeNull();
   });
 });
+
+describe("composer sender, Sol audit round 5", () => {
+  const approval: ComposerSettings = { ...threadSettings, runtimeMode: "approval-required" };
+  const second = { commandId: CommandId.make("cmd-2"), messageId: MessageId.make("msg-2") };
+
+  it("N14: after /discard drops a mode command in flight, the next send sets both modes", async () => {
+    const modeReply = deferred();
+    const { sender, calls, server } = setup([modeReply.promise]);
+    server.settings = approval;
+    // Full access for the first message; its mode command is in flight.
+    void sender.send(send({ settings: threadSettings }));
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1:runtime-mode"]);
+    sender.hold("t1");
+    expect(sender.discard("t1")).toEqual({ messages: 1, resumes: 0 });
+    // The server may still apply full access. An approval-mode message must say so itself,
+    // even though the shell already lists approval-required.
+    await sender.send(send({ ...second, settings: approval }));
+    expect(ids(calls)).toEqual([
+      "cmd-1:runtime-mode",
+      "cmd-2:runtime-mode",
+      "cmd-2:interaction-mode",
+      "cmd-2",
+    ]);
+    expect(calls[1]?.input).toMatchObject({ runtimeMode: "approval-required" });
+    // The dropped reply arriving late changes nothing; later sends plan normally again.
+    modeReply.resolve(ok);
+    await settle();
+    await sender.send(
+      send({
+        commandId: CommandId.make("cmd-3"),
+        messageId: MessageId.make("msg-3"),
+        settings: approval,
+      }),
+    );
+    expect(ids(calls).slice(4)).toEqual(["cmd-3"]);
+  });
+
+  it("N12: a lost launch whose project is gone stays recoverable, even with its draft open", async () => {
+    const prefs: { current: TuiPrefs } = { current: {} };
+    const never = new Promise<ComposerCommandResult>(() => undefined);
+    const first = setup([never], { store: savingStore(prefs) });
+    first.server.settings = null;
+    const draft = first.store.openNewThreadDraft(ProjectId.make("p"), () => ThreadId.make("new-1"));
+    void first.sender.send(send({ target: { kind: "draft", ...draft }, text: "lost" }));
+    await settle();
+    first.sender.handOff();
+    first.store.flush();
+
+    const store = savingStore(prefs);
+    // The draft is still listed as open, but project p is gone.
+    expect(store.findNewThreadDraft("new-1")).toBeDefined();
+    const check = recovery(store, { "new-1": { _tag: "missing" } }, { projects: ["q"] });
+    await settle();
+    expect(check.orphaned).toEqual(["lost"]);
+    expect(store.orphanedSends()).toHaveLength(1);
+    expect(recoverOrphanedSends(store, ThreadId.make("t9"))).toBe(1);
+    expect(store.getDraft("t9").text).toBe("lost");
+  });
+});

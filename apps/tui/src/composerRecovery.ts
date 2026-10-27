@@ -54,9 +54,13 @@ export function decideUnconfirmedSend(
   if (projection !== null && projection.thread.deletedAt === null) {
     return { kind: "restore" };
   }
-  // A launch that never landed goes back into its draft while that's still open.
+  // A launch that never landed goes back into its draft while that's still open, as long
+  // as the draft's project still exists (otherwise the draft can't be reached).
   if (projection === null && record.launch && context.draftOpen(record.threadId)) {
-    return { kind: "restore-in-draft" };
+    const exists = record.projectId === undefined ? true : context.projectExists(record.projectId);
+    if (exists === null) return { kind: "retry" };
+    if (exists) return { kind: "restore-in-draft" };
+    return { kind: "orphaned" };
   }
   const projectId = projection?.thread.projectId ?? record.projectId;
   if (projectId === undefined) return { kind: "orphaned" };
