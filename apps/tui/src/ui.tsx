@@ -114,7 +114,8 @@ export interface AppProps {
   /** A main window that found prefs.json locked by another one; it says it won't save. */
   readonly prefsLockedOut?: boolean;
   readonly cwd: string;
-  readonly interruptRequestToken?: number;
+  /** Registers what a quit signal runs; returns a function that unregisters it. */
+  readonly onSignalQuit?: (quit: () => void) => () => void;
   readonly onRequestExit?: () => void;
   readonly threadWindowLaunch?: ThreadWindowLaunch | null;
 }
@@ -310,7 +311,7 @@ function Shell(props: AppProps) {
     logger,
     paths,
     threadWindowLaunch,
-    interruptRequestToken,
+    onSignalQuit,
     onRequestExit,
   } = props;
   const palette = theme.palette;
@@ -452,9 +453,7 @@ function Shell(props: AppProps) {
   }, [composerStore, exitArmed, finishExit, sender]);
 
   // A signal quits without asking.
-  useEffect(() => {
-    if ((interruptRequestToken ?? 0) > 0) finishExit();
-  }, [interruptRequestToken, finishExit]);
+  useEffect(() => onSignalQuit?.(finishExit), [onSignalQuit, finishExit]);
 
   // Sends that lost the connection go out again, with the same ids, once it's back.
   const connected = connectionView.label === "Connected";

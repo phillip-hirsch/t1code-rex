@@ -185,13 +185,22 @@ if (headless) {
   }, timeoutMs);
 } else {
   let shuttingDown = false;
-  let interruptRequestToken = 0;
+  /** What the shell runs on a quit signal; re-rendering the root to deliver it would remount it. */
+  let signalQuit: (() => void) | null = null;
+  const onSignalQuit = (quit: () => void) => {
+    signalQuit = quit;
+    return () => {
+      if (signalQuit === quit) signalQuit = null;
+    };
+  };
   const tracksSystemThemeMode = shouldTrackSystemThemeMode(appTheme);
   const usesTerminalPalette = shouldResolveTerminalPalette(tuiThemeId);
   const shouldDeferInitialBackground = tracksSystemThemeMode || usesTerminalPalette;
   const initialTheme = resolveTuiTheme(appTheme, tuiThemeId);
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
+    // tr3x quits on these itself, after handing off unsent messages; the rest stay OpenTUI's.
+    exitSignals: ["SIGQUIT", "SIGABRT", "SIGBREAK", "SIGPIPE", "SIGBUS"],
     screenMode: shouldUseAlternateScreen() ? "alternate-screen" : "main-screen",
     useMouse: shouldUseMouse(),
     enableMouseMovement: shouldEnableMouseMovement(),
@@ -249,23 +258,24 @@ if (headless) {
         prefsWriter={prefsWriter}
         prefsLockedOut={prefsLockedOut}
         cwd={launchCwd}
-        interruptRequestToken={interruptRequestToken}
+        onSignalQuit={onSignalQuit}
         onRequestExit={() => shutdown(0)}
         threadWindowLaunch={threadWindowLaunch}
       />,
     );
   };
 
+  // A signal quits like `q`: the shell saves unsent messages, then exits. The timer covers
+  // a shell that never gets to it.
+  const quitOnSignal = () => {
+    setTimeout(() => shutdown(0), 2_000).unref();
+    if (signalQuit === null) shutdown(0);
+    else signalQuit();
+  };
   const signalHandlers = [
-    [
-      "SIGINT",
-      () => {
-        interruptRequestToken += 1;
-        renderApp();
-      },
-    ],
-    ["SIGTERM", () => shutdown(0)],
-    ["SIGHUP", () => shutdown(0)],
+    ["SIGINT", quitOnSignal],
+    ["SIGTERM", quitOnSignal],
+    ["SIGHUP", quitOnSignal],
     ["uncaughtException", (error: unknown) => shutdown(1, error)],
     ["unhandledRejection", (error: unknown) => shutdown(1, error)],
   ] as const;
