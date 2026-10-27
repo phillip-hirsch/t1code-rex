@@ -162,7 +162,28 @@ describe("presentTurnItem", () => {
     expect(presentTurnItem(checkpoint([]))).toBeNull();
     expect(
       presentTurnItem(checkpoint([{ path: "a.ts", kind: "modified", additions: 1, deletions: 0 }])),
-    ).toMatchObject({ text: "Checkpoint - a.ts" });
+    ).toMatchObject({ text: "Changed - a.ts (+1 -0)", diffRunId: null });
+  });
+
+  it("sums a checkpoint's files and points its row at the run's diff", () => {
+    const row = presentTurnItem(
+      turnItem("k2", {
+        type: "checkpoint",
+        runId: "run-7",
+        checkpointId: "cp-2",
+        scopeId: "scope-1",
+        files: [
+          { path: "a.ts", kind: "modified", additions: 3, deletions: 1 },
+          { path: "b.ts", kind: "added", additions: 10, deletions: 0 },
+        ],
+      }),
+    );
+    expect(row).toMatchObject({
+      kind: "work",
+      text: "Changed - 2 files (+13 -1)",
+      accent: "change",
+      diffRunId: "run-7",
+    });
   });
 });
 

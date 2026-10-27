@@ -72,6 +72,15 @@ describe("threadWindowLaunch", () => {
     await vi.waitFor(() => expect(NodeFS.existsSync(filePath)).toBe(false));
   });
 
+  it("carries a diff tab's view and rejects views it doesn't know", () => {
+    expect(parseThreadWindowLaunch(JSON.stringify({ ...launch, view: "diff" }))).toEqual({
+      ...launch,
+      view: "diff",
+    });
+    expect(parseThreadWindowLaunch(JSON.stringify(launch))).toEqual(launch);
+    expect(parseThreadWindowLaunch(JSON.stringify({ ...launch, view: "terminal" }))).toBeNull();
+  });
+
   it("ignores a missing variable and rejects malformed files", () => {
     expect(consumeThreadWindowLaunch({})).toBeNull();
     expect(parseThreadWindowLaunch("not json")).toBeNull();

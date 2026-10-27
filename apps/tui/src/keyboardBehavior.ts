@@ -94,8 +94,13 @@ export const KEYBINDING_GUIDE_SECTIONS: readonly KeybindingGuideSection[] = [
         action: "Scroll the timeline",
       },
       {
-        shortcut: "Ctrl+D",
-        action: "Toggle the full diff view",
+        shortcut: "Ctrl+U / Ctrl+D",
+        action: "Scroll the timeline or diff by half a page",
+      },
+      {
+        shortcut: "d / Cmd+D",
+        action: "Toggle the diff view",
+        note: "d while the thread is focused; Cmd+D on macOS. Ctrl+D stays a scroll key on Windows and Linux.",
       },
       {
         shortcut: "v",

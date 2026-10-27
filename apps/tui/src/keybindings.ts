@@ -35,6 +35,39 @@ function isMacPlatform(platform: NodeJS.Platform): boolean {
   return platform === "darwin";
 }
 
+/**
+ * Ctrl keys the TUI keeps on Windows and Linux, where "mod" means Ctrl: Ctrl+D and Ctrl+U
+ * scroll the transcript and diff by half a page, and delete in the composer. A default "mod+d"
+ * (upstream's diff.toggle) doesn't take them there; an explicit "ctrl+d" binding still does.
+ */
+const RESERVED_CTRL_KEYS: ReadonlySet<string> = new Set(["d", "u"]);
+
+function yieldsToReservedCtrlKey(shortcut: KeybindingShortcut, platform: NodeJS.Platform): boolean {
+  return (
+    !isMacPlatform(platform) &&
+    shortcut.modKey &&
+    !shortcut.ctrlKey &&
+    !shortcut.metaKey &&
+    !shortcut.shiftKey &&
+    !shortcut.altKey &&
+    RESERVED_CTRL_KEYS.has(shortcut.key)
+  );
+}
+
+function currentPlatform(): NodeJS.Platform {
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
+  return process.platform;
+}
+
+/** "⌘D" or "Ctrl+K" for a "mod+<key>" shortcut, or null where the TUI keeps that Ctrl key. */
+export function modShortcutLabel(
+  key: string,
+  platform: NodeJS.Platform = currentPlatform(),
+): string | null {
+  if (isMacPlatform(platform)) return `⌘${key.toUpperCase()}`;
+  return RESERVED_CTRL_KEYS.has(key) ? null : `Ctrl+${key.toUpperCase()}`;
+}
+
 function controlKeyFromSequence(sequence: string | undefined): string | null {
   if (!sequence || sequence.length !== 1) return null;
   const code = sequence.charCodeAt(0);
@@ -114,14 +147,14 @@ export function resolveTuiShortcutCommand(
   keybindings: ResolvedKeybindingsConfig,
   options?: TuiShortcutMatchOptions,
 ): KeybindingCommand | null {
-  // oxlint-disable-next-line t3code/no-global-process-runtime -- The TUI reports the host it runs on; there is no Effect runtime to inject it.
-  const platform = options?.platform ?? process.platform;
+  const platform = options?.platform ?? currentPlatform();
   const context = resolveContext(options);
 
   for (let index = keybindings.length - 1; index >= 0; index -= 1) {
     const binding = keybindings[index];
     if (!binding) continue;
     if (!matchesWhenClause(binding.whenAst, context)) continue;
+    if (yieldsToReservedCtrlKey(binding.shortcut, platform)) continue;
     if (!matchesShortcut(event, binding.shortcut, platform)) continue;
     return binding.command;
   }

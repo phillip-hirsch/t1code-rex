@@ -1,5 +1,5 @@
 // @effect-diagnostics globalTimers:off -- The TUI runs on Bun outside the Effect runtime.
-import type { KeyEvent, ScrollBoxRenderable } from "@opentui/core";
+import type { KeyEvent, MouseEvent, ScrollBoxRenderable } from "@opentui/core";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/models";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
@@ -63,6 +63,8 @@ export interface ThreadViewProps {
   readonly timestampFormat: TimestampFormat;
   readonly onActivate: () => void;
   readonly onCopy: (value: string, message: string) => void;
+  /** Opens a run's diff from its changed-files row. */
+  readonly onOpenDiff?: (runId: string) => void;
   readonly ref?: Ref<ThreadViewHandle>;
 }
 
@@ -91,6 +93,7 @@ export function ThreadView(props: ThreadViewProps) {
     timestampFormat,
     onActivate,
     onCopy,
+    onOpenDiff,
   } = props;
   const palette = theme.palette;
   const atoms = useMemo(() => connection.thread(threadId), [connection, threadId]);
@@ -206,6 +209,7 @@ export function ThreadView(props: ThreadViewProps) {
             timestampFormat={timestampFormat}
             bubbleWidth={bubbleWidth}
             onCopyCode={copyCode}
+            onOpenDiff={onOpenDiff}
           />
         ))}
       </scrollbox>
@@ -315,6 +319,7 @@ interface TimelineRowViewProps {
   readonly timestampFormat: TimestampFormat;
   readonly bubbleWidth: `${number}%`;
   readonly onCopyCode: (value: string) => void;
+  readonly onOpenDiff: ((runId: string) => void) | undefined;
 }
 
 /** One row; rows keep their identity until their item changes, so memo skips the rest. */
@@ -406,10 +411,19 @@ const TimelineRowView = memo(function TimelineRowView(props: TimelineRowViewProp
           )}
         </box>
       );
-    case "work":
+    case "work": {
+      const diffRunId = props.onOpenDiff === undefined ? null : row.diffRunId;
       return (
         <box
           id={id}
+          {...(diffRunId === null
+            ? {}
+            : {
+                onMouseDown: (event: MouseEvent) => {
+                  event.preventDefault();
+                  props.onOpenDiff?.(diffRunId);
+                },
+              })}
           style={{
             backgroundColor: palette.surface,
             marginBottom,
@@ -438,8 +452,12 @@ const TimelineRowView = memo(function TimelineRowView(props: TimelineRowViewProp
               }}
             />
           </box>
+          {diffRunId === null ? null : (
+            <text content="  View diff ›" style={{ fg: palette.info, flexShrink: 0 }} />
+          )}
         </box>
       );
+    }
     case "plan":
       return (
         <box
