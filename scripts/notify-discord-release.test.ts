@@ -1,0 +1,384 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { assert, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
+import * as ConfigProvider from "effect/ConfigProvider";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
+import * as Schema from "effect/Schema";
+import { Command } from "effect/cli";
+import { HttpClient, HttpClientError, HttpClientResponse, UrlParams } from "effect/http";
+
+import {
+  buildDiscordReleaseAnnouncement,
+  notifyDiscordReleaseCommand,
+  postDiscordWebhook,
+} from "./notify-discord-release.ts";
+
+const latestAnnouncement = {
+  target: "latest",
+  roleId: "222222222222222222",
+  releaseName: "T3 Code v1.2.3",
+  version: "1.2.3",
+  tag: "v1.2.3",
+  releaseUrl: new URL("https://github.com/pingdotgg/t3code/releases/tag/v1.2.3"),
+  timestamp: "2026-05-01T01:41:00.000Z",
+} as const;
+const nightlyAnnouncement = { ...latestAnnouncement, target: "prerelease" } as const;
+const webhookUrl = new URL("https://discord.com/api/webhooks/123456/test-secret-token");
+const intro = "A new T3 Code prerelease is available for nightly testers.";
+const notes = `## What's Changed\n* Fix remote reconnection by @contributor in https://github.com/pingdotgg/t3code/pull/10\n* Improve thread search in https://github.com/pingdotgg/t3code/pull/11\n\n**Full Changelog**: https://github.com/pingdotgg/t3code/compare/v1.2.2...v1.2.3`;
+const formattedNotes = `## What's Changed\n* [Fix remote reconnection](https://github.com/pingdotgg/t3code/pull/10) by [@contributor](https://github.com/contributor)\n* [Improve thread search](https://github.com/pingdotgg/t3code/pull/11)\n\n[Full Changelog](https://github.com/pingdotgg/t3code/compare/v1.2.2...v1.2.3)`;
+const runCli = Command.runWith(notifyDiscordReleaseCommand, { version: "0.0.0" });
+const cliArgs = (target: "latest" | "prerelease") => [
+  target,
+  "--role-id",
+  latestAnnouncement.roleId,
+  "--release-name",
+  latestAnnouncement.releaseName,
+  "--release-version",
+  latestAnnouncement.version,
+  "--tag",
+  latestAnnouncement.tag,
+  "--release-url",
+  latestAnnouncement.releaseUrl.href,
+];
+const configLayer = ConfigProvider.layer(
+  ConfigProvider.fromEnv({ env: { DISCORD_WEBHOOK_URL: webhookUrl.href } }),
+);
+const PayloadSchema = Schema.fromJsonString(
+  Schema.Struct({
+    content: Schema.String,
+    allowed_mentions: Schema.Struct({
+      parse: Schema.Array(Schema.String),
+      roles: Schema.Array(Schema.String),
+    }),
+    embeds: Schema.Array(
+      Schema.Struct({ title: Schema.String, description: Schema.String, url: Schema.String }),
+    ),
+  }),
+);
+const decodePayload = Schema.decodeUnknownSync(PayloadSchema);
+const payloadDescription = (payloads: ReturnType<typeof buildDiscordReleaseAnnouncement>) =>
+  payloads.flatMap((payload) => payload.embeds.map((embed) => embed.description)).join("");
+const captureClient = (requests: string[], status = 204) =>
+  Layer.succeed(
+    HttpClient.HttpClient,
+    HttpClient.make((request) => {
+      assert.deepStrictEqual(UrlParams.getAll(request.urlParams, "wait"), ["true"]);
+      assert.equal(request.body._tag, "Uint8Array");
+      if (request.body._tag !== "Uint8Array") return Effect.die("Expected JSON request body");
+      requests.push(new TextDecoder().decode(request.body.body));
+      return Effect.succeed(HttpClientResponse.fromWeb(request, new Response(null, { status })));
+    }),
+  );
+
+function assertDiscordLimits(payloads: ReturnType<typeof buildDiscordReleaseAnnouncement>) {
+  for (const payload of payloads) {
+    assert.ok(payload.content.length <= 2000);
+    assert.equal(payload.embeds.length, 1);
+    let total = 0;
+    for (const embed of payload.embeds) {
+      assert.ok(embed.title.length <= 256);
+      assert.ok(embed.description.length <= 4096);
+      assert.ok(embed.footer.text.length <= 2048);
+      total += embed.title.length + embed.description.length + embed.footer.text.length;
+    }
+    assert.ok(total <= 6000);
+  }
+}
+
+it("keeps stable announcements short even when a long changelog is provided", () => {
+  assert.deepStrictEqual(
+    buildDiscordReleaseAnnouncement({ ...latestAnnouncement, releaseNotes: notes.repeat(200) }),
+    [
+      {
+        content: "-# <@&222222222222222222>",
+        allowed_mentions: { parse: [], roles: [latestAnnouncement.roleId] },
+        embeds: [
+          {
+            title: latestAnnouncement.releaseName,
+            url: latestAnnouncement.releaseUrl.href,
+            description: `[View full release notes on GitHub](${latestAnnouncement.releaseUrl.href})`,
+            color: 0x2ecc71,
+            footer: { text: "v1.2.3" },
+            timestamp: latestAnnouncement.timestamp,
+          },
+        ],
+      },
+    ],
+  );
+});
+
+it("links contributor profiles and escapes brackets in change titles and bot handles", () => {
+  const releaseNotes =
+    "* Fix [web] links by @octo-user in https://github.com/pingdotgg/t3code/pull/12\n* Bump dependencies by @dependabot[bot] in https://github.com/pingdotgg/t3code/pull/13";
+  const payloads = buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, releaseNotes });
+  assert.equal(
+    payloadDescription(payloads),
+    `${intro}\n\n* [Fix \\[web\\] links](https://github.com/pingdotgg/t3code/pull/12) by [@octo-user](https://github.com/octo-user)\n* [Bump dependencies](https://github.com/pingdotgg/t3code/pull/13) by [@dependabot\\[bot\\]](https://github.com/apps/dependabot)`,
+  );
+});
+
+it("preserves custom notes and links outside generated GitHub pull request entries", () => {
+  const releaseNotes =
+    "## Migration\n* Written by @someone in the docs\n* Commit https://github.com/pingdotgg/t3code/commit/abc123\n[Guide](https://example.com/guide)";
+  assert.equal(
+    payloadDescription(buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, releaseNotes })),
+    `${intro}\n\n${releaseNotes}`,
+  );
+});
+
+it("falls back when notes are missing, empty, or whitespace", () => {
+  const fallback = buildDiscordReleaseAnnouncement(nightlyAnnouncement);
+  assert.equal(payloadDescription(fallback), intro);
+  assert.deepStrictEqual(
+    buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, releaseNotes: "" }),
+    fallback,
+  );
+  assert.deepStrictEqual(
+    buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, releaseNotes: " \r\n\t" }),
+    fallback,
+  );
+});
+
+it("splits long notes at line boundaries without dropping changes or the comparison link", () => {
+  const longNotes =
+    Array.from(
+      { length: 150 },
+      (_, i) => `* Change ${i} in https://github.com/pingdotgg/t3code/pull/${i}\n`,
+    ).join("") + notes;
+  const payloads = buildDiscordReleaseAnnouncement({
+    ...nightlyAnnouncement,
+    releaseNotes: longNotes,
+  });
+  assert.ok(payloads.length > 2);
+  const formattedChanges = Array.from(
+    { length: 150 },
+    (_, i) => `* [Change ${i}](https://github.com/pingdotgg/t3code/pull/${i})\n`,
+  ).join("");
+  assert.equal(payloadDescription(payloads), `${intro}\n\n${formattedChanges}${formattedNotes}`);
+  assertDiscordLimits(payloads);
+  for (const [index, payload] of payloads.entries()) {
+    assert.deepStrictEqual(payload.allowed_mentions, {
+      parse: [],
+      roles: index === 0 ? [latestAnnouncement.roleId] : [],
+    });
+    if (index > 0) {
+      assert.equal(payload.content, "");
+      assert.equal(
+        payload.embeds[0]?.title,
+        `Changelog continued (${index + 1}/${payloads.length})`,
+      );
+    }
+    if (index < payloads.length - 1) assert.ok(payload.embeds[0]?.description.endsWith("\n"));
+    assert.equal(payload.embeds[0]?.url, nightlyAnnouncement.releaseUrl.href);
+  }
+});
+
+it("handles oversized lines, words, and Unicode without losing or breaking characters", () => {
+  const longNotes =
+    "a".repeat(9000) + "\n" + "🦋".repeat(4500) + "\n" + "word ".repeat(2000).trim();
+  const payloads = buildDiscordReleaseAnnouncement({
+    ...nightlyAnnouncement,
+    releaseNotes: longNotes,
+  });
+  assertDiscordLimits(payloads);
+  assert.equal(payloadDescription(payloads), `${intro}\n\n${longNotes}`);
+  for (const payload of payloads) assert.ok(payload.embeds[0]?.description.isWellFormed());
+});
+
+it("accepts exactly 4096 description characters and splits the next character", () => {
+  const releaseNotes = "x".repeat(4096 - intro.length - 2);
+  assert.equal(buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, releaseNotes }).length, 1);
+  const longer = buildDiscordReleaseAnnouncement({
+    ...nightlyAnnouncement,
+    releaseNotes: releaseNotes + "x",
+  });
+  assert.equal(longer.length, 2);
+  assert.equal(payloadDescription(longer), `${intro}\n\n${releaseNotes}x`);
+  assertDiscordLimits(longer);
+});
+
+it("suppresses everyone, here, user, and role mentions on every message", () => {
+  const mentions = `@everyone @here <@123> <@!123> <@&456> <@&${nightlyAnnouncement.roleId}>`;
+  const inert = mentions.replaceAll("@", "@\u200b");
+  const payloads = buildDiscordReleaseAnnouncement({
+    ...nightlyAnnouncement,
+    releaseName: mentions,
+    releaseNotes: `${mentions}\n`.repeat(100) + notes,
+  });
+  assert.ok(payloads.length > 1);
+  assert.equal(
+    payloadDescription(payloads),
+    `${intro}\n\n${`${inert}\n`.repeat(100)}${formattedNotes}`,
+  );
+  for (const [index, payload] of payloads.entries()) {
+    assert.deepStrictEqual(payload.allowed_mentions, {
+      parse: [],
+      roles: index === 0 ? [latestAnnouncement.roleId] : [],
+    });
+    if (index === 0) assert.equal(payload.embeds[0]?.title, inert);
+    assert.ok(!payload.content.includes("@everyone"));
+    assert.ok(!payload.content.includes("@here"));
+    assert.equal(payload.content.match(/<@&\d+>/g)?.length ?? 0, index === 0 ? 1 : 0);
+  }
+});
+
+it("rejects invalid metadata before sending", () => {
+  assert.throws(
+    () => buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, releaseName: "x".repeat(257) }),
+    /title exceeds/,
+  );
+  assert.throws(
+    () => buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, version: "x".repeat(2048) }),
+    /footer exceeds/,
+  );
+  assert.throws(
+    () => buildDiscordReleaseAnnouncement({ ...nightlyAnnouncement, roleId: "123> @everyone" }),
+    /Invalid Discord release role/,
+  );
+});
+
+it.effect("retains safe request context without leaking the webhook URL or nested cause", () =>
+  Effect.gen(function* () {
+    const payload = buildDiscordReleaseAnnouncement(latestAnnouncement)[0]!;
+    const logs: string[] = [];
+    const client = Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.fail(
+          new HttpClientError.HttpClientError({
+            reason: new HttpClientError.EncodeError({
+              request,
+              cause: new Error(`Encoder failed for ${webhookUrl.href}`),
+            }),
+          }),
+        ),
+      ),
+    );
+    const error = yield* postDiscordWebhook(webhookUrl, payload, latestAnnouncement).pipe(
+      Effect.tapCause(Effect.logError),
+      Effect.provide([
+        client,
+        Logger.layer([
+          Logger.make((options) => {
+            logs.push(Logger.formatJson.log(options));
+          }),
+        ]),
+      ]),
+      Effect.flip,
+    );
+    if (error._tag !== "DiscordReleaseWebhookRequestError")
+      assert.fail(`Unexpected error: ${error._tag}`);
+    assert.equal(error.reason, "EncodeError");
+    assert.equal(error.target, "latest");
+    assert.equal(error.tag, latestAnnouncement.tag);
+    assert.equal(error.webhookOrigin, webhookUrl.origin);
+    assert.equal(error.webhookPathnameSegmentCount, 4);
+    assert.equal(error.contentLength, payload.content.length);
+    assert.equal(error.allowedRoleMentionCount, 1);
+    assert.ok(!Cause.pretty(Cause.fail(error)).includes("test-secret-token"));
+    assert.ok(!logs.join("\n").includes("test-secret-token"));
+  }),
+);
+
+it.effect(
+  "retains response status without retaining the secret-bearing request or response body",
+  () =>
+    Effect.gen(function* () {
+      const client = Layer.succeed(
+        HttpClient.HttpClient,
+        HttpClient.make((request) =>
+          Effect.succeed(
+            HttpClientResponse.fromWeb(request, new Response(webhookUrl.href, { status: 400 })),
+          ),
+        ),
+      );
+      const error = yield* postDiscordWebhook(
+        webhookUrl,
+        buildDiscordReleaseAnnouncement(latestAnnouncement)[0]!,
+        latestAnnouncement,
+      ).pipe(Effect.provide(client), Effect.flip);
+      if (error._tag !== "DiscordReleaseWebhookResponseError")
+        assert.fail(`Unexpected error: ${error._tag}`);
+      assert.equal(error.status, 400);
+      assert.equal(error.tag, latestAnnouncement.tag);
+      assert.ok(!Cause.pretty(Cause.fail(error)).includes("test-secret-token"));
+    }),
+);
+
+it.layer(NodeServices.layer)("Discord release CLI", (it) => {
+  it.effect("sends a long nightly changelog in order, mentioning the role only first", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const temp = yield* fs.makeTempDirectoryScoped({ prefix: "discord release " });
+      const notesFile = `${temp}/discord-release-notes.md`;
+      yield* fs.writeFileString(notesFile, Array.from({ length: 50 }, () => notes).join("\n\n"));
+      const requests: string[] = [];
+      yield* runCli([...cliArgs("prerelease"), "--release-notes-file", notesFile]).pipe(
+        Effect.provide([configLayer, captureClient(requests)]),
+      );
+      const payloads = requests.map((request) => decodePayload(request));
+      assert.ok(payloads.length > 2);
+      assert.equal(
+        payloads.flatMap((payload) => payload.embeds.map((embed) => embed.description)).join(""),
+        `${intro}\n\n${Array.from({ length: 50 }, () => formattedNotes).join("\n\n")}`,
+      );
+      for (const [index, payload] of payloads.entries())
+        assert.deepStrictEqual(payload.allowed_mentions, {
+          parse: [],
+          roles: index === 0 ? [latestAnnouncement.roleId] : [],
+        });
+    }),
+  );
+
+  it.effect("fails before sending when the requested nightly notes file cannot be read", () =>
+    Effect.gen(function* () {
+      const requests: string[] = [];
+      const result = yield* runCli([
+        ...cliArgs("prerelease"),
+        "--release-notes-file",
+        "/missing-nightly-notes.md",
+      ]).pipe(Effect.provide([configLayer, captureClient(requests)]), Effect.result);
+      assert.equal(result._tag, "Failure");
+      assert.deepStrictEqual(requests, []);
+    }),
+  );
+
+  it.effect("stops on a failed send rather than posting later continuations", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const temp = yield* fs.makeTempDirectoryScoped();
+      const file = `${temp}/notes.md`;
+      yield* fs.writeFileString(file, notes.repeat(100));
+      const requests: string[] = [];
+      const result = yield* runCli([...cliArgs("prerelease"), "--release-notes-file", file]).pipe(
+        Effect.provide([configLayer, captureClient(requests, 400)]),
+        Effect.result,
+      );
+      assert.equal(result._tag, "Failure");
+      assert.equal(requests.length, 1);
+    }),
+  );
+
+  it.effect("does not expose an invalid webhook secret in configuration errors", () =>
+    Effect.gen(function* () {
+      const requests: string[] = [];
+      const result = yield* runCli(cliArgs("latest")).pipe(
+        Effect.provide([
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({ env: { DISCORD_WEBHOOK_URL: "invalid-test-secret-token" } }),
+          ),
+          captureClient(requests),
+        ]),
+        Effect.result,
+      );
+      assert.equal(result._tag, "Failure");
+      if (result._tag === "Failure")
+        assert.ok(!Cause.pretty(Cause.fail(result.failure)).includes("test-secret-token"));
+      assert.deepStrictEqual(requests, []);
+    }),
+  );
+});

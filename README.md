@@ -1,36 +1,7 @@
-<div align="center">
+# tr3x
 
-# t1code
+tr3x will put T3 Code's orchestration v2 in Rex: every thread in a Rex tab, with model and provider switching mid-thread.
 
-[![License](https://img.shields.io/badge/license-MIT-111111?style=flat-square)](./LICENSE)
-[![npm](https://img.shields.io/npm/v/%40maria__rcks%2Ft1code?color=111111&label=npm&style=flat-square)](https://www.npmjs.com/package/@maria_rcks/t1code)
-[![GitHub](https://img.shields.io/badge/github-maria--rcks%2Ft1code-111111?style=flat-square&logo=github)](https://github.com/maria-rcks/t1code)
+It's an early work in progress. The design is in [PR #24](https://github.com/phillip-hirsch/tr3x/pull/24). For now this repository carries upstream T3 Code; the tr3x package comes next.
 
-<img src="./assets/repo/t1code-preview.webp" alt="t1code terminal UI screenshot" width="1000" />
-
-_T3Code, but in your terminal._
-
-</div>
-
-Run instantly:
-
-```bash
-bunx @maria_rcks/t1code
-```
-
-Install globally:
-
-```bash
-bun add -g @maria_rcks/t1code
-```
-
-Develop from source:
-
-```bash
-git clone https://github.com/maria-rcks/t1code.git
-cd t1code
-bun install
-bun dev:tui
-```
-
-<sub>Based on T3 Code by [@t3dotgg](https://github.com/t3dotgg) and [@juliusmarminge](https://github.com/juliusmarminge).</sub>
+<sub>Built on [T3 Code](https://github.com/pingdotgg/t3code) by [@t3dotgg](https://github.com/t3dotgg) and [@juliusmarminge](https://github.com/juliusmarminge), and forked from [t1code](https://github.com/maria-rcks/t1code) by [@maria-rcks](https://github.com/maria-rcks).</sub>

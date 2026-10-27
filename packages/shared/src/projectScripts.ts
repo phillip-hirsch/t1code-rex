@@ -1,57 +1,35 @@
-import {
-  MAX_SCRIPT_ID_LENGTH,
-  SCRIPT_RUN_COMMAND_PATTERN,
-  type KeybindingCommand,
-  type ProjectScript,
-} from "@t3tools/contracts";
-import { Schema } from "effect";
+import type { ProjectId, ProjectScript, ServerSettings } from "@t3tools/contracts";
 
-function normalizeScriptId(value: string): string {
-  const cleaned = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  if (cleaned.length === 0) {
-    return "script";
-  }
-  if (cleaned.length <= MAX_SCRIPT_ID_LENGTH) {
-    return cleaned;
-  }
-  return cleaned.slice(0, MAX_SCRIPT_ID_LENGTH).replace(/-+$/g, "") || "script";
+type ProjectScriptSettings = Pick<
+  ServerSettings,
+  | "defaultProjectScripts"
+  | "projectScriptOverrides"
+  | "projectSettingsOverrides"
+  | "projectSettingsFolded"
+>;
+
+export function resolveProjectScripts(
+  settings: ProjectScriptSettings,
+  project: { id: ProjectId; scripts: readonly ProjectScript[] },
+): readonly ProjectScript[] {
+  const override = settings.projectSettingsOverrides[project.id]?.defaultProjectScripts;
+  if (override !== undefined) return override;
+  if (settings.projectSettingsFolded) return settings.defaultProjectScripts;
+  const legacy = settings.projectScriptOverrides[project.id];
+  if (legacy === null) return settings.defaultProjectScripts;
+  return legacy ?? (project.scripts.length > 0 ? project.scripts : settings.defaultProjectScripts);
 }
 
-export const commandForProjectScript = (scriptId: string): KeybindingCommand =>
-  SCRIPT_RUN_COMMAND_PATTERN.make(`script.${scriptId}.run`);
-
-export function projectScriptIdFromCommand(command: string): string | null {
-  const trimmed = command.trim();
-  if (!Schema.is(SCRIPT_RUN_COMMAND_PATTERN)(trimmed)) {
-    return null;
+export function projectScriptsInheritDefaults(
+  settings: ProjectScriptSettings,
+  project: { id: ProjectId; scripts: readonly ProjectScript[] },
+): boolean {
+  if (settings.projectSettingsOverrides[project.id]?.defaultProjectScripts !== undefined) {
+    return false;
   }
-  const [prefix, , suffix] = SCRIPT_RUN_COMMAND_PATTERN.parts;
-  return trimmed.slice(prefix.literal.length, -suffix.literal.length);
-}
-
-export function nextProjectScriptId(name: string, existingIds: Iterable<string>): string {
-  const taken = new Set(Array.from(existingIds));
-  const baseId = normalizeScriptId(name);
-  if (!taken.has(baseId)) return baseId;
-
-  let suffix = 2;
-  while (suffix < 10_000) {
-    const candidate = `${baseId}-${suffix}`;
-    const safeCandidate =
-      candidate.length <= MAX_SCRIPT_ID_LENGTH
-        ? candidate
-        : `${baseId.slice(0, Math.max(1, MAX_SCRIPT_ID_LENGTH - String(suffix).length - 1))}-${suffix}`;
-    if (!taken.has(safeCandidate)) {
-      return safeCandidate;
-    }
-    suffix += 1;
-  }
-
-  return `${baseId}-${Date.now()}`.slice(0, MAX_SCRIPT_ID_LENGTH);
+  if (settings.projectSettingsFolded) return true;
+  const legacy = settings.projectScriptOverrides[project.id];
+  return legacy === null || (legacy === undefined && project.scripts.length === 0);
 }
 
 interface ProjectScriptRuntimeEnvInput {
@@ -86,11 +64,27 @@ export function projectScriptRuntimeEnv(
   return env;
 }
 
-export function primaryProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
-  const regular = scripts.find((script) => !script.runOnWorktreeCreate);
-  return regular ?? scripts[0] ?? null;
-}
-
 export function setupProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
   return scripts.find((script) => script.runOnWorktreeCreate) ?? null;
+}
+
+export function projectScriptMenuLabel(script: ProjectScript): string {
+  const roles = [
+    ...(script.runOnWorktreeCreate ? ["setup"] : []),
+    ...(script.runOnSettle ? ["on settle"] : []),
+  ];
+  return roles.length === 0 ? script.name : `${script.name} (${roles.join(", ")})`;
+}
+
+export function settleProjectScript(scripts: readonly ProjectScript[]): ProjectScript | null {
+  return scripts.find((script) => script.runOnSettle === true) ?? null;
+}
+
+/**
+ * Leading spaces omit scripts from Bash history with ignorespace/ignoreboth,
+ * zsh with HIST_IGNORE_SPACE, and fish. Only the first line is prefixed, so later
+ * entries from multiline input may still enter history. PowerShell/PSReadLine history is not suppressed.
+ */
+export function projectScriptTerminalInput(command: string): string {
+  return ` ${command}\r`;
 }

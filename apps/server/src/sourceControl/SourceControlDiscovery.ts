@@ -1,433 +1,143 @@
-import type {
-  SourceControlDiscoveryResult,
-  SourceControlProviderAuth,
-  SourceControlProviderDiscoveryItem,
-  SourceControlProviderKind,
-  VcsDiscoveryItem,
-  VcsDriverKind,
+import {
+  type SourceControlDiscoveryResult,
+  type VcsDiscoveryItem,
+  type VcsDriverKind,
 } from "@t3tools/contracts";
-import { Effect, Layer, Schema, Context } from "effect";
+import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
-import { runProcess, type ProcessRunResult } from "../processRunner";
+import * as ServerConfig from "../config.ts";
+import * as VcsProcess from "../vcs/VcsProcess.ts";
+import { detailFromCause, firstNonEmptyLine } from "@t3tools/source-control-core/server/discovery";
+import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
 
-interface SourceControlAuthProbeInput {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly code: ProcessRunResult["code"];
+interface DiscoveryProbe {
+  readonly label: string;
+  readonly executable?: string;
+  readonly versionArgs?: ReadonlyArray<string>;
+  readonly implemented: boolean;
+  readonly installHint: string;
 }
 
-interface CliDiscoverySpecBase {
-  readonly label: string;
+type VcsProbe = DiscoveryProbe & {
+  readonly kind: VcsDriverKind;
   readonly executable: string;
   readonly versionArgs: ReadonlyArray<string>;
-  readonly installHint: string;
-}
+};
 
-interface VcsCliDiscoverySpec extends CliDiscoverySpecBase {
-  readonly kind: VcsDriverKind;
-  readonly implemented: boolean;
-}
-
-interface ProviderCliDiscoverySpec extends CliDiscoverySpecBase {
-  readonly kind: SourceControlProviderKind;
-  readonly authArgs: ReadonlyArray<string>;
-  readonly parseAuth: (input: SourceControlAuthProbeInput) => SourceControlProviderAuth;
-}
-
-interface ProviderEnvDiscoverySpec {
-  readonly kind: SourceControlProviderKind;
+interface DiscoveryProbeResult<Kind extends string> {
+  readonly kind: Kind;
   readonly label: string;
+  readonly executable?: string;
+  readonly implemented: boolean;
+  readonly status: "available" | "missing";
+  readonly version: Option.Option<string>;
   readonly installHint: string;
-  readonly parseAuth: (env: NodeJS.ProcessEnv) => SourceControlProviderAuth;
+  readonly detail: Option.Option<string>;
 }
 
-export interface SourceControlDiscoveryShape {
-  readonly discover: (input?: {
-    readonly cwd?: string;
-  }) => Effect.Effect<SourceControlDiscoveryResult>;
-}
-
-export class SourceControlDiscovery extends Context.Service<
-  SourceControlDiscovery,
-  SourceControlDiscoveryShape
->()("t3/sourceControl/SourceControlDiscovery") {}
-
-class SourceControlDiscoveryError extends Schema.TaggedErrorClass<SourceControlDiscoveryError>()(
-  "SourceControlDiscoveryError",
-  {
-    operation: Schema.String,
-    detail: Schema.String,
-    cause: Schema.optional(Schema.Defect),
-  },
-) {}
-
-const VCS_SPECS: ReadonlyArray<VcsCliDiscoverySpec> = [
+const VCS_PROBES: ReadonlyArray<VcsProbe> = [
   {
     kind: "git",
-    implemented: true,
     label: "Git",
     executable: "git",
     versionArgs: ["--version"],
-    installHint: "Install Git and make sure `git` is available on PATH.",
+    implemented: true,
+    installHint: "Install Git from https://git-scm.com/downloads or with your package manager.",
   },
   {
     kind: "jj",
-    implemented: false,
     label: "Jujutsu",
     executable: "jj",
     versionArgs: ["--version"],
+    implemented: false,
     installHint: "Install Jujutsu with `brew install jj` or from https://github.com/jj-vcs/jj.",
   },
 ];
 
-const PROVIDER_SPECS: ReadonlyArray<ProviderCliDiscoverySpec> = [
+export class SourceControlDiscovery extends Context.Service<
+  SourceControlDiscovery,
   {
-    kind: "github",
-    label: "GitHub",
-    executable: "gh",
-    versionArgs: ["--version"],
-    authArgs: ["auth", "status"],
-    installHint: "Install GitHub CLI and run `gh auth login`.",
-    parseAuth: parseGitHubAuth,
-  },
-  {
-    kind: "gitlab",
-    label: "GitLab",
-    executable: "glab",
-    versionArgs: ["--version"],
-    authArgs: ["auth", "status"],
-    installHint: "Install GitLab CLI and run `glab auth login`.",
-    parseAuth: parseGitLabAuth,
-  },
-  {
-    kind: "azure-devops",
-    label: "Azure DevOps",
-    executable: "az",
-    versionArgs: ["--version"],
-    authArgs: ["account", "show", "--query", "user.name", "--output", "tsv"],
-    installHint: "Install Azure CLI, install the Azure DevOps extension, and run `az login`.",
-    parseAuth: parseAzureAuth,
-  },
-];
-
-const API_PROVIDER_SPECS: ReadonlyArray<ProviderEnvDiscoverySpec> = [
-  {
-    kind: "bitbucket",
-    label: "Bitbucket",
-    installHint:
-      "Set T3CODE_BITBUCKET_EMAIL and T3CODE_BITBUCKET_API_TOKEN, or T3CODE_BITBUCKET_ACCESS_TOKEN.",
-    parseAuth: parseBitbucketAuth,
-  },
-];
-
-function firstNonEmptyLine(text: string): string | null {
-  return (
-    text
-      .split(/\r?\n/)
-      .map((entry) => entry.trim())
-      .find((entry) => entry.length > 0) ?? null
-  );
-}
-
-function errorDetail(error: unknown): string | null {
-  if (error instanceof Error && error.message.trim().length > 0) {
-    return error.message.trim();
+    readonly discover: Effect.Effect<SourceControlDiscoveryResult>;
   }
-  return null;
-}
+>()("t3/sourceControl/SourceControlDiscovery") {}
 
-function normalizeProcessError(operation: string, error: unknown): SourceControlDiscoveryError {
-  return new SourceControlDiscoveryError({
-    operation,
-    detail: errorDetail(error) ?? `Failed to run ${operation}.`,
-    cause: error,
-  });
-}
+/** @public */
+export const make = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const process = yield* VcsProcess.VcsProcess;
+  const sourceControlProviders = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
 
-function auth(input: {
-  readonly status: SourceControlProviderAuth["status"];
-  readonly account?: string | null | undefined;
-  readonly host?: string | null | undefined;
-  readonly detail?: string | null | undefined;
-}): SourceControlProviderAuth {
-  return {
-    status: input.status,
-    account: normalizeText(input.account),
-    host: normalizeText(input.host),
-    detail: normalizeText(input.detail),
-  };
-}
+  const probe = <Kind extends VcsDriverKind>(
+    input: DiscoveryProbe & { readonly kind: Kind },
+  ): Effect.Effect<DiscoveryProbeResult<Kind>> => {
+    const executable = input.executable;
+    const versionArgs = input.versionArgs;
 
-function unknownAuth(detail?: string | null): SourceControlProviderAuth {
-  return auth({ status: "unknown", detail });
-}
-
-function normalizeText(value: string | null | undefined): string | null {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : null;
-}
-
-function combinedOutput(input: SourceControlAuthProbeInput): string {
-  return [input.stdout, input.stderr].filter((entry) => entry.trim().length > 0).join("\n");
-}
-
-function sanitizedAuthLines(text: string): ReadonlyArray<string> {
-  return text
-    .split(/\r?\n/)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0)
-    .filter((entry) => !/^[-\s]*token(?:\s+scopes?)?:/iu.test(entry));
-}
-
-function firstSafeAuthLine(text: string): string | undefined {
-  return sanitizedAuthLines(text)[0];
-}
-
-function parseCliHost(text: string): string | undefined {
-  return sanitizedAuthLines(text)
-    .map((line) => line.replace(/^[^a-z0-9]+/iu, ""))
-    .find((line) => /^[a-z0-9][a-z0-9.-]*(?::\d+)?$/iu.test(line));
-}
-
-function matchFirst(text: string, patterns: ReadonlyArray<RegExp>): string | undefined {
-  for (const pattern of patterns) {
-    const match = pattern.exec(text);
-    const value = match?.[1]?.trim();
-    if (value) return value;
-  }
-  return undefined;
-}
-
-export function parseGitHubAuth(input: SourceControlAuthProbeInput): SourceControlProviderAuth {
-  const text = combinedOutput(input);
-  const lower = text.toLowerCase();
-  if (
-    input.code !== 0 ||
-    lower.includes("not logged") ||
-    lower.includes("failed to authenticate")
-  ) {
-    return auth({ status: "unauthenticated", detail: firstSafeAuthLine(text) });
-  }
-  return auth({
-    status: "authenticated",
-    account: matchFirst(text, [/Logged in to .+ account ([^()\s]+)/iu, /account ([^()\s]+)/iu]),
-    host: parseCliHost(text),
-    detail: firstSafeAuthLine(text),
-  });
-}
-
-export function parseGitLabAuth(input: SourceControlAuthProbeInput): SourceControlProviderAuth {
-  const text = combinedOutput(input);
-  const lower = text.toLowerCase();
-  if (input.code !== 0 || lower.includes("not logged") || lower.includes("no token")) {
-    return auth({ status: "unauthenticated", detail: firstSafeAuthLine(text) });
-  }
-  return auth({
-    status: "authenticated",
-    account: matchFirst(text, [/Logged in to .+ as ([^\s]+)/iu, /as ([^\s]+)/iu]),
-    host: parseCliHost(text),
-    detail: firstSafeAuthLine(text),
-  });
-}
-
-export function parseAzureAuth(input: SourceControlAuthProbeInput): SourceControlProviderAuth {
-  const text = combinedOutput(input);
-  const account = firstNonEmptyLine(input.stdout);
-  if (input.code === 0 && account) {
-    return auth({
-      status: "authenticated",
-      account,
-      host: "dev.azure.com",
-      detail: "Azure CLI account is active.",
-    });
-  }
-  return auth({
-    status: "unauthenticated",
-    detail: firstSafeAuthLine(text) ?? "Azure CLI is not authenticated.",
-  });
-}
-
-export function parseBitbucketAuth(env: NodeJS.ProcessEnv): SourceControlProviderAuth {
-  const accessToken = normalizeText(env.T3CODE_BITBUCKET_ACCESS_TOKEN);
-  const email = normalizeText(env.T3CODE_BITBUCKET_EMAIL);
-  const apiToken = normalizeText(env.T3CODE_BITBUCKET_API_TOKEN);
-
-  if (accessToken) {
-    return auth({
-      status: "unknown",
-      host: "bitbucket.org",
-      detail: "Bitbucket access token is configured.",
-    });
-  }
-
-  if (email && apiToken) {
-    return auth({
-      status: "unknown",
-      account: email,
-      host: "bitbucket.org",
-      detail: "Bitbucket API token is configured.",
-    });
-  }
-
-  return auth({
-    status: "unauthenticated",
-    host: "bitbucket.org",
-    detail:
-      "Set T3CODE_BITBUCKET_EMAIL and T3CODE_BITBUCKET_API_TOKEN, or T3CODE_BITBUCKET_ACCESS_TOKEN.",
-  });
-}
-
-function probeVersion(input: {
-  readonly executable: string;
-  readonly args: ReadonlyArray<string>;
-  readonly cwd: string;
-}): Effect.Effect<{
-  readonly status: "available" | "missing";
-  readonly version: string | null;
-  readonly detail: string | null;
-}> {
-  return Effect.tryPromise({
-    try: () =>
-      runProcess(input.executable, input.args, {
-        cwd: input.cwd,
-        timeoutMs: 5_000,
-        maxBufferBytes: 8_000,
-        outputMode: "truncate",
-      }),
-    catch: (error) => normalizeProcessError(`${input.executable} ${input.args.join(" ")}`, error),
-  }).pipe(
-    Effect.map((result) => ({
-      status: "available" as const,
-      version: firstNonEmptyLine(result.stdout) ?? firstNonEmptyLine(result.stderr),
-      detail:
-        result.stdoutTruncated || result.stderrTruncated ? "Version output was truncated." : null,
-    })),
-    Effect.catch((error) =>
-      Effect.succeed({
+    if (!executable || !versionArgs) {
+      return Effect.succeed({
+        kind: input.kind,
+        label: input.label,
+        implemented: input.implemented,
         status: "missing" as const,
-        version: null,
-        detail: errorDetail(error),
-      }),
-    ),
-  );
-}
+        version: Option.none<string>(),
+        installHint: input.installHint,
+        detail: Option.some(input.installHint),
+      } satisfies DiscoveryProbeResult<Kind>);
+    }
 
-function discoverVcs(input: {
-  readonly spec: VcsCliDiscoverySpec;
-  readonly cwd: string;
-}): Effect.Effect<VcsDiscoveryItem> {
-  return probeVersion({
-    executable: input.spec.executable,
-    args: input.spec.versionArgs,
-    cwd: input.cwd,
-  }).pipe(
-    Effect.map((result) => ({
-      kind: input.spec.kind,
-      implemented: input.spec.implemented,
-      label: input.spec.label,
-      executable: input.spec.executable,
-      status: result.status,
-      version: result.version,
-      installHint: input.spec.installHint,
-      detail: result.detail,
-    })),
-  );
-}
-
-function discoverProvider(input: {
-  readonly spec: ProviderCliDiscoverySpec;
-  readonly cwd: string;
-}): Effect.Effect<SourceControlProviderDiscoveryItem> {
-  return probeVersion({
-    executable: input.spec.executable,
-    args: input.spec.versionArgs,
-    cwd: input.cwd,
-  }).pipe(
-    Effect.flatMap((result) => {
-      if (result.status === "missing") {
-        return Effect.succeed({
-          kind: input.spec.kind,
-          label: input.spec.label,
-          executable: input.spec.executable,
-          status: result.status,
-          version: result.version,
-          installHint: input.spec.installHint,
-          detail: result.detail,
-          auth: unknownAuth("Hosting integration command was not found on the server PATH."),
-        });
-      }
-
-      return Effect.tryPromise({
-        try: () =>
-          runProcess(input.spec.executable, input.spec.authArgs, {
-            cwd: input.cwd,
-            allowNonZeroExit: true,
-            timeoutMs: 5_000,
-            maxBufferBytes: 8_000,
-            outputMode: "truncate",
-          }),
-        catch: (error) =>
-          normalizeProcessError(`${input.spec.executable} ${input.spec.authArgs.join(" ")}`, error),
-      }).pipe(
-        Effect.map((authProbe) => ({
-          kind: input.spec.kind,
-          label: input.spec.label,
-          executable: input.spec.executable,
-          status: result.status,
-          version: result.version,
-          installHint: input.spec.installHint,
-          detail: result.detail,
-          auth: input.spec.parseAuth(authProbe),
-        })),
-        Effect.catch((error) =>
+    return process
+      .run({
+        operation: "source-control.discovery.probe",
+        command: executable,
+        args: versionArgs,
+        cwd: config.cwd,
+        timeoutMs: 5_000,
+        maxOutputBytes: 8_000,
+        appendTruncationMarker: true,
+      })
+      .pipe(
+        Effect.map(
+          (result) =>
+            ({
+              kind: input.kind,
+              label: input.label,
+              executable,
+              implemented: input.implemented,
+              status: "available" as const,
+              version: Option.orElse(firstNonEmptyLine(result.stdout), () =>
+                firstNonEmptyLine(result.stderr),
+              ),
+              installHint: input.installHint,
+              detail: Option.none<string>(),
+            }) satisfies DiscoveryProbeResult<Kind>,
+        ),
+        Effect.catch((cause) =>
           Effect.succeed({
-            kind: input.spec.kind,
-            label: input.spec.label,
-            executable: input.spec.executable,
-            status: result.status,
-            version: result.version,
-            installHint: input.spec.installHint,
-            detail: result.detail,
-            auth: unknownAuth(errorDetail(error)),
-          }),
+            kind: input.kind,
+            label: input.label,
+            executable,
+            implemented: input.implemented,
+            status: "missing" as const,
+            version: Option.none<string>(),
+            installHint: input.installHint,
+            detail: detailFromCause(cause),
+          } satisfies DiscoveryProbeResult<Kind>),
         ),
       );
-    }),
-  );
-}
+  };
 
-function discoverApiProvider(input: {
-  readonly spec: ProviderEnvDiscoverySpec;
-  readonly env: NodeJS.ProcessEnv;
-}): Effect.Effect<SourceControlProviderDiscoveryItem> {
-  return Effect.succeed({
-    kind: input.spec.kind,
-    label: input.spec.label,
-    status: "available" as const,
-    version: null,
-    installHint: input.spec.installHint,
-    detail: "Configured through server environment variables.",
-    auth: input.spec.parseAuth(input.env),
-  });
-}
-
-export const layer = Layer.succeed(SourceControlDiscovery, {
-  discover: (input) => {
-    const cwd = input?.cwd ?? process.cwd();
-    return Effect.all({
+  return SourceControlDiscovery.of({
+    discover: Effect.all({
       versionControlSystems: Effect.all(
-        VCS_SPECS.map((spec) => discoverVcs({ spec, cwd })),
-        {
-          concurrency: "unbounded",
-        },
-      ),
-      sourceControlProviders: Effect.all(
-        [
-          ...PROVIDER_SPECS.map((spec) => discoverProvider({ spec, cwd })),
-          ...API_PROVIDER_SPECS.map((spec) => discoverApiProvider({ spec, env: process.env })),
-        ],
+        VCS_PROBES.map((entry) => probe(entry)) as ReadonlyArray<Effect.Effect<VcsDiscoveryItem>>,
         { concurrency: "unbounded" },
       ),
-    });
-  },
-} satisfies SourceControlDiscoveryShape);
+      sourceControlProviders: sourceControlProviders.discover,
+    }),
+  });
+});
+
+export const layer = Layer.effect(SourceControlDiscovery, make);

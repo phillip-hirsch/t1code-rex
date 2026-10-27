@@ -1,11 +1,14 @@
-import type { GitBranch } from "@t3tools/contracts";
-import { describe, expect, it } from "vitest";
+import { type VcsRef } from "@t3tools/contracts";
+import { describe, expect, it } from "vite-plus/test";
 import {
   dedupeRemoteBranchesWithLocalMatches,
   deriveLocalBranchNameFromRemoteRef,
   resolveBranchSelectionTarget,
   resolveDraftEnvModeAfterBranchChange,
-  resolveBranchToolbarValue,
+  resolveEffectiveEnvMode,
+  resolveBranchToolbarPrBranch,
+  resolveLocalCheckoutBranchMismatch,
+  sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
 
@@ -20,17 +23,7 @@ describe("resolveDraftEnvModeAfterBranchChange", () => {
     ).toBe("local");
   });
 
-  it("keeps new-worktree mode when selecting a base branch before worktree creation", () => {
-    expect(
-      resolveDraftEnvModeAfterBranchChange({
-        nextWorktreePath: null,
-        currentWorktreePath: null,
-        effectiveEnvMode: "worktree",
-      }),
-    ).toBe("worktree");
-  });
-
-  it("uses worktree mode when selecting a branch already attached to a worktree", () => {
+  it("uses worktree mode when selecting a ref already attached to a worktree", () => {
     expect(
       resolveDraftEnvModeAfterBranchChange({
         nextWorktreePath: "/repo/.t3/worktrees/feature-a",
@@ -41,61 +34,75 @@ describe("resolveDraftEnvModeAfterBranchChange", () => {
   });
 });
 
-describe("resolveBranchToolbarValue", () => {
-  it("defaults new-worktree mode to current git branch when no explicit base branch is set", () => {
+describe("resolveBranchToolbarPrBranch", () => {
+  it("hides PR state while an optimistic branch switch is in flight", () => {
     expect(
-      resolveBranchToolbarValue({
-        envMode: "worktree",
-        activeWorktreePath: null,
-        activeThreadBranch: null,
-        currentGitBranch: "main",
+      resolveBranchToolbarPrBranch({
+        activeThreadBranch: "feature/current",
+        resolvedActiveBranch: "feature/next",
       }),
-    ).toBe("main");
+    ).toBeNull();
+  });
+});
+
+describe("resolveLocalCheckoutBranchMismatch", () => {
+  it("detects when a local thread is associated with a different branch than the checkout", () => {
+    expect(
+      resolveLocalCheckoutBranchMismatch({
+        effectiveEnvMode: "local",
+        activeWorktreePath: null,
+        activeThreadBranch: "feature/thread",
+        currentGitBranch: "feature/current",
+      }),
+    ).toEqual({
+      threadBranch: "feature/thread",
+      currentBranch: "feature/current",
+    });
   });
 
-  it("keeps an explicitly selected worktree base branch", () => {
+  it("ignores dedicated worktrees because their checkout is already thread-scoped", () => {
     expect(
-      resolveBranchToolbarValue({
-        envMode: "worktree",
-        activeWorktreePath: null,
-        activeThreadBranch: "feature/base",
-        currentGitBranch: "main",
+      resolveLocalCheckoutBranchMismatch({
+        effectiveEnvMode: "worktree",
+        activeWorktreePath: "/repo/.t3/worktrees/feature-thread",
+        activeThreadBranch: "feature/thread",
+        currentGitBranch: "feature/current",
       }),
-    ).toBe("feature/base");
+    ).toBeNull();
   });
+});
 
-  it("shows the actual checked-out branch when not selecting a new worktree base", () => {
+describe("resolveEffectiveEnvMode", () => {
+  it("keeps a server thread in worktree mode while its worktree is still being created", () => {
     expect(
-      resolveBranchToolbarValue({
-        envMode: "local",
+      resolveEffectiveEnvMode({
         activeWorktreePath: null,
-        activeThreadBranch: "feature/base",
-        currentGitBranch: "main",
+        hasServerThread: true,
+        draftThreadEnvMode: undefined,
+        preparingWorktree: true,
       }),
-    ).toBe("main");
+    ).toBe("worktree");
+    expect(
+      resolveEffectiveEnvMode({
+        activeWorktreePath: null,
+        hasServerThread: true,
+        draftThreadEnvMode: undefined,
+      }),
+    ).toBe("local");
   });
 });
 
 describe("deriveLocalBranchNameFromRemoteRef", () => {
-  it("strips the remote prefix from a remote ref", () => {
-    expect(deriveLocalBranchNameFromRemoteRef("origin/feature/demo")).toBe("feature/demo");
-  });
-
   it("supports remote names that contain slashes", () => {
     expect(deriveLocalBranchNameFromRemoteRef("my-org/upstream/feature/demo")).toBe(
       "upstream/feature/demo",
     );
   });
-
-  it("returns the original name when ref is malformed", () => {
-    expect(deriveLocalBranchNameFromRemoteRef("origin/")).toBe("origin/");
-    expect(deriveLocalBranchNameFromRemoteRef("/feature/demo")).toBe("/feature/demo");
-  });
 });
 
 describe("dedupeRemoteBranchesWithLocalMatches", () => {
-  it("hides remote refs when the matching local branch exists", () => {
-    const input: GitBranch[] = [
+  it("hides remote refs when the matching local ref exists", () => {
+    const input: VcsRef[] = [
       {
         name: "feature/demo",
         current: false,
@@ -120,62 +127,14 @@ describe("dedupeRemoteBranchesWithLocalMatches", () => {
       },
     ];
 
-    expect(dedupeRemoteBranchesWithLocalMatches(input).map((branch) => branch.name)).toEqual([
+    expect(dedupeRemoteBranchesWithLocalMatches(input).map((ref) => ref.name)).toEqual([
       "feature/demo",
       "origin/feature/remote-only",
-    ]);
-  });
-
-  it("keeps all entries when no local match exists for a remote ref", () => {
-    const input: GitBranch[] = [
-      {
-        name: "feature/local",
-        current: false,
-        isDefault: false,
-        worktreePath: null,
-      },
-      {
-        name: "origin/feature/remote-only",
-        isRemote: true,
-        remoteName: "origin",
-        current: false,
-        isDefault: false,
-        worktreePath: null,
-      },
-    ];
-
-    expect(dedupeRemoteBranchesWithLocalMatches(input).map((branch) => branch.name)).toEqual([
-      "feature/local",
-      "origin/feature/remote-only",
-    ]);
-  });
-
-  it("keeps non-origin remote refs visible even when a matching local branch exists", () => {
-    const input: GitBranch[] = [
-      {
-        name: "feature/demo",
-        current: false,
-        isDefault: false,
-        worktreePath: null,
-      },
-      {
-        name: "my-org/upstream/feature/demo",
-        isRemote: true,
-        remoteName: "my-org/upstream",
-        current: false,
-        isDefault: false,
-        worktreePath: null,
-      },
-    ];
-
-    expect(dedupeRemoteBranchesWithLocalMatches(input).map((branch) => branch.name)).toEqual([
-      "feature/demo",
-      "my-org/upstream/feature/demo",
     ]);
   });
 
   it("keeps non-origin remote refs visible when git tracks with first-slash local naming", () => {
-    const input: GitBranch[] = [
+    const input: VcsRef[] = [
       {
         name: "upstream/feature",
         current: false,
@@ -192,7 +151,7 @@ describe("dedupeRemoteBranchesWithLocalMatches", () => {
       },
     ];
 
-    expect(dedupeRemoteBranchesWithLocalMatches(input).map((branch) => branch.name)).toEqual([
+    expect(dedupeRemoteBranchesWithLocalMatches(input).map((ref) => ref.name)).toEqual([
       "upstream/feature",
       "my-org/upstream/feature",
     ]);
@@ -200,12 +159,12 @@ describe("dedupeRemoteBranchesWithLocalMatches", () => {
 });
 
 describe("resolveBranchSelectionTarget", () => {
-  it("reuses an existing secondary worktree for the selected branch", () => {
+  it("reuses an existing secondary worktree for the selected ref", () => {
     expect(
       resolveBranchSelectionTarget({
         activeProjectCwd: "/repo",
         activeWorktreePath: "/repo/.t3/worktrees/feature-a",
-        branch: {
+        refName: {
           isDefault: false,
           worktreePath: "/repo/.t3/worktrees/feature-b",
         },
@@ -217,12 +176,12 @@ describe("resolveBranchSelectionTarget", () => {
     });
   });
 
-  it("switches back to the main repo when the branch already lives there", () => {
+  it("switches back to the main repo when the ref already lives there", () => {
     expect(
       resolveBranchSelectionTarget({
         activeProjectCwd: "/repo",
         activeWorktreePath: "/repo/.t3/worktrees/feature-a",
-        branch: {
+        refName: {
           isDefault: true,
           worktreePath: "/repo",
         },
@@ -234,29 +193,12 @@ describe("resolveBranchSelectionTarget", () => {
     });
   });
 
-  it("checks out the default branch in the main repo when leaving a secondary worktree", () => {
+  it("keeps checkout in the current worktree for non-default refs", () => {
     expect(
       resolveBranchSelectionTarget({
         activeProjectCwd: "/repo",
         activeWorktreePath: "/repo/.t3/worktrees/feature-a",
-        branch: {
-          isDefault: true,
-          worktreePath: null,
-        },
-      }),
-    ).toEqual({
-      checkoutCwd: "/repo",
-      nextWorktreePath: null,
-      reuseExistingWorktree: false,
-    });
-  });
-
-  it("keeps checkout in the current worktree for non-default branches", () => {
-    expect(
-      resolveBranchSelectionTarget({
-        activeProjectCwd: "/repo",
-        activeWorktreePath: "/repo/.t3/worktrees/feature-a",
-        branch: {
+        refName: {
           isDefault: false,
           worktreePath: null,
         },
@@ -281,25 +223,34 @@ describe("shouldIncludeBranchPickerItem", () => {
     ).toBe(true);
   });
 
-  it("keeps the synthetic create-branch item visible for arbitrary branch input", () => {
+  it("surfaces an existing ref matching the sanitized query", () => {
     expect(
       shouldIncludeBranchPickerItem({
-        itemValue: "__create_new_branch__:feature/demo",
-        normalizedQuery: "feature/demo",
-        createBranchItemValue: "__create_new_branch__:feature/demo",
+        itemValue: "new-branch",
+        normalizedQuery: "new branch",
+        createBranchItemValue: null,
         checkoutPullRequestItemValue: null,
       }),
     ).toBe(true);
   });
+});
 
-  it("still filters ordinary branch items by query text", () => {
-    expect(
-      shouldIncludeBranchPickerItem({
-        itemValue: "main",
-        normalizedQuery: "gh pr checkout 1359",
-        createBranchItemValue: "__create_new_branch__:gh pr checkout 1359",
-        checkoutPullRequestItemValue: "__checkout_pull_request__:1359",
-      }),
-    ).toBe(false);
+describe("sanitizeNewRefName", () => {
+  it("collapses a run of whitespace into a single dash", () => {
+    expect(sanitizeNewRefName("new   branch")).toBe("new-branch");
+  });
+
+  it("replaces tabs, which git rejects just like spaces", () => {
+    expect(sanitizeNewRefName("new\tbranch")).toBe("new-branch");
+  });
+
+  it("preserves whitespace that git accepts", () => {
+    expect(sanitizeNewRefName("new\u00a0branch")).toBe("new\u00a0branch");
+    expect(sanitizeNewRefName("new\u2009branch")).toBe("new\u2009branch");
+  });
+
+  it("does not collapse dashes the user typed", () => {
+    expect(sanitizeNewRefName("new - branch")).toBe("new---branch");
+    expect(sanitizeNewRefName("foo--bar")).toBe("foo--bar");
   });
 });

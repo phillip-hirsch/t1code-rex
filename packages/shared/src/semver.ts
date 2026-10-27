@@ -9,12 +9,15 @@ const SEMVER_NUMBER_SEGMENT = /^\d+$/;
 
 export function normalizeSemverVersion(version: string): string {
   const [main, prerelease] = version.trim().split("-", 2);
-  const segments = (main ?? "")
-    .split(".")
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
+  const segments: string[] = [];
+  for (const segment of (main ?? "").split(".")) {
+    const trimmed = segment.trim();
+    if (trimmed.length > 0) {
+      segments.push(trimmed);
+    }
+  }
 
-  if (segments.length === 2) {
+  while (segments.length > 0 && segments.length < 3) {
     segments.push("0");
   }
 
@@ -52,12 +55,22 @@ export function parseSemver(value: string): ParsedSemver | null {
     major,
     minor,
     patch,
-    prerelease:
-      prerelease
-        ?.split(".")
-        .map((segment) => segment.trim())
-        .filter((segment) => segment.length > 0) ?? [],
+    prerelease: parsePrereleaseSegments(prerelease),
   };
+}
+
+function parsePrereleaseSegments(prerelease: string | undefined): ReadonlyArray<string> {
+  if (prerelease === undefined) {
+    return [];
+  }
+  const segments: string[] = [];
+  for (const segment of prerelease.split(".")) {
+    const trimmed = segment.trim();
+    if (trimmed.length > 0) {
+      segments.push(trimmed);
+    }
+  }
+  return segments;
 }
 
 function comparePrereleaseIdentifier(left: string, right: string): number {
@@ -122,6 +135,7 @@ export function compareSemverVersions(left: string, right: string): number {
   return 0;
 }
 
+/** Keep plain JavaScript: SSH startup stringifies this for remote Node versions without known TS support. */
 export const satisfiesSemverRange: (rawVersion: string, range: string) => boolean =
   function satisfiesSemverRange(rawVersion, range) {
     const normalizedVersion = String(rawVersion).trim().replace(/^v/, "");
