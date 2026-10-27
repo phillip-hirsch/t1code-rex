@@ -1,15 +1,26 @@
 import { infoStringToFiletype } from "@opentui/core";
 
-export type MessageMarkdownSegment =
+/**
+ * One top-level block of a message: a fenced code block, or a markdown chunk. `start` is
+ * where the block's source begins in the (newline-normalized) message.
+ */
+export type MessageBlock =
   | {
-      kind: "markdown";
-      content: string;
+      readonly kind: "markdown";
+      readonly start: number;
+      readonly content: string;
     }
   | {
-      kind: "code";
-      content: string;
-      language: string | null;
+      readonly kind: "code";
+      readonly start: number;
+      readonly content: string;
+      readonly language: string | null;
     };
+
+export interface MessageBlocks {
+  readonly source: string;
+  readonly blocks: ReadonlyArray<MessageBlock>;
+}
 
 type FenceState = {
   marker: "`" | "~";
@@ -43,62 +54,95 @@ function isFenceEnd(line: string, state: FenceState): boolean {
   return pattern.test(line);
 }
 
-function flushMarkdown(segments: MessageMarkdownSegment[], lines: string[]): void {
-  if (lines.length === 0) {
-    return;
-  }
-  segments.push({ kind: "markdown", content: lines.join("\n") });
-  lines.length = 0;
-}
+/** Appends the blocks of `source` from `from` (a line start outside any block) onward. */
+function scanBlocks(source: string, from: number, blocks: MessageBlock[]): void {
+  let markdownStart = -1;
+  let markdownEnd = -1;
+  let blankSinceMarkdown = false;
+  let fence: { state: FenceState; start: number; bodyStart: number } | null = null;
 
-export function parseMessageMarkdownSegments(content: string): MessageMarkdownSegment[] {
-  if (!content) {
-    return [];
-  }
+  const flushMarkdown = () => {
+    if (markdownStart === -1) return;
+    blocks.push({
+      kind: "markdown",
+      start: markdownStart,
+      content: source.slice(markdownStart, markdownEnd),
+    });
+    markdownStart = -1;
+    blankSinceMarkdown = false;
+  };
 
-  const lines = content.split(/\r?\n/);
-  const segments: MessageMarkdownSegment[] = [];
-  const markdownLines: string[] = [];
-  const codeLines: string[] = [];
-  let fenceState: FenceState | null = null;
+  let offset = from;
+  while (offset < source.length) {
+    const newline = source.indexOf("\n", offset);
+    const lineEnd = newline === -1 ? source.length : newline;
+    const next = newline === -1 ? source.length : newline + 1;
+    const line = source.slice(offset, lineEnd);
 
-  for (const line of lines) {
-    if (fenceState) {
-      if (isFenceEnd(line, fenceState)) {
-        segments.push({
+    if (fence) {
+      if (isFenceEnd(line, fence.state)) {
+        blocks.push({
           kind: "code",
-          content: codeLines.join("\n"),
-          language: fenceState.language,
+          start: fence.start,
+          content: source.slice(fence.bodyStart, Math.max(fence.bodyStart, offset - 1)),
+          language: fence.state.language,
         });
-        codeLines.length = 0;
-        fenceState = null;
-        continue;
+        fence = null;
       }
-      codeLines.push(line);
-      continue;
+    } else if (line.trim() === "") {
+      if (markdownStart !== -1) blankSinceMarkdown = true;
+    } else {
+      const fenceStart = parseFenceStart(line);
+      if (fenceStart) {
+        flushMarkdown();
+        fence = { state: fenceStart, start: offset, bodyStart: next };
+      } else {
+        // A blank line followed by an unindented line starts a new chunk. Indented lines
+        // continue the chunk (list items, nested paragraphs, indented code).
+        if (blankSinceMarkdown && !/^\s/.test(line)) flushMarkdown();
+        if (markdownStart === -1) markdownStart = offset;
+        markdownEnd = lineEnd;
+        blankSinceMarkdown = false;
+      }
     }
-
-    const nextFenceState = parseFenceStart(line);
-    if (!nextFenceState) {
-      markdownLines.push(line);
-      continue;
-    }
-
-    flushMarkdown(segments, markdownLines);
-    fenceState = nextFenceState;
+    offset = next;
   }
 
-  if (fenceState) {
-    segments.push({
+  if (fence) {
+    // Unclosed (usually still streaming): code until the end.
+    blocks.push({
       kind: "code",
-      content: codeLines.join("\n"),
-      language: fenceState.language,
+      start: fence.start,
+      content: source.slice(fence.bodyStart),
+      language: fence.state.language,
     });
   } else {
-    flushMarkdown(segments, markdownLines);
+    flushMarkdown();
   }
+}
 
-  return segments;
+/**
+ * Splits a message into fenced code blocks and markdown chunks separated by blank lines.
+ * Appending text can't move a boundary before the last block, so given the result for a
+ * prefix, only the last block is scanned again and earlier blocks keep their identity.
+ */
+export function splitMessageBlocks(
+  content: string,
+  previous: MessageBlocks | null = null,
+): MessageBlocks {
+  const source = content.includes("\r") ? content.replace(/\r\n?/g, "\n") : content;
+  if (previous !== null && source.startsWith(previous.source)) {
+    if (source.length === previous.source.length) return previous;
+    const last = previous.blocks.at(-1);
+    if (last !== undefined) {
+      const blocks = previous.blocks.slice(0, -1);
+      scanBlocks(source, last.start, blocks);
+      return { source, blocks };
+    }
+  }
+  const blocks: MessageBlock[] = [];
+  scanBlocks(source, 0, blocks);
+  return { source, blocks };
 }
 
 export function resolveCodeBlockFiletype(

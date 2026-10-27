@@ -1,11 +1,11 @@
 import { RGBA, SyntaxStyle, addDefaultParsers, infoStringToFiletype } from "@opentui/core";
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 
 import { CODE_BLOCK_TREE_SITTER_PARSERS } from "./codeBlockParsers.ts";
 import {
   isDiffLikeCodeBlockFiletype,
-  parseMessageMarkdownSegments,
   resolveCodeBlockFiletype,
+  splitMessageBlocks,
 } from "./messageMarkdown.ts";
 import type { TuiColor, TuiPalette, TuiTheme } from "./theme.ts";
 
@@ -132,7 +132,9 @@ export interface MessageMarkdownProps {
 
 /**
  * Markdown with fenced code blocks pulled out into highlighted, copyable blocks, as in the
- * old timeline. Segments are keyed by position so streamed text updates a block in place.
+ * old timeline. Each top-level block renders on its own and is keyed by where it starts, so
+ * streamed text only re-parses and re-highlights the last block; earlier blocks keep their
+ * props and skip rendering.
  */
 export const MessageMarkdown = memo(function MessageMarkdown({
   content,
@@ -142,101 +144,141 @@ export const MessageMarkdown = memo(function MessageMarkdown({
   streaming = false,
   onCopyCodeBlock,
 }: MessageMarkdownProps) {
-  const segments = useMemo(() => parseMessageMarkdownSegments(content), [content]);
-  const palette = styles.theme.palette;
-  const fg = color ?? palette.text;
-  const widthStyle = fillWidth
-    ? ({ width: "100%" } as const)
-    : ({ width: "auto", maxWidth: "100%" } as const);
-
-  if (!segments.some((segment) => segment.kind === "code")) {
-    return (
-      <markdown
-        content={content}
-        syntaxStyle={styles.message}
-        conceal
-        streaming={streaming}
-        style={{ ...widthStyle, minWidth: 0, flexShrink: 0, fg }}
-      />
-    );
+  // Split against the previous render's blocks, so streamed text only rescans the tail.
+  const [previous, setPrevious] = useState(() => ({
+    content,
+    split: splitMessageBlocks(content),
+  }));
+  let current = previous;
+  if (current.content !== content) {
+    current = { content, split: splitMessageBlocks(content, previous.split) };
+    setPrevious(current);
   }
+  const blocks = current.split.blocks;
+  const fg = color ?? styles.theme.palette.text;
 
   return (
-    <box style={{ ...widthStyle, minWidth: 0, flexShrink: 1, flexDirection: "column" }}>
-      {segments.map((segment, index) => {
-        const last = index === segments.length - 1;
-        const marginBottom = last ? 0 : 1;
-        const key = `${index}:${segment.kind}`;
-        if (segment.kind === "markdown") {
-          if (!segment.content.trim()) {
-            return <box key={key} style={{ height: marginBottom }} />;
-          }
-          return (
-            <markdown
-              key={key}
-              content={segment.content}
-              syntaxStyle={styles.message}
-              conceal
-              streaming={streaming && last}
-              style={{ ...widthStyle, minWidth: 0, flexShrink: 0, fg, marginBottom }}
-            />
-          );
-        }
-        const filetype = resolveCodeBlockFiletype(segment.language, infoStringToFiletype);
-        const syntax = isDiffLikeCodeBlockFiletype(filetype) ? styles.diff : styles.code;
-        return (
-          <box
+    <box
+      style={{
+        ...(fillWidth ? { width: "100%" } : { width: "auto", maxWidth: "100%" }),
+        minWidth: 0,
+        flexShrink: 0,
+        flexDirection: "column",
+      }}
+    >
+      {blocks.length === 0 ? <text content=" " /> : null}
+      {blocks.map((block, index) => {
+        const key = `${block.start}:${block.kind}`;
+        const marginTop = index === 0 ? 0 : 1;
+        return block.kind === "markdown" ? (
+          <MarkdownBlock
             key={key}
-            style={{
-              width: "auto",
-              minWidth: 0,
-              maxWidth: "85%",
-              flexDirection: "column",
-              marginBottom,
-            }}
-          >
-            <box
-              style={{
-                width: "auto",
-                minWidth: 0,
-                flexDirection: "column",
-                backgroundColor: styles.theme.codeBlock.background,
-                paddingLeft: 1,
-                paddingRight: 1,
-              }}
-            >
-              {segment.language ? (
-                <text content={segment.language} style={{ fg: styles.theme.codeBlock.language }} />
-              ) : null}
-              <code
-                content={segment.content || " "}
-                {...(filetype ? { filetype } : {})}
-                syntaxStyle={syntax}
-                conceal
-                wrapMode="char"
-                style={{ width: "auto", minWidth: 0, maxWidth: "100%" }}
-              />
-              {onCopyCodeBlock ? (
-                <box
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    onCopyCodeBlock(segment.content);
-                  }}
-                  style={{
-                    width: "100%",
-                    height: 1,
-                    flexDirection: "row",
-                    justifyContent: "flex-end",
-                  }}
-                >
-                  <text content="󰆏" style={{ fg: styles.theme.codeBlock.copyIcon }} />
-                </box>
-              ) : null}
-            </box>
-          </box>
+            content={block.content}
+            styles={styles}
+            fg={fg}
+            fillWidth={fillWidth}
+            streaming={streaming && index === blocks.length - 1}
+            marginTop={marginTop}
+          />
+        ) : (
+          <CodeBlock
+            key={key}
+            content={block.content}
+            language={block.language}
+            styles={styles}
+            marginTop={marginTop}
+            onCopy={onCopyCodeBlock}
+          />
         );
       })}
+    </box>
+  );
+});
+
+const MarkdownBlock = memo(function MarkdownBlock(props: {
+  content: string;
+  styles: MarkdownStyles;
+  fg: TuiColor;
+  fillWidth: boolean;
+  streaming: boolean;
+  marginTop: number;
+}) {
+  return (
+    <markdown
+      content={props.content}
+      syntaxStyle={props.styles.message}
+      conceal
+      streaming={props.streaming}
+      style={{
+        ...(props.fillWidth ? { width: "100%" } : { width: "auto", maxWidth: "100%" }),
+        minWidth: 0,
+        flexShrink: 0,
+        fg: props.fg,
+        marginTop: props.marginTop,
+      }}
+    />
+  );
+});
+
+const CodeBlock = memo(function CodeBlock(props: {
+  content: string;
+  language: string | null;
+  styles: MarkdownStyles;
+  marginTop: number;
+  onCopy: ((value: string) => void) | undefined;
+}) {
+  const { content, language, styles, onCopy } = props;
+  const filetype = resolveCodeBlockFiletype(language, infoStringToFiletype);
+  const syntax = isDiffLikeCodeBlockFiletype(filetype) ? styles.diff : styles.code;
+  return (
+    <box
+      style={{
+        width: "auto",
+        minWidth: 0,
+        maxWidth: "85%",
+        flexDirection: "column",
+        marginTop: props.marginTop,
+      }}
+    >
+      <box
+        style={{
+          width: "auto",
+          minWidth: 0,
+          flexDirection: "column",
+          backgroundColor: styles.theme.codeBlock.background,
+          paddingLeft: 1,
+          paddingRight: 1,
+        }}
+      >
+        {language ? (
+          <text content={language} style={{ fg: styles.theme.codeBlock.language }} />
+        ) : null}
+        <code
+          content={content || " "}
+          {...(filetype ? { filetype } : {})}
+          syntaxStyle={syntax}
+          conceal
+          wrapMode="char"
+          style={{ width: "auto", minWidth: 0, maxWidth: "100%" }}
+        />
+        {onCopy ? (
+          <box
+            onMouseDown={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              onCopy(content);
+            }}
+            style={{
+              width: "100%",
+              height: 1,
+              flexDirection: "row",
+              justifyContent: "flex-end",
+            }}
+          >
+            <text content="󰆏" style={{ fg: styles.theme.codeBlock.copyIcon }} />
+          </box>
+        ) : null}
+      </box>
     </box>
   );
 });
