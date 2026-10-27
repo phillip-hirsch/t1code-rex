@@ -17,7 +17,7 @@ import { ThreadId } from "@t3tools/contracts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { act, useEffect, useState } from "react";
 
-import { resolveTuiShortcutCommand } from "../src/keybindings.ts";
+import { resolveTuiShortcutCommand, tuiShortcutEvent } from "../src/keybindings.ts";
 import { terminalRowRuns } from "../src/terminalCells.ts";
 import type { TerminalBackend, TerminalLaunch } from "../src/terminalConnection.ts";
 import { terminalFocusHints, useTerminalDrawer } from "../src/terminalDrawerView.tsx";
@@ -108,6 +108,89 @@ check(
   true,
 );
 emulator.dispose();
+
+// Shortcuts: OpenTUI's parser in, the resolver out. OpenTUI's `meta` is Alt, never Cmd.
+const resolveRaw = (
+  raw: string,
+  host: NodeJS.Platform,
+  terminalFocus: boolean,
+  kitty = false,
+): string | null => {
+  const key = parseKeypress(raw, { useKittyKeyboard: kitty });
+  if (key === null) return "unparsed";
+  return resolveTuiShortcutCommand(tuiShortcutEvent(key), DEFAULT_RESOLVED_KEYBINDINGS, {
+    platform: host,
+    context: { terminalFocus, terminalOpen: true },
+  });
+};
+for (const [label, raw] of [
+  ["Alt+B", "\u001bb"],
+  ["Alt+F", "\u001bf"],
+  ["Alt+D", "\u001bd"],
+  ["Alt+W", "\u001bw"],
+  ["Alt+N", "\u001bn"],
+  ["Alt+J", "\u001bj"],
+  ["Alt+Backspace", "\u001b\u007f"],
+] as const) {
+  check(
+    `macOS terminal: ${label} (ESC-prefixed) is the shell's`,
+    resolveRaw(raw, "darwin", true),
+    null,
+  );
+}
+check(
+  "macOS terminal: kitty Alt+D is the shell's",
+  resolveRaw("\u001b[100;3u", "darwin", true, true),
+  null,
+);
+check(
+  "macOS terminal: kitty Alt+W is the shell's",
+  resolveRaw("\u001b[119;3u", "darwin", true, true),
+  null,
+);
+check("macOS composer: Alt+D isn't ⌘D (diff)", resolveRaw("\u001bd", "darwin", false), null);
+for (const [letter, command] of [
+  ["d", "terminal.split"],
+  ["w", "terminal.close"],
+  ["n", "terminal.new"],
+  ["j", "terminal.toggle"],
+] as const) {
+  check(
+    `macOS terminal: kitty ⌘${letter.toUpperCase()}`,
+    resolveRaw(`\u001b[${letter.charCodeAt(0)};9u`, "darwin", true, true),
+    command,
+  );
+}
+check(
+  "macOS composer: kitty ⌘D",
+  resolveRaw("\u001b[100;9u", "darwin", false, true),
+  "diff.toggle",
+);
+for (const host of ["linux", "win32"] as const) {
+  for (const [label, raw, kitty] of [
+    ["Ctrl+N", "\u000e", false],
+    ["Ctrl+W", "\u0017", false],
+    ["Ctrl+J", "\n", false],
+    ["Ctrl+D", "\u0004", false],
+    ["Ctrl+U", "\u0015", false],
+    ["kitty Ctrl+N", "\u001b[110;5u", true],
+    ["kitty Ctrl+W", "\u001b[119;5u", true],
+    ["kitty Ctrl+J", "\u001b[106;5u", true],
+  ] as const) {
+    check(`${host} terminal: ${label} is the shell's`, resolveRaw(raw, host, true, kitty), null);
+  }
+  check(
+    `${host} terminal: kitty Ctrl+Shift+D splits down`,
+    resolveRaw("\u001b[100;6u", host, true, true),
+    "terminal.splitVertical",
+  );
+  check(
+    `${host} composer: Ctrl+J opens the terminal`,
+    resolveRaw("\n", host, false),
+    "terminal.toggle",
+  );
+  check(`${host} composer: Ctrl+N is a new thread`, resolveRaw("\u000e", host, false), "chat.new");
+}
 
 interface FakeShell {
   buffer: TerminalBufferState;
@@ -206,7 +289,10 @@ const backend: TerminalBackend = {
 const statuses: string[] = [];
 /** The host the harness resolves shortcuts for. */
 let platform: NodeJS.Platform = "darwin";
-const controls: { showThread: (threadId: string) => void } = { showThread: () => {} };
+const controls: {
+  showThread: (threadId: string) => void;
+  actions: ReadonlyArray<{ readonly id: string; readonly run: () => void }>;
+} = { showThread: () => {}, actions: [] };
 
 function Harness() {
   const [threadId, setThreadId] = useState("thread-a");
@@ -230,16 +316,12 @@ function Harness() {
     onTabOut: () => setFocus("composer"),
     onStatus: (status) => statuses.push(status),
   });
+  useEffect(() => {
+    controls.actions = drawer.actions;
+  });
   useKeyboard((key: KeyEvent) => {
     const shortcut = resolveTuiShortcutCommand(
-      {
-        keyName: key.name,
-        sequence: key.sequence,
-        ctrl: key.ctrl,
-        meta: key.meta,
-        super: key.super ?? false,
-        shift: key.shift,
-      },
+      tuiShortcutEvent(key),
       DEFAULT_RESOLVED_KEYBINDINGS,
       {
         platform,
@@ -260,13 +342,23 @@ function Harness() {
   );
 }
 
-const setup = await testRender(<Harness />, { width: 120, height: 36, exitOnCtrlC: false });
+// The app's parser in Rex: kitty keys on, legacy ESC-prefixed Alt keys still read.
+const setup = await testRender(<Harness />, {
+  width: 120,
+  height: 36,
+  exitOnCtrlC: false,
+  useKittyKeyboard: { events: true },
+});
+/** Bytes as the outer terminal sends them, through the renderer's own parser. */
+const pressRaw = (bytes: string) => setup.renderer.stdin.emit("data", Buffer.from(bytes));
+/** Cmd+<letter> under the kitty keyboard protocol, as Rex sends it. */
+const pressCmd = (letter: string) => pressRaw(`\u001b[${letter.charCodeAt(0)};9u`);
 const frame = () => setup.captureCharFrame();
 const shellA1 = () => shells.get("thread-a/term-1");
 await settle(setup.renderOnce);
 check("drawer starts hidden", frame().includes("Terminal"), false);
 
-act(() => setup.mockInput.pressKey("j", { meta: true }));
+act(() => pressCmd("j"));
 await settle(setup.renderOnce);
 check("⌘J opens the drawer and focuses the terminal", frame().includes("focus:terminal"), true);
 check("the shell starts in the thread's folder", frame().includes("/work/thread-a $"), true);
@@ -331,7 +423,7 @@ await act(() => setup.mockInput.pasteBracketedText("echo pasted"));
 await settle(setup.renderOnce);
 check("a paste is the shell's too", shellA1()?.input.at(-1), "echo pasted");
 
-act(() => setup.mockInput.pressKey("d", { meta: true }));
+act(() => pressCmd("d"));
 await settle(setup.renderOnce);
 check("⌘D splits", frame().includes("● term-2") && frame().includes("○ term-1"), true);
 act(() => setup.mockInput.pressKey("x"));
@@ -341,14 +433,14 @@ act(() => setup.mockInput.pressArrow("left", { ctrl: true, shift: true }));
 await settle(setup.renderOnce);
 check("Ctrl+Shift+← switches panes", frame().includes("● term-1"), true);
 
-act(() => setup.mockInput.pressKey("n", { meta: true }));
+act(() => pressCmd("n"));
 await settle(setup.renderOnce);
 check("⌘N opens a new tab", frame().includes("2 term-3"), true);
 
 /** ⌘W, with the close's reply landing inside `act`. */
 async function pressClose(): Promise<void> {
   await act(async () => {
-    setup.mockInput.pressKey("w", { meta: true });
+    pressCmd("w");
     await new Promise((resolve) => setTimeout(resolve, 25));
   });
   await settle(setup.renderOnce);
@@ -376,7 +468,7 @@ check("unfocused, keys stay out of the shell", shellA1()?.input.includes("q"), f
 act(() => controls.showThread("thread-b"));
 await settle(setup.renderOnce);
 check("another thread has its own drawer", frame().includes("Terminal"), false);
-act(() => setup.mockInput.pressKey("j", { meta: true }));
+act(() => pressCmd("j"));
 await settle(setup.renderOnce);
 check("…with its own shell", frame().includes("/work/thread-b $"), true);
 
@@ -420,7 +512,7 @@ await act(async () => {
 await settle(setup.renderOnce);
 check("a shell that exits leaves the drawer", frame().includes("term-1"), false);
 check("…and its history goes, as a close's does", closed.at(-1), "thread-a/term-1");
-act(() => setup.mockInput.pressKey("j", { meta: true }));
+act(() => pressCmd("j"));
 await settle(setup.renderOnce);
 check("⌘J in a focused terminal hides the drawer", frame().includes("Terminal"), false);
 check("…and hands focus back", frame().includes("focus:composer"), true);
@@ -428,7 +520,7 @@ check("…and hands focus back", frame().includes("focus:composer"), true);
 // Typed while "Starting terminal…" shows: the keys and the paste arrive, in order.
 act(() => controls.showThread("thread-c"));
 await settle(setup.renderOnce);
-act(() => setup.mockInput.pressKey("j", { meta: true }));
+act(() => pressCmd("j"));
 act(() => {
   for (const letter of "echo") setup.mockInput.pressKey(letter);
   void setup.mockInput.pasteBracketedText(" early");
@@ -475,7 +567,7 @@ await act(async () => {
 });
 await settle(setup.renderOnce);
 check("the exit event drops the closing terminal", frame().includes("Terminal"), false);
-act(() => setup.mockInput.pressKey("j", { meta: true }));
+act(() => pressCmd("j"));
 await settle(setup.renderOnce);
 check("reopening skips the id whose close is in flight", frame().includes("term-2"), true);
 closeGate = null;
@@ -489,26 +581,66 @@ act(() => setup.mockInput.pressKey("z"));
 await settle(setup.renderOnce);
 check("…and its shell takes input", shells.get("thread-c/term-2")?.input.join(""), "z");
 
-// Windows and Linux: Ctrl+D and Ctrl+U are the shell's.
+// macOS: Alt is readline's word keys, never Cmd.
+const shellC2Input = () => shells.get("thread-c/term-2")?.input.join("") ?? "";
+for (const bytes of ["\u001bb", "\u001bf", "\u001bd", "\u001b\u007f", "\u001bw", "\u001b[100;3u"]) {
+  act(() => pressRaw(bytes));
+  await settle(setup.renderOnce);
+}
+check(
+  "on macOS, Alt+B/F/D/Backspace/W reach the shell (kitty Alt+D too)",
+  shellC2Input(),
+  "z\u001bb\u001bf\u001bd\u001b\u007f\u001bw\u001bd",
+);
+check(
+  "…without splitting or closing",
+  frame().includes("term-2") && !frame().includes("term-3"),
+  true,
+);
+
+// Windows and Linux: a focused terminal keeps every Ctrl+letter.
 platform = "linux";
-act(() => {
-  setup.mockInput.pressKey("d", { ctrl: true });
-  setup.mockInput.pressKey("u", { ctrl: true });
-});
+for (const letter of ["d", "u", "n", "w", "j"]) {
+  act(() => setup.mockInput.pressKey(letter, { ctrl: true }));
+  await settle(setup.renderOnce);
+}
+act(() => pressRaw("\u001b[110;5u"));
 await settle(setup.renderOnce);
 check(
-  "on Linux, Ctrl+D (EOF) and Ctrl+U (kill line) reach the shell",
-  shells.get("thread-c/term-2")?.input.join(""),
-  "z\u0004\u0015",
+  "on Linux, Ctrl+D/U/N/W/J (and kitty Ctrl+N) reach the shell",
+  shellC2Input().slice("z\u001bb\u001bf\u001bd\u001b\u007f\u001bw\u001bd".length),
+  "\u0004\u0015\u000e\u0017\n\u000e",
 );
-check("…without splitting", frame().includes("term-3"), false);
+check(
+  "…without a split, a new tab, a close or a hide",
+  frame().includes("1 term-2") && !frame().includes("term-3") && frame().includes("focus:terminal"),
+  true,
+);
+act(() => setup.mockInput.pressKey("]", { ctrl: true }));
+await settle(setup.renderOnce);
+check(
+  "Ctrl+] then the palette has every terminal action",
+  controls.actions.map((action) => action.id).join(" "),
+  "terminal:toggle terminal:new terminal:split terminal:split-vertical terminal:hide terminal:close",
+);
+act(() => controls.actions.find((action) => action.id === "terminal:hide")?.run());
+await settle(setup.renderOnce);
+check("…and its Hide terminal hides the drawer", frame().includes("Terminal"), false);
 platform = "darwin";
 check("the macOS footer shows ⌘D split", terminalFocusHints("darwin").includes("⌘D split"), true);
-check(
-  "the Linux footer offers no Ctrl+D split",
-  terminalFocusHints("linux").includes("split"),
-  false,
-);
+for (const host of ["linux", "win32"] as const) {
+  const hints = terminalFocusHints(host);
+  check(
+    `the ${host} footer offers no Ctrl key for terminal actions`,
+    /Ctrl\+|\^[A-Z]\b/u.test(hints.replace("^K", "")),
+    false,
+  );
+  check(
+    `…and sends them to the palette`,
+    hints.includes("^] then ^K: hide, split, new tab, close"),
+    true,
+  );
+}
 
 setup.renderer.destroy();
 console.log(

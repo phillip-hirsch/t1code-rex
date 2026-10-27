@@ -10,6 +10,7 @@ import {
   resolveTuiShortcutCommand,
   threadJumpIndexFromCommand,
   threadTraversalDirectionFromCommand,
+  tuiShortcutEvent,
 } from "./keybindings.ts";
 
 function modShortcut(
@@ -73,18 +74,18 @@ describe("resolveTuiShortcutCommand", () => {
     ).toBe("commandPalette.toggle");
   });
 
-  it("matches mod shortcuts using meta or super on macOS", () => {
-    expect(
-      resolveTuiShortcutCommand({ keyName: "m", meta: true, shift: true }, keybindings, {
-        platform: "darwin",
-      }),
-    ).toBe("modelPicker.toggle");
-
+  it("matches mod shortcuts using super (Cmd) on macOS, never Alt", () => {
     expect(
       resolveTuiShortcutCommand({ keyName: "m", super: true, shift: true }, keybindings, {
         platform: "darwin",
       }),
     ).toBe("modelPicker.toggle");
+
+    expect(
+      resolveTuiShortcutCommand({ keyName: "m", alt: true, shift: true }, keybindings, {
+        platform: "darwin",
+      }),
+    ).toBeNull();
   });
 
   it("honors when clauses and resolves later active bindings first", () => {
@@ -211,13 +212,101 @@ describe("keys in a focused terminal with upstream's default bindings", () => {
       ),
     ).toBe("terminal.split");
     expect(
-      resolveTuiShortcutCommand({ keyName: "d", meta: true }, DEFAULT_RESOLVED_KEYBINDINGS, darwin),
-    ).toBe("terminal.split");
+      resolveTuiShortcutCommand({ keyName: "d", alt: true }, DEFAULT_RESOLVED_KEYBINDINGS, darwin),
+    ).toBeNull();
     for (const keyName of ["d", "u"]) {
       expect(
         resolveTuiShortcutCommand({ keyName, ctrl: true }, DEFAULT_RESOLVED_KEYBINDINGS, darwin),
       ).toBeNull();
     }
+  });
+});
+
+describe("tuiShortcutEvent", () => {
+  const key = { name: "d", sequence: "\u001bd", ctrl: false, meta: true, shift: false };
+
+  it("reads OpenTUI's meta as Alt, not Cmd", () => {
+    expect(tuiShortcutEvent(key)).toMatchObject({ alt: true, super: false });
+    expect(tuiShortcutEvent({ ...key, meta: false, super: true })).toMatchObject({
+      alt: false,
+      super: true,
+    });
+  });
+});
+
+describe("terminal bindings per platform, in and out of a focused terminal", () => {
+  type Row = readonly [
+    platform: NodeJS.Platform,
+    key: string,
+    inTerminal: string | null,
+    outside: string | null,
+  ];
+  const resolve = (platform: NodeJS.Platform, terminalFocus: boolean, keyName: string) =>
+    resolveTuiShortcutCommand(
+      platform === "darwin" ? { keyName, super: true } : { keyName, ctrl: true },
+      DEFAULT_RESOLVED_KEYBINDINGS,
+      { platform, context: { terminalFocus, terminalOpen: true } },
+    );
+  const table: ReadonlyArray<Row> = [
+    ["darwin", "n", "terminal.new", "chat.new"],
+    ["darwin", "w", "terminal.close", "rightPanel.close"],
+    ["darwin", "j", "terminal.toggle", "terminal.toggle"],
+    ["darwin", "d", "terminal.split", "diff.toggle"],
+    ["darwin", "b", "sidebar.toggle", "sidebar.toggle"],
+    ["linux", "n", null, "chat.new"],
+    ["linux", "w", null, "rightPanel.close"],
+    ["linux", "j", null, "terminal.toggle"],
+    ["linux", "d", null, null],
+    ["linux", "u", null, null],
+    ["linux", "b", null, "sidebar.toggle"],
+    ["linux", "o", null, "editor.openFavorite"],
+    ["win32", "n", null, "chat.new"],
+    ["win32", "w", null, "rightPanel.close"],
+    ["win32", "j", null, "terminal.toggle"],
+    ["win32", "d", null, null],
+  ];
+
+  it.each(table)("%s mod+%s: %s in the terminal, %s outside", (platform, key, inside, outside) => {
+    expect(resolve(platform, true, key)).toBe(inside);
+    expect(resolve(platform, false, key)).toBe(outside);
+  });
+
+  it("leaves Ctrl+letter to the shell on macOS too", () => {
+    expect(
+      resolveTuiShortcutCommand({ keyName: "n", ctrl: true }, DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform: "darwin",
+        context: { terminalFocus: true },
+      }),
+    ).toBeNull();
+  });
+
+  it("keeps Ctrl+Shift+D (kitty) for splitting down on Linux", () => {
+    expect(
+      resolveTuiShortcutCommand(
+        { keyName: "d", ctrl: true, shift: true },
+        DEFAULT_RESOLVED_KEYBINDINGS,
+        { platform: "linux", context: { terminalFocus: true } },
+      ),
+    ).toBe("terminal.splitVertical");
+  });
+
+  it("still honors an explicit ctrl+<letter> binding in the terminal", () => {
+    const custom = compileResolvedKeybindingsConfig([
+      { key: "ctrl+n", command: "terminal.new", when: "terminalFocus" },
+    ]);
+    expect(
+      resolveTuiShortcutCommand({ keyName: "n", ctrl: true, sequence: "\u000e" }, custom, {
+        platform: "linux",
+        context: { terminalFocus: true },
+      }),
+    ).toBe("terminal.new");
+  });
+
+  it("labels only the keys that work", () => {
+    expect(modShortcutLabel("n", "linux", { terminalFocus: true })).toBeNull();
+    expect(modShortcutLabel("j", "win32", { terminalFocus: true })).toBeNull();
+    expect(modShortcutLabel("j", "linux")).toBe("Ctrl+J");
+    expect(modShortcutLabel("n", "darwin", { terminalFocus: true })).toBe("⌘N");
   });
 });
 

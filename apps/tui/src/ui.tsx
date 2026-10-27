@@ -68,7 +68,7 @@ import {
   STOPPING,
   type FooterStatus,
 } from "./footerStatus.ts";
-import { modShortcutLabel, resolveTuiShortcutCommand } from "./keybindings.ts";
+import { modShortcutLabel, resolveTuiShortcutCommand, tuiShortcutEvent } from "./keybindings.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
 import {
@@ -256,8 +256,9 @@ function providerStatusLabel(provider: ServerProvider): string {
   return provider.status;
 }
 
+/** Ctrl+K, or Cmd+K where the terminal sends Cmd. Alt+K isn't Cmd+K. */
 function isPaletteShortcut(key: KeyEvent): boolean {
-  return key.name === "k" && Boolean(key.ctrl || key.meta || key.super);
+  return key.name === "k" && Boolean(key.ctrl || key.super);
 }
 
 function isEnter(name: string): boolean {
@@ -1360,14 +1361,7 @@ function Shell(props: AppProps) {
       return true;
     }
     const shortcut = resolveTuiShortcutCommand(
-      {
-        keyName: key.name,
-        sequence: key.sequence,
-        ctrl: key.ctrl,
-        meta: key.meta,
-        super: key.super ?? false,
-        shift: key.shift,
-      },
+      tuiShortcutEvent(key),
       serverConfig?.keybindings ?? [],
       { context: { terminalFocus: terminalFocused, terminalOpen: terminalDrawer.open } },
     );

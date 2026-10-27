@@ -48,32 +48,37 @@ const WHITE: TerminalColor = { r: 255, g: 255, b: 255 };
 
 /**
  * The drawer's keys as this platform types them, null where there's none. On Windows and
- * Linux Ctrl+D stays the shell's EOF, and Ctrl+Shift+D isn't offered: without the kitty
- * keyboard protocol it arrives as Ctrl+D. Splitting there is in the palette.
+ * Linux a focused terminal keeps every Ctrl+letter for the shell, so hiding, splitting,
+ * new tabs and closing are in the palette there (Ctrl+], then Ctrl+K).
  */
 function terminalKeyLabels(platform?: NodeJS.Platform) {
-  const mod = (key: string) => modShortcutLabel(key, platform);
-  const split = mod("d");
+  const inTerminal = (key: string) => modShortcutLabel(key, platform, { terminalFocus: true });
+  const split = inTerminal("d");
   return {
-    toggle: mod("j"),
+    /** Opens or focuses the drawer from another pane. */
+    open: modShortcutLabel("j", platform),
+    hide: inTerminal("j"),
     split,
     splitDown: split === null ? null : `${split.slice(0, -1)}⇧D`,
-    newTab: mod("n"),
-    close: mod("w"),
+    newTab: inTerminal("n"),
+    close: inTerminal("w"),
   };
 }
 
 /** A focused terminal's footer. */
 export function terminalFocusHints(platform?: NodeJS.Platform): string {
   const keys = terminalKeyLabels(platform);
-  const hint = (label: string | null, action: string) =>
-    label === null ? null : `${label} ${action}`;
+  const actions = [
+    [keys.hide, "hide"],
+    [keys.split, "split"],
+    [keys.newTab, "new tab"],
+    [keys.close, "close"],
+  ] as const;
+  const viaPalette = actions.filter(([label]) => label === null).map(([, action]) => action);
   return [
     "^] next pane",
-    hint(keys.toggle, "hide"),
-    hint(keys.split, "split"),
-    hint(keys.newTab, "new tab"),
-    hint(keys.close, "close"),
+    ...actions.flatMap(([label, action]) => (label === null ? [] : [`${label} ${action}`])),
+    viaPalette.length === 0 ? null : `^] then ^K: ${viaPalette.join(", ")}`,
     "^⇧←→ switch",
     "^⇧↑↓ resize",
     "⇧PgUp scroll",
@@ -202,9 +207,15 @@ export function useTerminalDrawer(options: {
     } else if (!focused) {
       options.onFocus();
     } else {
-      store.update(current.threadId, hideTerminalDrawer);
-      options.onLeave();
+      hide();
     }
+  };
+
+  const hide = () => {
+    const current = requireTarget();
+    if (current === null) return;
+    store.update(current.threadId, hideTerminalDrawer);
+    if (focused) options.onLeave();
   };
 
   const newTerminal = () => {
@@ -344,10 +355,10 @@ export function useTerminalDrawer(options: {
   const actions: ReadonlyArray<TerminalDrawerAction> = [
     {
       id: "terminal:toggle",
-      label: open ? (focused ? "Hide terminal" : "Focus terminal") : "Open terminal",
-      description: target === null ? "Select a thread first" : (KEYS.toggle ?? ""),
+      label: open ? "Focus terminal" : "Open terminal",
+      description: target === null ? "Select a thread first" : (KEYS.open ?? ""),
       disabled: target === null,
-      run: toggle,
+      run: open ? options.onFocus : toggle,
     },
     {
       id: "terminal:new",
@@ -372,6 +383,12 @@ export function useTerminalDrawer(options: {
     },
     ...(open
       ? [
+          {
+            id: "terminal:hide",
+            label: "Hide terminal",
+            description: inTerminal(KEYS.hide),
+            run: hide,
+          },
           {
             id: "terminal:close",
             label: "Close terminal",
