@@ -65,4 +65,16 @@ describe("resolveTr3xPaths", () => {
       resolveTr3xPaths({ TR3X_HOME: NodePath.join(home, "tr3x"), T3CODE_HOME: custom }, home).home,
     ).toBe(NodePath.join(home, "tr3x"));
   });
+
+  it("expands a leading ~ in T3CODE_HOME", () => {
+    const home = userHome();
+    for (const t3CodeHome of ["~/custom-t3", "~"]) {
+      expect(() =>
+        resolveTr3xPaths(
+          { TR3X_HOME: NodePath.join(home, "custom-t3", "tr3x"), T3CODE_HOME: t3CodeHome },
+          home,
+        ),
+      ).toThrow(REFUSED);
+    }
+  });
 });

@@ -23,7 +23,7 @@ export function resolveTr3xPaths(
     (dir): dir is string => Boolean(dir),
   );
   for (const t3Home of t3Homes) {
-    if (overlaps(resolveReal(home), resolveReal(NodePath.resolve(t3Home)))) {
+    if (overlaps(resolveReal(home), resolveReal(NodePath.resolve(expandHome(t3Home, userHome))))) {
       throw new Error(
         `TR3X_HOME (${home}) overlaps T3 Code's own data (${t3Home}). tr3x keeps its server and data apart; pick another directory.`,
       );
@@ -36,6 +36,14 @@ export function resolveTr3xPaths(
     daemonStatePath: NodePath.join(daemonDir, "daemon.json"),
     serverRuntimeStatePath: NodePath.join(home, "userdata", "server-runtime.json"),
   };
+}
+
+/** Expands a leading `~`, as T3 Code does for `T3CODE_HOME`. */
+function expandHome(path: string, userHome: string): string {
+  if (path === "~") return userHome;
+  if (path.startsWith("~/") || path.startsWith("~\\"))
+    return NodePath.join(userHome, path.slice(2));
+  return path;
 }
 
 /**
