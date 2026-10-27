@@ -1,75 +1,55 @@
 // @effect-diagnostics nodeBuiltinImport:off -- The TUI runs on Bun outside the Effect runtime.
-import * as NodeCrypto from "node:crypto";
+// Bun-only: `bun:sqlite` doesn't load on Node, so Vitest tests must not import this module.
+// prefsLock.test.ts drives it through Bun subprocesses (prefsLockTestProbe.ts) instead.
+import { Database } from "bun:sqlite";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 export interface PrefsLock {
-  /** Removes the lock if this process still holds it. Safe to call more than once. */
+  /** Releases the lock. Safe to call more than once. */
   readonly release: () => void;
 }
 
+/** A SQLite file that exists only to be locked. Older builds used a pid file named `prefs.json.lock`; it's ignored. */
 export function prefsLockPath(prefsPath: string): string {
-  return `${prefsPath}.lock`;
-}
-
-/** True while `pid` names a running process, including one owned by another user. */
-export function isProcessAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-function readLockOwner(lockPath: string): number | null {
-  try {
-    const pid = Number.parseInt(NodeFS.readFileSync(lockPath, "utf8").trim(), 10);
-    return Number.isInteger(pid) && pid > 0 ? pid : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Creates the lock holding `pid`. The temp file is linked into place, so it's never empty. */
-function tryCreateLock(lockPath: string, pid: number): boolean {
-  const temporaryPath = `${lockPath}.${NodeCrypto.randomUUID()}.tmp`;
-  NodeFS.writeFileSync(temporaryPath, `${pid}\n`);
-  try {
-    NodeFS.linkSync(temporaryPath, lockPath);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw error;
-  } finally {
-    NodeFS.rmSync(temporaryPath, { force: true });
-  }
+  return NodePath.join(NodePath.dirname(prefsPath), "prefs.lock.db");
 }
 
 /**
- * Makes `pid` the only process that writes the prefs file at `prefsPath`. Returns null while
- * another live process holds the lock; that window must treat prefs as read-only. A lock
- * whose owner has died (kill -9, crash) is taken over.
+ * Two windows starting together can each hold SQLite's shared lock for an instant, which
+ * makes the other's upgrade to exclusive fail. Waiting this long lets the loser back off so
+ * the winner gets the lock. A window that finds the lock held waits this long once, at startup.
  */
-export function acquirePrefsLock(prefsPath: string, pid: number): PrefsLock | null {
+const CONTENTION_WAIT_MS = 100;
+
+function isBusy(error: unknown): boolean {
+  return (error as { readonly code?: unknown } | null)?.code === "SQLITE_BUSY";
+}
+
+/**
+ * Makes this process the only prefs writer, or returns null while another process holds the lock.
+ * The lock is an exclusive SQLite transaction kept open until release; the OS frees it when the
+ * holder dies, so it's never stale. Don't set `locking_mode = EXCLUSIVE`: Bun on macOS uses the
+ * system SQLite, which then takes no cross-process lock.
+ */
+export function acquirePrefsLock(prefsPath: string): PrefsLock | null {
   const lockPath = prefsLockPath(prefsPath);
   NodeFS.mkdirSync(NodePath.dirname(lockPath), { recursive: true });
-  let created = tryCreateLock(lockPath, pid);
-  if (!created) {
-    const owner = readLockOwner(lockPath);
-    if (owner !== null && owner !== pid && isProcessAlive(owner)) return null;
-    // Stale (or unreadable): replace it. Two windows taking over the same stale lock at
-    // the same instant could both win; that race is narrow enough to accept.
-    NodeFS.rmSync(lockPath, { force: true });
-    created = tryCreateLock(lockPath, pid);
-    if (!created) return null;
+  const db = new Database(lockPath, { create: true });
+  try {
+    db.run(`PRAGMA busy_timeout = ${CONTENTION_WAIT_MS}`);
+    db.run("BEGIN EXCLUSIVE");
+  } catch (error) {
+    db.close();
+    if (isBusy(error)) return null;
+    throw error;
   }
   let held = true;
   return {
     release() {
       if (!held) return;
       held = false;
-      if (readLockOwner(lockPath) === pid) NodeFS.rmSync(lockPath, { force: true });
+      db.close();
     },
   };
 }
@@ -77,20 +57,24 @@ export function acquirePrefsLock(prefsPath: string, pid: number): PrefsLock | nu
 /**
  * How a window may use prefs.json: the owner writes it, a Rex thread tab (or a headless
  * run) only reads it, and a main window that lost the lock to another one only reads it
- * and says so.
+ * and says so. `error` is set when the lock couldn't be taken for another reason.
  */
 export type PrefsAccess =
   | { readonly kind: "owner"; readonly lock: PrefsLock }
   | { readonly kind: "reader" }
-  | { readonly kind: "locked-out" };
+  | { readonly kind: "locked-out"; readonly error?: string };
 
 export function resolvePrefsAccess(input: {
   readonly prefsPath: string;
-  readonly pid: number;
   /** False for Rex thread tabs and headless runs, which never write prefs. */
   readonly wantsWrites: boolean;
 }): PrefsAccess {
   if (!input.wantsWrites) return { kind: "reader" };
-  const lock = acquirePrefsLock(input.prefsPath, input.pid);
-  return lock ? { kind: "owner", lock } : { kind: "locked-out" };
+  try {
+    const lock = acquirePrefsLock(input.prefsPath);
+    return lock ? { kind: "owner", lock } : { kind: "locked-out" };
+  } catch (error) {
+    // Reading prefs without saving them beats refusing to start.
+    return { kind: "locked-out", error: error instanceof Error ? error.message : String(error) };
+  }
 }

@@ -125,14 +125,16 @@ const connection = createTuiConnection({
 const headless = process.env.TR3X_HEADLESS === "1";
 const prefsAccess = resolvePrefsAccess({
   prefsPath: paths.prefsPath,
-  pid: process.pid,
   wantsWrites: !threadWindowLaunch && !headless,
 });
 if (prefsAccess.kind === "owner") {
-  // Every shutdown path (quit, SIGTERM, SIGHUP, crash) ends in process.exit.
+  // The OS frees the lock when this process dies; releasing on exit just ends it sooner.
   process.on("exit", prefsAccess.lock.release);
 } else if (prefsAccess.kind === "locked-out") {
-  logger.log("prefs.locked", { lockPath: prefsLockPath(paths.prefsPath) });
+  logger.log("prefs.locked", {
+    lockPath: prefsLockPath(paths.prefsPath),
+    error: prefsAccess.error,
+  });
 }
 const prefs = await readPrefs(paths);
 const prefsWriter =
