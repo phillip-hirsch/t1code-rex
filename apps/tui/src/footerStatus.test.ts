@@ -38,6 +38,23 @@ describe("resolveFooterStatus", () => {
     expect(resolveFooterStatus(notice, ended(STOPPED_RUN, "interrupted"))).toBe(text);
   });
 
+  it("stays on the stopped run when a queued run is held and later resumed", () => {
+    // Run 1 is active with run 2 queued behind it, so run 2 is the latest.
+    const notice = createStopNotice(
+      presentedThread("t", "p", {
+        latestRunId: NEXT_RUN,
+        activeRunId: STOPPED_RUN,
+        status: "running",
+      }),
+      STOPPING,
+    );
+    // Stop holds run 2, and run 1 is the latest again.
+    expect(resolveFooterStatus(notice, ended(STOPPED_RUN, "interrupted"))).toBe("Stopped");
+    // Resuming run 2 is a newer run: the note clears and stays clear.
+    expect(resolveFooterStatus(notice, running(NEXT_RUN))).toBeNull();
+    expect(resolveFooterStatus(notice, ended(NEXT_RUN, "completed"))).toBeNull();
+  });
+
   it("passes plain messages through", () => {
     expect(resolveFooterStatus("Copied path", running(NEXT_RUN))).toBe("Copied path");
     expect(resolveFooterStatus(null, running(NEXT_RUN))).toBeNull();

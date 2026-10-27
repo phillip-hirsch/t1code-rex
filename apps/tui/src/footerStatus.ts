@@ -7,7 +7,7 @@ import {
 export interface StopNotice {
   readonly kind: "stop";
   readonly threadId: string;
-  /** The thread's latest run when Stop was pressed. */
+  /** The run Stop interrupted: the active one, else the latest. */
   readonly runId: string | null;
   readonly text: string;
 }
@@ -17,11 +17,19 @@ export type FooterStatus = string | StopNotice | null;
 
 export const STOPPING = "Stopping";
 
+/**
+ * The run a stop note is about. A queued run can be the latest while another is active, so
+ * the active run wins; once nothing is active, the latest run stands in.
+ */
+function currentRunId(thread: Pick<EnvironmentThreadShell, "latestRun" | "runtime">) {
+  return thread.runtime?.activeRunId ?? thread.latestRun?.runId ?? null;
+}
+
 export function createStopNotice(
-  thread: Pick<EnvironmentThreadShell, "id" | "latestRun">,
+  thread: Pick<EnvironmentThreadShell, "id" | "latestRun" | "runtime">,
   text: string,
 ): StopNotice {
-  return { kind: "stop", threadId: thread.id, runId: thread.latestRun?.runId ?? null, text };
+  return { kind: "stop", threadId: thread.id, runId: currentRunId(thread), text };
 }
 
 /**
@@ -34,7 +42,7 @@ export function resolveFooterStatus(
 ): string | null {
   if (status === null || typeof status === "string") return status;
   if (thread === null || thread.id !== status.threadId) return null;
-  if ((thread.latestRun?.runId ?? null) !== status.runId) return null;
+  if (currentRunId(thread) !== status.runId) return null;
   return status.text === STOPPING && !threadRuntimeIsActive(thread.runtime)
     ? "Stopped"
     : status.text;
