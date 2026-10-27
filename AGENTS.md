@@ -1,12 +1,11 @@
-# T1Code fork
+# tr3x fork
 
-This repository is T1Code, a terminal UI fork of T3 Code. The rest of this file is upstream T3 Code's guide and still applies to the shared code.
+This repository is tr3x: T3 Code's server and orchestration v2, used from Rex, with each thread in a Rex tab. The rest of this file is upstream T3 Code's guide and still applies to the shared code.
 
-- `apps/tui` (the terminal UI, runs on Bun with OpenTUI) and `packages/client-core` are fork-only. Everything else tracks upstream `pingdotgg/t3code`; keep it as close to upstream as possible so future syncs stay cheap.
-- When a request names no surface, assume the TUI.
-- The roadmap is `docs/rex-parity-plan.md`: a herdr-style agent multiplexer on orchestration v2, with Rex tabs for threads.
-- This fork does not publish to npm and has no upstream release or deploy workflows.
-- Use conventional commit messages, e.g. `fix(tui): reduce premature sidebar collapse`.
+- The design is `docs/tr3x-design.md` (PR #24). The tr3x package (`apps/tr3x`) comes in a later PR.
+- Everything else tracks upstream `pingdotgg/t3code`. Keep it as close to upstream as possible, so future merges stay cheap.
+- This fork doesn't publish to npm and has no GitHub workflows.
+- Use conventional commit messages, e.g. `feat(tr3x): open threads as Rex tabs`.
 
 # T3 Code
 
