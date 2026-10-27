@@ -398,12 +398,9 @@ function Shell(props: AppProps) {
           const project = connection.registry
             .get(connection.projectsAtom)
             .find((entry) => entry.id === projectId);
-          setStatus(
-            `An unsent message's thread is gone; it's in a new thread in ${project?.title ?? "its project"}`,
-          );
+          setStatus(`Unsent message moved to a new thread in ${project?.title ?? "its project"}`);
         },
-        onOrphaned: () =>
-          setStatus("An unsent message's thread and project are gone; /recover restores it"),
+        onOrphaned: () => setStatus("Unsent message's project is gone; /recover"),
       }),
     [composerStore, connection],
   );
