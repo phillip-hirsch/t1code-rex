@@ -1041,7 +1041,7 @@ describe("composer sender, Sol audit round 5", () => {
     // As written before records carried a project id.
     prefs.current = {
       ...prefs.current,
-      composerUnconfirmedSends: prefs.current.composerUnconfirmedSends?.map(
+      composerUnconfirmedSends: (prefs.current.composerUnconfirmedSends ?? []).map(
         ({ projectId: _projectId, ...record }) => record,
       ),
     };
