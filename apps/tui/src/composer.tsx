@@ -3,6 +3,9 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import type { KeyEvent, PasteEvent, TextareaRenderable } from "@opentui/core";
+import { useAtomValue } from "@effect/atom-react";
+import type { ThreadQueueWorkflowState } from "@t3tools/client-runtime/state/thread-workflows";
+import type { Atom } from "effect/reactivity";
 import {
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type ProviderInteractionMode,
@@ -115,6 +118,13 @@ export function Composer(props: ComposerProps) {
   const [rows, setRows] = useState(MIN_ROWS);
   const [removeArmed, setRemoveArmed] = useState(false);
   const [pasting, setPasting] = useState(false);
+  const [width, setWidth] = useState(0);
+
+  // A loaded draft (on mount, or after a send came back) continues where it ends.
+  const attachTextarea = useCallback((node: TextareaRenderable | null) => {
+    textareaRef.current = node;
+    node?.gotoBufferEnd();
+  }, []);
 
   const settings = baseSettings === null ? null : applySettingsPatch(baseSettings, snapshot.patch);
   const slashItems: ReadonlyArray<ComposerSlashCommand> =
@@ -185,7 +195,8 @@ export function Composer(props: ComposerProps) {
   ) => {
     const raw = requested?.text ?? readText();
     const text = raw.replace(/\s+$/u, "");
-    if (requested === undefined && attachments.length === 0) {
+    // Commands run even with images attached; the images stay for the next message.
+    if (requested === undefined) {
       const action = resolveComposerSlashAction(text);
       if (action !== null) {
         if (action.type === "error") {
@@ -306,11 +317,13 @@ export function Composer(props: ComposerProps) {
   const borderColor = props.focused ? palette.composerBorder : palette.composerBorderMuted;
   const placeholder = pasting
     ? "Attaching clipboard image…"
-    : target.kind === "draft"
-      ? "Start a new thread with a prompt"
-      : running
-        ? "Queue a follow-up (Alt+Enter steers)"
-        : "Ask for follow-up changes or attach images";
+    : attachments.length > 0
+      ? "Add a message"
+      : target.kind === "draft"
+        ? "Start a new thread with a prompt"
+        : running
+          ? "Queue a follow-up (Alt+Enter steers)"
+          : "Ask for follow-up changes or attach images";
   const primary = running && !hasText && attachments.length === 0 ? "stop" : "send";
 
   return (
@@ -329,6 +342,9 @@ export function Composer(props: ComposerProps) {
       {slashMenuOpen ? <SlashMenu items={slashItems} index={slashIndex} theme={theme} /> : null}
       <box
         onMouseDown={props.onFocus}
+        onSizeChange={function (this: { width: number }) {
+          setWidth(this.width);
+        }}
         style={{
           marginTop: 1,
           border: true,
@@ -341,66 +357,71 @@ export function Composer(props: ComposerProps) {
           flexShrink: 0,
         }}
       >
-        <box style={{ flexDirection: "row", height: rows, alignItems: "flex-start" }}>
-          {attachments.length > 0 ? (
-            <box style={{ flexDirection: "row", flexShrink: 0 }}>
-              {attachments.map((attachment, index) => (
-                <AttachmentPill
-                  key={attachment.id}
-                  label={removeArmed && index === attachments.length - 1 ? "󰋩 Remove?" : "󰋩 Image"}
-                  toneIndex={index}
-                  theme={theme}
-                />
-              ))}
-            </box>
-          ) : null}
-          <textarea
-            key={`${threadId}:${snapshot.textRevision}`}
-            ref={textareaRef}
-            focused={props.focused}
-            initialValue={initialText}
-            placeholder={placeholder}
-            cursorColor={palette.cursor}
-            keyBindings={[
-              { name: "return", shift: true, action: "newline" },
-              { name: "linefeed", action: "newline" },
-            ]}
-            onContentChange={() => {
-              const text = readText();
-              store.setDraftText(threadId, text);
-              syncFromText(text);
-              if (snapshot.notice !== null) store.setNotice(threadId, null);
-            }}
-            onPaste={(event: PasteEvent) => {
-              const pasted = decodePaste(event);
-              if (pasted.trim().length === 0) {
-                // Terminals paste nothing when the clipboard holds only an image.
-                event.preventDefault();
-                pasteClipboardImage();
-                return;
-              }
-              const imagePath = pastedImagePath(pasted);
-              if (imagePath !== null) {
-                event.preventDefault();
-                void attachFromPath(imagePath, false).then((attached) => {
-                  if (!attached) textareaRef.current?.insertText(pasted);
-                });
-              }
-            }}
-            style={{
-              flexGrow: 1,
-              height: rows,
-              backgroundColor: palette.composerPanel,
-              focusedBackgroundColor: palette.composerPanel,
-              textColor: palette.text,
-              focusedTextColor: palette.text,
-              placeholderColor: palette.subtle,
-            }}
-          />
+        {attachments.length > 0 ? (
+          <box style={{ flexDirection: "row", height: 1, flexShrink: 0 }}>
+            {attachments.map((attachment, index) => (
+              <AttachmentPill
+                key={attachment.id}
+                label={removeArmed && index === attachments.length - 1 ? "󰋩 Remove?" : "󰋩 Image"}
+                toneIndex={index}
+                theme={theme}
+              />
+            ))}
+          </box>
+        ) : null}
+        <box style={{ flexDirection: "row", height: rows }}>
+          <box style={{ flexGrow: 1, minWidth: 0, height: rows }}>
+            <textarea
+              key={`${threadId}:${snapshot.textRevision}`}
+              ref={attachTextarea}
+              focused={props.focused}
+              initialValue={initialText}
+              placeholder={placeholder}
+              cursorColor={palette.cursor}
+              keyBindings={[
+                { name: "return", shift: true, action: "newline" },
+                { name: "linefeed", action: "newline" },
+              ]}
+              onContentChange={() => {
+                const text = readText();
+                store.setDraftText(threadId, text);
+                syncFromText(text);
+                if (snapshot.notice !== null) store.setNotice(threadId, null);
+              }}
+              onPaste={(event: PasteEvent) => {
+                const pasted = decodePaste(event);
+                if (pasted.trim().length === 0) {
+                  // Terminals paste nothing when the clipboard holds only an image.
+                  event.preventDefault();
+                  pasteClipboardImage();
+                  return;
+                }
+                const imagePath = pastedImagePath(pasted);
+                if (imagePath !== null) {
+                  event.preventDefault();
+                  void attachFromPath(imagePath, false).then((attached) => {
+                    if (!attached) textareaRef.current?.insertText(pasted);
+                  });
+                }
+              }}
+              style={{
+                flexGrow: 1,
+                flexShrink: 1,
+                minWidth: 0,
+                height: rows,
+                backgroundColor: palette.composerPanel,
+                focusedBackgroundColor: palette.composerPanel,
+                textColor: palette.text,
+                focusedTextColor: palette.text,
+                placeholderColor: palette.subtle,
+              }}
+            />
+          </box>
         </box>
         <box style={{ flexDirection: "row", height: 1, alignItems: "center" }}>
           {settings ? (
             <ComposerControls
+              width={width}
               settings={settings}
               modelLabel={props.modelLabel(settings)}
               badge={props.providerBadge(settings)}
@@ -427,7 +448,21 @@ export function Composer(props: ComposerProps) {
   );
 }
 
+/** Room for the toolbar: mode labels go first, then the model label shortens. */
+function toolbarLabels(width: number, model: string, modes: ReadonlyArray<string>) {
+  // Each button pads 2 and keeps a gap; dividers take 2; borders, padding and send take 7.
+  const room = width - 7 - modes.length * 2;
+  const full = model.length + 4 + modes.reduce((sum, label) => sum + label.length + 4, 0);
+  if (width === 0 || full <= room) return { model, showModes: true };
+  const iconsOnly = modes.length * 4;
+  return {
+    model: truncateToolbarLabel(model, Math.max(4, room - iconsOnly - 4)),
+    showModes: false,
+  };
+}
+
 function ComposerControls(props: {
+  width: number;
   settings: ComposerSettings;
   modelLabel: string;
   badge: ProviderBadge;
@@ -437,20 +472,29 @@ function ComposerControls(props: {
   onRuntime: () => void;
 }) {
   const { settings, theme } = props;
+  const interaction = interactionModeLabel(settings.interactionMode);
+  const runtime = runtimeModeLabel(settings.runtimeMode);
+  const labels = toolbarLabels(
+    props.width,
+    truncateToolbarLabel(props.modelLabel, MODEL_LABEL_MAX),
+    [interaction, runtime],
+  );
   const plan = settings.interactionMode === "plan";
   return (
-    <box style={{ flexDirection: "row", flexShrink: 1, overflow: "hidden", height: 1 }}>
+    <box
+      style={{ flexDirection: "row", flexShrink: 1, minWidth: 0, overflow: "hidden", height: 1 }}
+    >
       <ToolbarButton
         icon={props.badge.icon}
         iconColor={props.badge.color}
-        label={truncateToolbarLabel(props.modelLabel, MODEL_LABEL_MAX)}
+        label={labels.model}
         theme={theme}
         onPress={props.onModel}
       />
       <Divider theme={theme} />
       <ToolbarButton
         icon={interactionModeIcon(settings.interactionMode)}
-        label={interactionModeLabel(settings.interactionMode)}
+        label={labels.showModes ? interaction : null}
         active={plan}
         theme={theme}
         onPress={props.onInteraction}
@@ -458,7 +502,7 @@ function ComposerControls(props: {
       <Divider theme={theme} />
       <ToolbarButton
         icon={runtimeModeIcon(settings.runtimeMode)}
-        label={runtimeModeLabel(settings.runtimeMode)}
+        label={labels.showModes ? runtime : null}
         active={settings.runtimeMode === "approval-required"}
         theme={theme}
         onPress={props.onRuntime}
@@ -476,7 +520,7 @@ function Divider(props: { theme: TuiTheme }) {
 function ToolbarButton(props: {
   icon: string;
   iconColor?: TuiColor;
-  label: string;
+  label: string | null;
   active?: boolean;
   theme: TuiTheme;
   onPress: () => void;
@@ -507,8 +551,13 @@ function ToolbarButton(props: {
             : palette.control,
       }}
     >
-      <text content={props.icon} style={{ fg: props.iconColor ?? foreground, marginRight: 1 }} />
-      <text wrapMode="none" content={props.label} style={{ fg: foreground }} />
+      <text
+        content={props.icon}
+        style={{ fg: props.iconColor ?? foreground, marginRight: props.label === null ? 0 : 1 }}
+      />
+      {props.label === null ? null : (
+        <text wrapMode="none" content={props.label} style={{ fg: foreground }} />
+      )}
     </box>
   );
 }
@@ -651,6 +700,43 @@ function PendingSendRow(props: { entry: ComposerSendEntry; theme: TuiTheme }) {
         content={`${preview}${images}`}
         style={{ fg: palette.muted }}
       />
+    </box>
+  );
+}
+
+const QUEUED_ROWS_MAX = 3;
+
+/**
+ * Messages waiting behind the running turn. They aren't timeline items until they start,
+ * so without this a queued send would seem to vanish. Editing the queue comes later.
+ */
+export function QueuedMessages(props: {
+  readonly queueAtom: Atom.Atom<ThreadQueueWorkflowState | null>;
+  readonly theme: TuiTheme;
+}) {
+  const queue = useAtomValue(props.queueAtom);
+  const palette = props.theme.palette;
+  const queued = queue?.queuedRuns ?? [];
+  if (queued.length === 0) return null;
+  const hidden = queued.length - QUEUED_ROWS_MAX;
+  return (
+    <box style={{ flexDirection: "column", flexShrink: 0, marginTop: 1 }}>
+      {queued.slice(0, QUEUED_ROWS_MAX).map((entry, index) => (
+        <box key={entry.run.id} style={{ flexDirection: "row", height: 1 }}>
+          <text
+            wrapMode="none"
+            content={index === 0 && queue?.isHeld ? "󰏤 Queued, held after Stop: " : "󰒲 Queued: "}
+            style={{ fg: palette.subtle, flexShrink: 0 }}
+          />
+          <text
+            wrapMode="none"
+            truncate
+            content={entry.text.replace(/\s+/gu, " ").trim()}
+            style={{ fg: palette.muted }}
+          />
+        </box>
+      ))}
+      {hidden > 0 ? <text content={`  and ${hidden} more`} style={{ fg: palette.subtle }} /> : null}
     </box>
   );
 }

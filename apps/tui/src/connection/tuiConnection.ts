@@ -149,6 +149,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         errorAtom: threadDetails.errorAtom(ref),
         historyAtom: threadDetails.historyAtom(ref),
         pendingRequestsAtom: threadDetails.pendingRequestsAtom(ref),
+        queueAtom: threadDetails.queueWorkflowAtom(ref),
       };
     },
     loadEarlierHistory,

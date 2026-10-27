@@ -35,7 +35,7 @@ import {
 
 import packageJson from "../package.json" with { type: "json" };
 import { copyTextToClipboard } from "./clipboardText.ts";
-import { Composer, type ComposerHandle, type ProviderBadge } from "./composer.tsx";
+import { Composer, QueuedMessages, type ComposerHandle, type ProviderBadge } from "./composer.tsx";
 import { describeSendFailure, type ComposerTarget } from "./composerSend.ts";
 import { createComposerSender } from "./composerSender.ts";
 import {
@@ -204,6 +204,20 @@ function useEventCallback<Args extends unknown[], Result>(
   return useCallback((...args: Args) => latest.current(...args), []);
 }
 
+/**
+ * State whose latest value key handlers can read before React re-renders, so a burst of
+ * keys (a paste, or fast typing) builds on itself instead of the last render's value.
+ */
+function useSyncedState<T>(initial: T) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef(initial);
+  const set = useCallback((next: T) => {
+    ref.current = next;
+    setValue(next);
+  }, []);
+  return [value, ref, set] as const;
+}
+
 function ServerSummary(props: {
   connection: TuiConnection;
   environment: ServerConfigEnvironment | null;
@@ -309,7 +323,9 @@ function Shell(props: AppProps) {
   const markdownStyles = useMarkdownStyles(theme);
   const threadViewRef = useRef<ThreadViewHandle | null>(null);
   const composerRef = useRef<ComposerHandle | null>(null);
-  const [modelPicker, setModelPicker] = useState<ModelPickerState | null>(null);
+  const [modelPicker, modelPickerRef, setModelPicker] = useSyncedState<ModelPickerState | null>(
+    null,
+  );
   const [stopRequestedRunId, setStopRequestedRunId] = useState<string | null>(null);
   // Drafts are saved only by the window that owns prefs.json.
   const [composerStore] = useState(() => {
@@ -761,12 +777,13 @@ function Shell(props: AppProps) {
 
   /** Every key comes here before the focused textarea; true means it was used up. */
   const handleKey = (key: KeyEvent): boolean => {
-    if (modelPicker !== null) {
+    const picker = modelPickerRef.current;
+    if (picker !== null) {
       if (key.ctrl && key.name === "c") {
         setModelPicker(null);
         return true;
       }
-      const outcome = reduceModelPickerKey(pickerProviders, modelPicker, key);
+      const outcome = reduceModelPickerKey(pickerProviders, picker, key);
       if (outcome?.type === "close") setModelPicker(null);
       else if (outcome?.type === "state") setModelPicker(outcome.state);
       else if (outcome?.type === "select") pickModel(outcome.instanceId, outcome.model);
@@ -896,6 +913,8 @@ function Shell(props: AppProps) {
     : null;
   const sidebarWidth = TUI_SIDEBAR_WIDTH;
   const emptyLabel = sidebar.hasSnapshot ? "No projects yet" : "Loading projects…";
+  // "Stopping" ends with the run.
+  const statusText = status === "Stopping" && !running ? "Stopped" : status;
   const footerHints = modelPicker
     ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
     : sidebarFocused
@@ -982,7 +1001,7 @@ function Shell(props: AppProps) {
                 <NewThreadView project={activeProject} theme={theme} />
               ) : (
                 <ThreadView
-                  key={composerTarget.threadId}
+                  key={`thread:${composerTarget.threadId}`}
                   ref={threadViewRef}
                   connection={connection}
                   threadId={composerTarget.threadId}
@@ -996,8 +1015,15 @@ function Shell(props: AppProps) {
                   onCopy={copyToClipboard}
                 />
               )}
+              {composerTarget.kind === "thread" ? (
+                <QueuedMessages
+                  key={`queue:${composerTarget.threadId}`}
+                  queueAtom={connection.thread(composerTarget.threadId).queueAtom}
+                  theme={theme}
+                />
+              ) : null}
               <Composer
-                key={composerTarget.threadId}
+                key={`composer:${composerTarget.threadId}`}
                 ref={composerRef}
                 target={composerTarget}
                 store={composerStore}
@@ -1053,7 +1079,13 @@ function Shell(props: AppProps) {
           />
         ) : null}
         {status ? (
-          <text wrapMode="none" truncate content={status} style={{ fg: palette.muted }} />
+          // The hints truncate first, so a status reads whole.
+          <text
+            wrapMode="none"
+            truncate
+            content={statusText ?? ""}
+            style={{ fg: palette.muted, flexShrink: 0, maxWidth: "60%" }}
+          />
         ) : null}
       </box>
       {!layout.showSidebar && sidebarOverlayOpen ? (
