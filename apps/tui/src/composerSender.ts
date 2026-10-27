@@ -34,6 +34,11 @@ export interface ComposerSenderOptions {
   readonly schedule: (run: () => void, delayMs: number) => () => void;
   /** Sends saved at the last quit that may have reached the server; they go out again. */
   readonly restore?: ReadonlyArray<PendingComposerSend>;
+  /**
+   * Releases the queue the server holds after Stop. Called before messages Stop held here
+   * go out, so the server's held runs (sent earlier) stay ahead of them.
+   */
+  readonly resumeQueue?: (threadId: ThreadId) => Promise<unknown>;
   /** How long a command may go unanswered before its send shows as stuck. */
   readonly stallMs?: number;
   readonly onFailure?: (
@@ -67,6 +72,8 @@ interface ThreadQueue {
   cancelRetry: (() => void) | null;
   /** Stop held the queue: nothing more goes out until it's resumed. */
   held: boolean;
+  /** The server's held queue is being released; nothing goes out before it is. */
+  releasing: Promise<unknown> | null;
 }
 
 const OK: ComposerCommandResult = { ok: true };
@@ -115,7 +122,13 @@ export function createComposerSender(options: ComposerSenderOptions) {
   const queueFor = (threadId: string): ThreadQueue => {
     const existing = queues.get(threadId);
     if (existing) return existing;
-    const queue: ThreadQueue = { jobs: [], draining: null, cancelRetry: null, held: false };
+    const queue: ThreadQueue = {
+      jobs: [],
+      draining: null,
+      cancelRetry: null,
+      held: false,
+      releasing: null,
+    };
     queues.set(threadId, queue);
     return queue;
   };
@@ -259,6 +272,10 @@ export function createComposerSender(options: ComposerSenderOptions) {
     queue.cancelRetry = null;
     const loop = async () => {
       try {
+        if (queue.releasing !== null) {
+          await queue.releasing.catch(() => undefined);
+          queue.releasing = null;
+        }
         for (let job = queue.jobs[0]; job !== undefined; job = queue.jobs[0]) {
           if (disposed || queue.held) break;
           const result = await runJob(queue, job);
@@ -306,9 +323,11 @@ export function createComposerSender(options: ComposerSenderOptions) {
   const inFlight = (queue: ThreadQueue): Job | undefined =>
     queue.draining === null ? undefined : queue.jobs[0];
 
-  /** Lets held messages go out again, in order. */
-  const release = (queue: ThreadQueue) => {
+  /** Lets held messages go out again, in order, after the server's own held queue. */
+  const release = (threadId: string, queue: ThreadQueue) => {
+    if (!queue.held) return;
     queue.held = false;
+    queue.releasing = options.resumeQueue?.(threadId as ThreadId) ?? null;
     for (const job of queue.jobs) if (job.status === "held") mark(job, "sending");
   };
 
@@ -348,7 +367,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
       const queue = queueFor(threadId);
       const job = plan(send, queue);
       // As upstream, a new message releases a queue held after Stop: the held ones go first.
-      release(queue);
+      release(threadId, queue);
       queue.jobs.push(job);
       store.beginSend(job.send);
       if (queue.cancelRetry !== null) {
@@ -383,7 +402,7 @@ export function createComposerSender(options: ComposerSenderOptions) {
     resume(threadId: string): number {
       const queue = queues.get(threadId);
       if (!queue || queue.jobs.length === 0) return 0;
-      release(queue);
+      release(threadId, queue);
       const current = inFlight(queue);
       if (current !== undefined) {
         if (current.status === "stuck") current.abandon?.();

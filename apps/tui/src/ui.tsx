@@ -366,6 +366,8 @@ function Shell(props: AppProps) {
       },
       // Sends the last quit saved because they may have reached the server.
       restore: composerStore.pendingSendsAtLaunch(),
+      resumeQueue: (threadId) =>
+        connection.resumeQueue({ commandId: CommandId.make(NodeCrypto.randomUUID()), threadId }),
       onFailure: (send, error, action) =>
         logger.log("composer.send.failed", {
           threadId: send.target.threadId,

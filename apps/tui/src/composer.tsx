@@ -81,7 +81,7 @@ export interface ComposerProps {
   readonly clipboardDir: string;
   readonly onFocus: () => void;
   readonly onStop: () => void;
-  /** `/resume`: also releases the thread's queue the server holds after Stop. */
+  /** `/resume` with nothing held here: releases the queue the server holds after Stop. */
   readonly onResumeQueue: () => void;
   readonly onExit: () => void;
   readonly onNewThread: () => void;
@@ -242,12 +242,12 @@ export function Composer(props: ComposerProps) {
           case "send":
             submit(false, { dispatch: action.dispatch, text: action.text });
             return;
-          case "resume": {
-            const pending = resumeHeld();
+          case "resume":
+            // Held messages release the server's queue first; with none, release it directly.
+            if (resumeHeld() > 0) return;
             if (target.kind === "thread") props.onResumeQueue();
-            else if (pending === 0) props.onStatus("Nothing to resume");
+            else props.onStatus("Nothing to resume");
             return;
-          }
           case "discard": {
             const count = sender.discard(threadId);
             props.onStatus(

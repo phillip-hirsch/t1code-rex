@@ -87,6 +87,7 @@ function setup(
     setRuntimeMode: (input) => respond("runtime-mode", input.commandId, input),
     setInteractionMode: (input) => respond("interaction-mode", input.commandId, input),
     threadSettings: () => server.settings,
+    resumeQueue: (threadId) => respond("queue.resume", `resume:${threadId}`, { threadId }),
     schedule: (run, delayMs) => {
       const timer = { run, delayMs };
       timers.push(timer);
@@ -402,8 +403,26 @@ describe("composer sender, Sol audit round 2", () => {
     expect(ids(calls)).toEqual(["cmd-1"]);
     expect(sender.resume("t1")).toBe(1);
     await settle();
-    expect(ids(calls)).toEqual(["cmd-1", "cmd-2"]);
+    // The server's held queue goes first: it holds messages sent before these.
+    expect(ids(calls)).toEqual(["cmd-1", "resume:t1", "cmd-2"]);
     expect(store.snapshot("t1").sends).toEqual([]);
+  });
+
+  it("N3: held messages wait until the server has released its own held queue", async () => {
+    const inFlight = deferred();
+    const resumed = deferred();
+    const { sender, calls } = setup([inFlight.promise, resumed.promise]);
+    const first = sender.send(send());
+    void sender.send(send(second));
+    sender.hold("t1");
+    inFlight.resolve(ok);
+    await first;
+    sender.resume("t1");
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume:t1"]);
+    resumed.resolve(ok);
+    await settle();
+    expect(ids(calls)).toEqual(["cmd-1", "resume:t1", "cmd-2"]);
   });
 
   it("N3: a new message releases the hold, held ones first, as upstream releases its queue", async () => {
@@ -415,7 +434,7 @@ describe("composer sender, Sol audit round 2", () => {
     inFlight.resolve(ok);
     await first;
     await sender.send(send(third));
-    expect(ids(calls)).toEqual(["cmd-1", "cmd-2", "cmd-3"]);
+    expect(ids(calls)).toEqual(["cmd-1", "resume:t1", "cmd-2", "cmd-3"]);
   });
 
   it("N3: /discard puts held messages back in the composer", async () => {
