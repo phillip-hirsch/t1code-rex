@@ -25,7 +25,7 @@ import {
   collapseProject,
   ensureProjectExpanded,
   pruneExpandedProjects,
-  resolveProjectExpansionOnRowPress,
+  toggleProjectExpanded,
 } from "./sidebarProjects.ts";
 import {
   resolveProjectStatus,
@@ -161,6 +161,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
 
   const activeThread =
     selection.threadId === null ? null : (threadsById.get(selection.threadId) ?? null);
+  const activeProjectId = activeThread?.projectId ?? selection.projectId;
 
   // Adjustments made while rendering, so a shell change costs one render rather than an
   // effect's second pass: restore the start selection once the first snapshot lands, keep
@@ -218,10 +219,12 @@ export function useSidebarController(options: SidebarControllerOptions) {
     });
   }, [expandedProjectIds, initialized, prefsWriter, selection, unread, visits]);
 
+  /** Every explicit open (click, Enter, or landing on the row) clears its unread mark. */
   const selectThread = useCallback((projectId: string, threadId: string) => {
     setSelection({ projectId, threadId });
     setCursorKey(threadRowKey(threadId));
     setExpandedProjectIds((current) => ensureProjectExpanded(current, projectId));
+    setUnread((current) => clearThreadUnread(current, threadId));
   }, []);
 
   const toggleShowAll = useCallback((projectId: string) => {
@@ -235,33 +238,27 @@ export function useSidebarController(options: SidebarControllerOptions) {
   /** Moves the cursor without selecting, as a right-click does before its menu opens. */
   const focusRow = useCallback((row: SidebarRow) => setCursorKey(row.key), []);
 
-  /** Mouse presses: the row under the pointer becomes the cursor. */
+  /**
+   * Mouse presses: the row under the pointer becomes the cursor. A project row only folds
+   * or unfolds; the selection is always a thread and its own project.
+   */
   const pressRow = useCallback(
     (row: SidebarRow) => {
       setCursorKey(row.key);
       if (row.kind === "thread") {
         selectThread(row.projectId, row.threadId);
       } else if (row.kind === "project") {
-        setSelection((current) =>
-          current.projectId === row.projectId ? current : { ...current, projectId: row.projectId },
-        );
-        setExpandedProjectIds((current) =>
-          resolveProjectExpansionOnRowPress({
-            expandedProjectIds: current,
-            projectId: row.projectId,
-            isProjectActive: selection.projectId === row.projectId,
-          }),
-        );
+        setExpandedProjectIds((current) => toggleProjectExpanded(current, row.projectId));
       } else {
         toggleShowAll(row.projectId);
       }
     },
-    [selectThread, selection.projectId, toggleShowAll],
+    [selectThread, toggleShowAll],
   );
 
   /**
-   * Arrow keys (or j/k/h/l) walk the tree. Landing on a thread opens it, as before;
-   * Enter opens a thread or toggles a project. Returns "open" when the caller should move
+   * Arrow keys (or j/k/h/l) walk the tree. Landing on a thread opens it, as before; landing
+   * on a project only moves the cursor. Enter opens a thread or toggles a project. Returns "open" when the caller should move
    * focus to the thread view.
    */
   const handleKey = useCallback(
@@ -272,13 +269,6 @@ export function useSidebarController(options: SidebarControllerOptions) {
         if (next === null) return "handled";
         setCursorKey(next.key);
         if (next.kind === "thread") selectThread(next.projectId, next.threadId);
-        else if (next.kind === "project") {
-          setSelection((current) =>
-            current.projectId === next.projectId
-              ? current
-              : { ...current, projectId: next.projectId },
-          );
-        }
         return "handled";
       }
       if (name === "home" || name === "end") {
@@ -317,11 +307,7 @@ export function useSidebarController(options: SidebarControllerOptions) {
           toggleShowAll(cursorRow.projectId);
           return "handled";
         }
-        setExpandedProjectIds((current) =>
-          current.has(cursorRow.projectId)
-            ? collapseProject(current, cursorRow.projectId)
-            : ensureProjectExpanded(current, cursorRow.projectId),
-        );
+        setExpandedProjectIds((current) => toggleProjectExpanded(current, cursorRow.projectId));
         return "handled";
       }
       return null;
@@ -351,8 +337,8 @@ export function useSidebarController(options: SidebarControllerOptions) {
     expandedProjectIds,
     selection,
     activeThread,
-    activeProject:
-      selection.projectId === null ? null : (projectsById.get(selection.projectId) ?? null),
+    // The open thread's own project, so the thread view never pairs it with another title.
+    activeProject: activeProjectId === null ? null : (projectsById.get(activeProjectId) ?? null),
     cursorKey,
     cursorRow,
     handleKey,
