@@ -47,6 +47,28 @@ function firstLine(value: string | null | undefined): string | null {
   return line && line.length > 0 ? line : null;
 }
 
+// Providers wrap bookkeeping in their own tags, such as Claude's
+// <tools-used-before-summary>; it says nothing a reader needs.
+const METADATA_TAG = /<([a-z]+(?:-[a-z]+)+)>[\s\S]*?<\/\1>/gu;
+
+/** Upstream's one-line preview, without provider bookkeeping tags. */
+function detailLine(input: Parameters<typeof subagentDetailPreview>[0]): string | null {
+  const strip = (value: string | null | undefined) =>
+    value?.replace(METADATA_TAG, " ").trim() || null;
+  return subagentDetailPreview({
+    status: input.status,
+    result: strip(input.result),
+    progress: strip(input.progress),
+  });
+}
+
+/** What a working subagent is doing now, for its sidebar row. */
+export function subagentProgressLine(
+  record: Pick<OrchestrationV2Subagent, "status" | "progress" | "result">,
+): string | null {
+  return detailLine({ status: record.status, progress: record.progress, result: null });
+}
+
 function iso(value: DateTime.Utc | null): string | null {
   return value === null ? null : DateTime.formatIso(value);
 }
@@ -77,7 +99,7 @@ function summarizeFields(
     status: fields.status,
     state: subagentRecordState(fields.status),
     model: model === null ? null : resolveSubagentMetadata({ model, provider }).modelLabel,
-    detail: subagentDetailPreview({
+    detail: detailLine({
       status: fields.status,
       result: fields.result,
       progress: fields.progress,

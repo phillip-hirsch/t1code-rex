@@ -8,8 +8,7 @@ import { memo, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { formatRelativeTime } from "./relativeTime.ts";
 import type { SidebarRow, SidebarThread, SubagentDisclosure } from "./sidebarModel.ts";
-import { subagentDetailPreview } from "@t3tools/client-runtime/state/subagent-display";
-import { subagentStateColor } from "./subagentPresentation.ts";
+import { subagentProgressLine, subagentStateColor } from "./subagentPresentation.ts";
 import {
   SUBAGENT_STATE_LABELS,
   subagentRecordState,
@@ -335,6 +334,7 @@ interface SubagentRowProps {
   readonly theme: TuiTheme;
   readonly row: Extract<SidebarRow, { kind: "subagent" }>;
   readonly thread: SidebarThread;
+  readonly width: number;
   readonly active: boolean;
   readonly highlight: RowHighlight;
   readonly recordAtom: Atom.Atom<OrchestrationV2Subagent | null> | null;
@@ -360,28 +360,32 @@ function SubagentRecordRow(
   return <SubagentRowView {...props} record={useAtomValue(props.recordAtom)} />;
 }
 
+const SUBAGENT_LABEL_WIDTH = 8;
+
 function SubagentRowView(
   props: SubagentRowProps & { readonly record: OrchestrationV2Subagent | null },
 ) {
   const { theme, thread, row, record } = props;
   const selected = props.highlight === "cursor";
   const state = record === null ? subagentShellState(thread) : subagentRecordState(record.status);
-  const detail =
-    record === null
+  // Progress while it works; once it's done, its state says enough in a narrow sidebar.
+  const progress =
+    record === null || (state !== "working" && state !== "waiting")
       ? null
-      : subagentDetailPreview({
-          status: record.status,
-          result: record.result,
-          progress: record.progress,
-        });
+      : subagentProgressLine(record);
   const name = formatSubagentDisplayTitle(record?.title?.trim() || thread.title || "Subagent");
+  const indent = THREAD_INDENT + row.depth * 2;
+  const titleWidth = Math.max(
+    4,
+    props.width - 2 - ROW_PADDING - indent - 2 - STATUS_WIDTH - SUBAGENT_LABEL_WIDTH,
+  );
   return (
     <SidebarRowBox
       theme={theme}
       rowKey={row.key}
       row={row}
       highlight={props.highlight}
-      indent={THREAD_INDENT + row.depth * 2}
+      indent={indent}
       onPress={props.onPress}
     >
       {row.subagents === null ? (
@@ -399,11 +403,10 @@ function SubagentRowView(
       <box style={{ width: STATUS_WIDTH, flexShrink: 0 }}>
         <SubagentDot theme={theme} state={state} />
       </box>
-      <box style={{ flexGrow: 1, flexShrink: 1, minWidth: 0, overflow: "hidden", height: 1 }}>
+      <box style={{ width: titleWidth, flexShrink: 0, overflow: "hidden", height: 1 }}>
         <text
           wrapMode="none"
-          truncate
-          content={detail === null ? name : `${name} · ${detail}`}
+          content={truncateTitle(progress === null ? name : `${name} · ${progress}`, titleWidth)}
           style={{
             fg: selected
               ? theme.colors.selectedText
@@ -413,14 +416,13 @@ function SubagentRowView(
           }}
         />
       </box>
-      <text
-        wrapMode="none"
-        content={` ${SUBAGENT_STATE_LABELS[state]}`}
-        style={{
-          fg: selected ? theme.colors.selectedText : subagentStateColor(state, theme),
-          flexShrink: 0,
-        }}
-      />
+      <box style={{ width: SUBAGENT_LABEL_WIDTH, flexShrink: 0, alignItems: "flex-end" }}>
+        <text
+          wrapMode="none"
+          content={SUBAGENT_STATE_LABELS[state]}
+          style={{ fg: selected ? theme.colors.selectedText : subagentStateColor(state, theme) }}
+        />
+      </box>
     </SidebarRowBox>
   );
 }
@@ -582,6 +584,7 @@ export const Sidebar = memo(function Sidebar(props: SidebarProps) {
           theme={theme}
           row={line}
           thread={thread}
+          width={props.width}
           active={active}
           highlight={highlightFor(line.key, props, active)}
           recordAtom={

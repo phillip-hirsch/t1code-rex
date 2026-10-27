@@ -81,7 +81,6 @@ import type {
   ProjectSearchEntriesInput,
   ServerSettingsPatch,
   SourceControlCloneRepositoryInput,
-  ThreadId,
   VcsCreateRefInput,
   VcsInitInput,
   VcsListRefsResult,
@@ -90,7 +89,11 @@ import type {
   VcsSwitchRefInput,
   WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import { ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
+import {
+  isOrchestrationV2WorkActive,
+  ORCHESTRATION_V2_WS_METHODS,
+  ThreadId,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -212,6 +215,24 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       (get): OrchestrationV2Subagent | null =>
         get(subagentsAtom(threadId)).find((subagent) => subagent.id === subagentId) ?? null,
     ).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-subagent:${key}`));
+  });
+  // Children whose subagent is working, by the parent's records; a new list only on change.
+  const workingChildIdsAtom = Atom.family((threadId: ThreadId) => {
+    let previous: ReadonlyArray<string> = [];
+    return Atom.make((get): ReadonlyArray<string> => {
+      const next = get(subagentsAtom(threadId))
+        .flatMap((subagent) =>
+          subagent.childThreadId !== null && isOrchestrationV2WorkActive(subagent.status)
+            ? [subagent.childThreadId]
+            : [],
+        )
+        .sort();
+      if (next.length === previous.length && next.every((id, index) => id === previous[index])) {
+        return previous;
+      }
+      previous = next;
+      return next;
+    }).pipe(Atom.setIdleTTL(0), Atom.withLabel(`tr3x:thread-working-children:${threadId}`));
   });
   // The parent's record for one child thread, for that child's sidebar row and view.
   const subagentForChildAtom = Atom.family((key: string) => {
@@ -428,6 +449,8 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     /** One subagent record of a thread, or null until its subscription has it. */
     subagentAtom: (threadId: ThreadId, subagentId: string) =>
       subagentAtom(JSON.stringify([threadId, subagentId])),
+    /** Child threads whose subagent is working, from the parent's subscription. */
+    workingSubagentChildIdsAtom: (threadId: string) => workingChildIdsAtom(ThreadId.make(threadId)),
     /** The parent's record for one of its child threads, or null until it is loaded. */
     subagentForChildAtom: (threadId: ThreadId, childThreadId: string) =>
       subagentForChildAtom(JSON.stringify([threadId, childThreadId])),

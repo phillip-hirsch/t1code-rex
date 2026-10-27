@@ -101,18 +101,18 @@ export const SUBAGENT_STATE_LABELS: Record<SubagentState, string> = {
 
 /**
  * Whether a parent's children show: the user's choice once made, else open while any child
- * is live or one of them is open (`holdsOpenThread`), so finished and idle subagents start
- * folded.
+ * is live or the caller has another reason (`holdsOpen`: the parent works, or a child is the
+ * open thread), so finished and idle subagents start folded.
  */
 export function subagentsOpen(
   parentId: string,
   children: ReadonlyArray<Pick<ChildThread, "source">>,
   overrides: ReadonlyMap<string, boolean>,
-  holdsOpenThread = false,
+  holdsOpen = false,
 ): boolean {
   return (
     overrides.get(parentId) ??
-    (holdsOpenThread || children.some((child) => isLiveSubagentShell(child.source)))
+    (holdsOpen || children.some((child) => isLiveSubagentShell(child.source)))
   );
 }
 

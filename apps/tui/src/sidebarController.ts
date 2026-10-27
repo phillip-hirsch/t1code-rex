@@ -1,7 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import { DEFAULT_APP_SETTINGS, normalizeAppSettings } from "@t3tools/client-core";
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
 import type { OrchestrationProjectShell, OrchestrationV2ShellSnapshot } from "@t3tools/contracts";
-import type { Atom } from "effect/reactivity";
+import { Atom as AtomModule, type Atom } from "effect/reactivity";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
@@ -57,7 +58,11 @@ export interface SidebarShellSource {
   readonly threadShellsAtom: Atom.Atom<ReadonlyArray<SidebarThread>>;
   readonly hasShellSnapshotAtom: Atom.Atom<boolean>;
   readonly olderSettledAtom: Atom.Atom<OrchestrationV2ShellSnapshot["olderSettled"]>;
+  /** The open thread's working subagents, by its records; a provider's child rows may lag. */
+  readonly workingSubagentChildIdsAtom?: (threadId: string) => Atom.Atom<ReadonlyArray<string>>;
 }
+
+const NO_WORKING_CHILDREN = AtomModule.make<ReadonlyArray<string>>([]);
 
 export interface SidebarControllerOptions {
   readonly connection: SidebarShellSource;
@@ -120,6 +125,11 @@ export function useSidebarController(options: SidebarControllerOptions) {
     [threads],
   );
   const subagentChildren = useMemo(() => groupSubagentChildren(threads), [threads]);
+  const workingChildIds = useAtomValue(
+    selection.threadId === null || connection.workingSubagentChildIdsAtom === undefined
+      ? NO_WORKING_CHILDREN
+      : connection.workingSubagentChildIdsAtom(selection.threadId),
+  );
   const activeAncestors = useMemo(
     () => (selection.threadId === null ? [] : threadAncestors(selection.threadId, threadsById)),
     [selection.threadId, threadsById],
@@ -127,16 +137,18 @@ export function useSidebarController(options: SidebarControllerOptions) {
   const subagentTree = useMemo(
     () => ({
       childrenByParent: subagentChildren,
-      isOpen: (parentId: string) =>
-        subagentsOpen(
-          parentId,
-          subagentChildren.get(parentId) ?? [],
-          subagentFolds,
-          activeAncestors.includes(parentId),
-        ),
+      isOpen: (parentId: string) => {
+        const children = subagentChildren.get(parentId) ?? [];
+        // Open while the parent works or a child does, or while it holds the open thread.
+        const holdsOpen =
+          activeAncestors.includes(parentId) ||
+          threadRuntimeIsActive(threadsById.get(parentId)?.runtime) ||
+          children.some((child) => workingChildIds.includes(child.id));
+        return subagentsOpen(parentId, children, subagentFolds, holdsOpen);
+      },
       activeAncestors,
     }),
-    [activeAncestors, subagentChildren, subagentFolds],
+    [activeAncestors, subagentChildren, subagentFolds, threadsById, workingChildIds],
   );
   const builtRows = useMemo(
     () =>

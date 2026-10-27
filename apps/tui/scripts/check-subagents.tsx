@@ -278,11 +278,7 @@ async function checkSidebar(wired: boolean): Promise<void> {
       /List files · Reading src\s+working/.test(first),
       true,
     );
-    check(
-      `${name}: the finished one shows its result`,
-      /Print cwd · \/repo\s+done/.test(first),
-      true,
-    );
+    check(`${name}: the finished one says done`, /Print cwd\s+done/.test(first), true);
     check(`${name}: an idle parent's subagents start folded`, first.includes("Check links"), false);
     check(`${name}: the folded parent has a ▸`, /▸ Docs pass/.test(first), true);
   }
@@ -448,7 +444,7 @@ async function checkTranscript(wired: boolean): Promise<void> {
       /Completed/.test(first) && first.includes("/repo"),
       true,
     );
-    check(`${name}: stop only where web allows`, first.split("■ stop").length - 1, 1);
+    check(`${name}: stop only where web allows`, first.split("󰓛 stop").length - 1, 1);
     check(`${name}: a Rex tab button per child`, first.split("⧉ tab").length - 1, 3);
   }
   const before = new Map(fixture.calls);
@@ -469,9 +465,9 @@ async function checkTranscript(wired: boolean): Promise<void> {
     wired,
   );
   if (wired) {
-    const stop = locate(frame(), "■ stop");
+    const stop = locate(frame(), "󰓛 stop");
     await act(() => setup.mockMouse.click(stop.x + 1, stop.y));
-    check(`${name}: ■ stop stops that subagent`, fixture.events.at(-1), "stop:parent:sub-a");
+    check(`${name}: 󰓛 stop stops that subagent`, fixture.events.at(-1), "stop:parent:sub-a");
     const rex = locate(frame(), "⧉ tab");
     await act(() => setup.mockMouse.click(rex.x + 1, rex.y));
     check(`${name}: ⧉ tab opens its child in Rex`, fixture.events.at(-1), "rex:child-a");
@@ -512,9 +508,9 @@ async function checkChildView(): Promise<void> {
   const link = locate(frame, "Subagent of");
   await act(() => setup.mockMouse.click(link.x, link.y));
   check("S3 child: the link opens the parent", fixture.events.at(-1), "open:parent");
-  const stop = locate(frame, "■ stop");
+  const stop = locate(frame, "󰓛 stop");
   await act(() => setup.mockMouse.click(stop.x + 1, stop.y));
-  check("S3 child: ■ stop stops it through its parent", fixture.events.at(-1), "stop:parent:sub-a");
+  check("S3 child: 󰓛 stop stops it through its parent", fixture.events.at(-1), "stop:parent:sub-a");
   setup.renderer.destroy();
 }
 

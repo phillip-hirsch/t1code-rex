@@ -94,19 +94,17 @@ export function useSubagentControls(options: SubagentControlsOptions) {
   });
   const { threadsById, selection, activeThread } = sidebar;
 
-  const rootOf = useCallback(
-    (threadId: string) => threadsById.get(threadId)?.lineage.rootThreadId ?? threadId,
-    [threadsById],
-  );
   // The open thread's family (its own row may be an idle child the shell left out), and the
-  // families of threads whose subagents the user opened.
+  // families of threads whose subagents the user opened. Each read is keyed by the thread's
+  // own id, which any family member answers: keying by the root would change the key once
+  // the read reveals the root, drop the rows that revealed it, and flip back.
   const selectedThreadId = selection.threadId;
   const familyIds = useMemo(
     () => [
-      ...(selectedThreadId === null ? [] : [rootOf(selectedThreadId)]),
-      ...sidebar.openedSubagentParents.map(rootOf),
+      ...(selectedThreadId === null ? [] : [selectedThreadId]),
+      ...sidebar.openedSubagentParents,
     ],
-    [rootOf, selectedThreadId, sidebar.openedSubagentParents],
+    [selectedThreadId, sidebar.openedSubagentParents],
   );
   useThreadFamilyMounts(connection.mountThreadFamily, familyIds);
 
@@ -164,10 +162,9 @@ export function useSubagentControls(options: SubagentControlsOptions) {
         parentThreadId === selectedThreadId || parentThreadId === parentId
           ? connection.subagentForChildAtom(ThreadId.make(parentThreadId), childThreadId)
           : null,
-      familyReadAtom: (threadId) =>
-        connection.threadFamilyReadAtom(ThreadId.make(rootOf(threadId))),
+      familyReadAtom: (threadId) => connection.threadFamilyReadAtom(ThreadId.make(threadId)),
     }),
-    [connection, parentId, rootOf, selectedThreadId],
+    [connection, parentId, selectedThreadId],
   );
 
   /** The parent's record for a child, if its parent's subagents are loaded. */

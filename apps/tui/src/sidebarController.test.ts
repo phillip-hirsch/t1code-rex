@@ -333,6 +333,21 @@ describe("useSidebarController subagents", () => {
     expect(sidebar.hook.current.selection.threadId).toBe("done");
   });
 
+  it("shows a working parent's subagents, and a child its records say is working", () => {
+    const working = presentedThread("parent", "p", {
+      status: "running",
+      latestRunId: RunId.make("run-parent"),
+      activeRunId: RunId.make("run-parent"),
+      updatedAt: at("2026-06-20T03:00:00.000Z"),
+    });
+    const sidebar = setup({
+      projects,
+      threads: [working, done],
+      prefs: { selectedThreadId: "parent", expandedProjectIds: ["p"] },
+    });
+    expect(sidebar.hook.current.rows.map((row) => row.key)).toContain(threadRowKey("done"));
+  });
+
   it("keeps subagents out of bulk selections", () => {
     const live = childThread("live", "p", "parent", {
       status: "running",

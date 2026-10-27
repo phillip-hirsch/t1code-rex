@@ -5,6 +5,7 @@ import {
   PROVIDER_SUBAGENT_READ_ONLY_REASON,
   findSubagentForChild,
   resolveSubagentThreadContext,
+  subagentProgressLine,
   subagentStopBlocker,
   summarizeSubagent,
 } from "./subagentPresentation.ts";
@@ -43,6 +44,18 @@ describe("summarizeSubagent", () => {
     expect(after.detail).toBe("Found 3 files. Done.");
     expect(after.model).not.toBeNull();
     expect(after.completedAt).toBe("2026-06-20T10:00:04.000Z");
+  });
+
+  it("drops provider bookkeeping tags from the detail", () => {
+    const item = itemOf(subagentItem("c", { status: "completed" }));
+    const record = subagentRecord("sub-c", {
+      status: "completed",
+      result: "<tools-used-before-summary>Bash</tools-used-before-summary> /repo",
+    });
+    expect(summarizeSubagent({ item, record }).detail).toBe("/repo");
+    expect(subagentProgressLine({ status: "running", progress: "Reading src", result: "x" })).toBe(
+      "Reading src",
+    );
   });
 
   it("names an untitled subagent by its prompt's first line", () => {

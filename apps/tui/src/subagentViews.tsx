@@ -144,7 +144,7 @@ export const SubagentTimelineRow = memo(function SubagentTimelineRow(props: {
         <SubagentStatusText summary={summary} color={color} />
         {canStop ? (
           <ActionLabel
-            label="■ stop"
+            label="󰓛 stop"
             color={palette.composerStop}
             onPress={() => actions.onStop(props.threadId, item.subagentId)}
           />
@@ -205,7 +205,7 @@ export function SubagentParentLine(props: {
       )}
       {canStop ? (
         <ActionLabel
-          label="■ stop"
+          label="󰓛 stop"
           color={palette.composerStop}
           onPress={() => actions.onStop(context.parentThreadId, record.id)}
         />
