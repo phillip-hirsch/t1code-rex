@@ -103,3 +103,40 @@ export function resolvePrependAnchor(
   if (anchor === undefined || nextKeys[0] === anchor) return null;
   return nextKeys.includes(anchor) ? anchor : null;
 }
+
+/** A row's top within the scrolled content, from the last layout; null when it isn't there. */
+export type MeasureRowTop = (key: string) => number | null;
+
+/**
+ * Holds the reading position when older rows arrive above it. A page and a streaming delta
+ * can both commit before OpenTUI lays out, so the anchor stays pending until a layout pass
+ * consumes it, and later commits don't replace it (their rows have no layout yet).
+ */
+export class PrependAnchorTracker {
+  private previousKeys: ReadonlyArray<string> = [];
+  private pending: { readonly key: string; readonly top: number } | null = null;
+
+  /** Call after React commits the rows, before OpenTUI's next layout pass. */
+  commit(keys: ReadonlyArray<string>, measure: MeasureRowTop, nearBottom: boolean): void {
+    const anchorKey = resolvePrependAnchor(this.previousKeys, keys);
+    this.previousKeys = keys;
+    if (this.pending !== null) {
+      if (!keys.includes(this.pending.key)) this.pending = null;
+      return;
+    }
+    // At the bottom, the scrollbox's own sticky scroll keeps the latest rows in view.
+    if (anchorKey === null || nearBottom) return;
+    const top = measure(anchorKey);
+    if (top !== null) this.pending = { key: anchorKey, top };
+  }
+
+  /** Call once layout has run; the scroll position to apply, or null to leave it. */
+  consume(measure: MeasureRowTop, scrollTop: number): number | null {
+    const anchor = this.pending;
+    if (anchor === null) return null;
+    this.pending = null;
+    const top = measure(anchor.key);
+    if (top === null || top === anchor.top) return null;
+    return anchoredScrollTop(scrollTop, anchor.top, top);
+  }
+}

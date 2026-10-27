@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   anchoredScrollTop,
   isNearBottom,
+  PrependAnchorTracker,
   resolvePrependAnchor,
   resolveScrollKey,
   shouldLoadEarlier,
@@ -80,5 +81,57 @@ describe("prepend anchoring", () => {
   it("moves the scroll position by how far the anchor moved", () => {
     expect(anchoredScrollTop(0, 2, 42)).toBe(40);
     expect(anchoredScrollTop(15, 30, 30)).toBe(15);
+  });
+});
+
+describe("PrependAnchorTracker", () => {
+  // Row tops as OpenTUI last laid them out.
+  function layout(tops: Record<string, number>) {
+    return (key: string) => tops[key] ?? null;
+  }
+
+  it("holds the reading position when a page lands above it", () => {
+    const tracker = new PrependAnchorTracker();
+    tracker.commit(["c", "d"], layout({ c: 2, d: 12 }), false);
+    tracker.commit(["a", "b", "c", "d"], layout({ c: 2, d: 12 }), false);
+    expect(tracker.consume(layout({ a: 0, b: 5, c: 12, d: 22 }), 5)).toBe(15);
+    // Consumed: the next layout leaves the position alone.
+    expect(tracker.consume(layout({ a: 0, b: 5, c: 12, d: 22 }), 15)).toBeNull();
+  });
+
+  it("keeps the anchor through a streaming commit before layout", () => {
+    const tracker = new PrependAnchorTracker();
+    const before = layout({ c: 2, d: 12 });
+    tracker.commit(["c", "d"], before, false);
+    tracker.commit(["a", "b", "c", "d"], before, false);
+    // A delta to the last row commits before OpenTUI lays out the page.
+    tracker.commit(["a", "b", "c", "d"], before, false);
+    expect(tracker.consume(layout({ a: 0, b: 5, c: 12, d: 22 }), 5)).toBe(15);
+  });
+
+  it("measures two pages before one layout from the first anchor", () => {
+    const tracker = new PrependAnchorTracker();
+    const before = layout({ e: 2 });
+    tracker.commit(["e"], before, false);
+    tracker.commit(["c", "d", "e"], before, false);
+    tracker.commit(["a", "b", "c", "d", "e"], before, false);
+    expect(tracker.consume(layout({ a: 0, c: 10, e: 22 }), 5)).toBe(25);
+  });
+
+  it("leaves the bottom to sticky scroll and ignores appends", () => {
+    const tracker = new PrependAnchorTracker();
+    tracker.commit(["c"], layout({ c: 2 }), false);
+    tracker.commit(["a", "c"], layout({ c: 2 }), true);
+    expect(tracker.consume(layout({ a: 0, c: 12 }), 5)).toBeNull();
+    tracker.commit(["a", "c", "d"], layout({ a: 0, c: 12 }), false);
+    expect(tracker.consume(layout({ a: 0, c: 12, d: 20 }), 5)).toBeNull();
+  });
+
+  it("drops the anchor when its row goes away", () => {
+    const tracker = new PrependAnchorTracker();
+    tracker.commit(["c"], layout({ c: 2 }), false);
+    tracker.commit(["a", "c"], layout({ c: 2 }), false);
+    tracker.commit(["x"], layout({}), false);
+    expect(tracker.consume(layout({ x: 0 }), 5)).toBeNull();
   });
 });

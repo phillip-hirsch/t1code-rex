@@ -24,13 +24,12 @@ import { formatRelativeTime } from "./relativeTime.ts";
 import { threadStatusColor, type ThreadStatusPill } from "./sidebarStatus.ts";
 import { formatElapsed, resolveRunStatusLine, type RunStatusLine } from "./threadRunStatus.ts";
 import {
-  anchoredScrollTop,
   isNearBottom,
-  resolvePrependAnchor,
   resolveScrollKey,
   shouldLoadEarlier,
   type ScrollMetrics,
 } from "./threadScroll.ts";
+import { timelineRowId, useTranscriptScrollbox } from "./threadScrollbox.ts";
 import {
   buildTimelineRows,
   rowHasGapAfter,
@@ -47,10 +46,6 @@ const WORKING_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", 
 
 function workingFrame(tick: number): string {
   return WORKING_FRAMES[tick % WORKING_FRAMES.length] ?? "⠋";
-}
-
-export function timelineRowId(key: string): string {
-  return `timeline-row:${key}`;
 }
 
 export interface ThreadViewHandle {
@@ -85,11 +80,6 @@ function readMetrics(scrollbox: ScrollBoxRenderable): ScrollMetrics {
     scrollHeight: scrollbox.scrollHeight,
     viewportHeight: scrollbox.viewport.height,
   };
-}
-
-function contentTop(scrollbox: ScrollBoxRenderable, key: string): number | null {
-  const node = scrollbox.content.findDescendantById(timelineRowId(key));
-  return node ? node.getLayoutNode().getComputedLayout().top : null;
 }
 
 /**
@@ -149,43 +139,10 @@ export function ThreadView(props: ThreadViewProps) {
     [syncScroll],
   );
 
-  // Holding the reading position when older rows arrive above it. The anchor row's yoga
-  // top is read before layout here, and again from inside the next layout pass, where
-  // OpenTUI has just pinned the scroll position for the taller content.
-  const pendingAnchor = useRef<{ key: string; top: number } | null>(null);
-  const previousKeys = useRef<ReadonlyArray<string>>([]);
-  useLayoutEffect(() => {
-    const keys = rows.map((row) => row.key);
-    const anchorKey = resolvePrependAnchor(previousKeys.current, keys);
-    previousKeys.current = keys;
-    const scrollbox = scrollRef.current;
-    pendingAnchor.current = null;
-    if (anchorKey !== null && scrollbox && !isNearBottom(readMetrics(scrollbox))) {
-      const top = contentTop(scrollbox, anchorKey);
-      if (top !== null) pendingAnchor.current = { key: anchorKey, top };
-    }
-    scheduleSync(false);
-  }, [rows, scheduleSync]);
-
-  useLayoutEffect(() => {
-    const scrollbox = scrollRef.current;
-    if (!scrollbox) return;
-    const content = scrollbox.content;
-    const original = content.onSizeChange;
-    content.onSizeChange = function onContentSizeChange() {
-      original?.call(this);
-      const anchor = pendingAnchor.current;
-      if (anchor === null) return;
-      pendingAnchor.current = null;
-      const top = contentTop(scrollbox, anchor.key);
-      if (top !== null && top !== anchor.top) {
-        scrollbox.scrollTop = anchoredScrollTop(scrollbox.scrollTop, anchor.top, top);
-      }
-    };
-    return () => {
-      content.onSizeChange = original;
-    };
-  }, []);
+  // App-owned keys, and holding the reading position when older rows arrive above it.
+  const rowKeys = useMemo(() => rows.map((row) => row.key), [rows]);
+  const syncAfterRows = useCallback(() => scheduleSync(false), [scheduleSync]);
+  useTranscriptScrollbox(scrollRef, rowKeys, syncAfterRows);
 
   // A finished page can leave the view near the top, which asks for the next one.
   useLayoutEffect(() => {
