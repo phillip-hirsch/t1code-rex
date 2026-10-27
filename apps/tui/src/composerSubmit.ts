@@ -29,15 +29,6 @@ const MIME_TYPE_BY_IMAGE_EXTENSION: Record<string, string> = {
   ".webp": "image/webp",
 };
 
-const INLINE_IMAGE_PATH_PATTERN =
-  /(^|[\s])(?<path>(?:~|\/)\S+\.(?:avif|bmp|gif|heic|heif|jpe?g|png|svg|tiff|webp))(?=$|[\s])/gim;
-
-type InlineImagePathCandidate = {
-  rawPath: string;
-  start: number;
-  end: number;
-};
-
 export type ResolvedComposerImageAttachment = {
   type: "image";
   name: string;
@@ -46,64 +37,6 @@ export type ResolvedComposerImageAttachment = {
   dataUrl: string;
   localPath?: string;
 };
-
-export type ResolvedComposerSubmission = {
-  promptText: string;
-  attachments: ResolvedComposerImageAttachment[];
-};
-
-function scanInlineImagePathCandidates(input: string): InlineImagePathCandidate[] {
-  const candidates: InlineImagePathCandidate[] = [];
-  for (const match of input.matchAll(INLINE_IMAGE_PATH_PATTERN)) {
-    const rawPath = match.groups?.path;
-    const matchIndex = match.index;
-    if (!rawPath || matchIndex === undefined) {
-      continue;
-    }
-    const fullMatch = match[0] ?? rawPath;
-    const rawPathOffset = fullMatch.lastIndexOf(rawPath);
-    if (rawPathOffset < 0) {
-      continue;
-    }
-    const start = matchIndex + rawPathOffset;
-    candidates.push({
-      rawPath,
-      start,
-      end: start + rawPath.length,
-    });
-  }
-  return candidates;
-}
-
-function collapsePromptWhitespace(input: string): string {
-  return input
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n[ \t]+/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function removeResolvedImagePaths(
-  input: string,
-  resolvedCandidates: ReadonlyArray<InlineImagePathCandidate>,
-): string {
-  if (resolvedCandidates.length === 0) {
-    return collapsePromptWhitespace(input);
-  }
-  let cursor = 0;
-  let output = "";
-  for (const candidate of resolvedCandidates.toSorted((left, right) => left.start - right.start)) {
-    if (candidate.start < cursor) {
-      continue;
-    }
-    output += input.slice(cursor, candidate.start);
-    output += " ";
-    cursor = candidate.end;
-  }
-  output += input.slice(cursor);
-  return collapsePromptWhitespace(output);
-}
 
 function expandHomePath(inputPath: string, homeDir: string): string {
   if (inputPath === "~") {
@@ -154,44 +87,18 @@ export async function resolveImageAttachmentFromPath(input: {
   };
 }
 
-export async function resolveComposerSubmission(input: {
-  text: string;
-  homeDir: string;
-}): Promise<ResolvedComposerSubmission> {
-  const candidates = scanInlineImagePathCandidates(input.text);
-  if (candidates.length === 0) {
-    return {
-      promptText: collapsePromptWhitespace(input.text),
-      attachments: [],
-    };
-  }
-
-  const attachments: ResolvedComposerImageAttachment[] = [];
-  const resolvedCandidates: InlineImagePathCandidate[] = [];
-  const seenPaths = new Set<string>();
-
-  for (const candidate of candidates) {
-    const expandedPath = NodePath.resolve(expandHomePath(candidate.rawPath, input.homeDir));
-    if (seenPaths.has(expandedPath)) {
-      resolvedCandidates.push(candidate);
-      continue;
-    }
-
-    const attachment = await resolveImageAttachmentFromPath({
-      filePath: expandedPath,
-      homeDir: input.homeDir,
-    });
-    if (!attachment) {
-      continue;
-    }
-
-    attachments.push(attachment);
-    resolvedCandidates.push(candidate);
-    seenPaths.add(expandedPath);
-  }
-
-  return {
-    promptText: removeResolvedImagePaths(input.text, resolvedCandidates),
-    attachments,
-  };
+/**
+ * The image path in a paste that is only that path, as terminals paste a dropped file
+ * (quoted, or with escaped spaces). Null for any other text.
+ */
+export function pastedImagePath(text: string): string | null {
+  const trimmed = text
+    .trim()
+    .replace(/^'(.*)'$/u, "$1")
+    .replace(/\\ /gu, " ");
+  if (trimmed.includes("\n")) return null;
+  const extension = NodePath.extname(trimmed).toLowerCase();
+  return /^(?:~|\/)/u.test(trimmed) && SUPPORTED_INLINE_IMAGE_EXTENSIONS.has(extension)
+    ? trimmed
+    : null;
 }

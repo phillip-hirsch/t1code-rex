@@ -7,13 +7,23 @@ import {
   ShellSnapshotLoader,
   createEnvironmentShellAtoms,
 } from "@t3tools/client-runtime/state/shell";
-import { createRuntimeCommand } from "@t3tools/client-runtime/state/runtime";
+import {
+  createRuntimeCommand,
+  runAtomCommand,
+  type AtomCommand,
+  type AtomCommandResult,
+} from "@t3tools/client-runtime/state/runtime";
 import {
   BoundedThreadSnapshotLoader,
   ThreadHistoryController,
   createEnvironmentThreadDetailAtoms,
   createEnvironmentThreadShellAtoms,
   createEnvironmentThreadStateAtoms,
+  createThreadEnvironmentAtoms,
+  type InterruptThreadTurnInput,
+  type SetThreadInteractionModeInput,
+  type SetThreadRuntimeModeInput,
+  type StartThreadTurnInput,
 } from "@t3tools/client-runtime/state/threads";
 import type {
   EnvironmentId,
@@ -21,11 +31,13 @@ import type {
   OrchestrationV2ShellSnapshot,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
-import { Atom, AtomRegistry } from "effect/reactivity";
+import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
+import type { ComposerCommandResult } from "../composerSender.ts";
 import type { TuiServerSession } from "../serverLauncher.ts";
 import * as Platform from "./platform.ts";
 import * as Runtime from "./runtime.ts";
@@ -37,6 +49,15 @@ export interface TuiConnectionOptions {
 }
 
 const NO_PROJECTS: ReadonlyArray<OrchestrationProjectShell> = [];
+
+function toCommandResult<A, E>(result: AtomCommandResult<A, E>): ComposerCommandResult {
+  if (AsyncResult.isSuccess(result)) return { ok: true };
+  return {
+    ok: false,
+    error: Cause.squash(result.cause),
+    interrupted: Cause.hasInterruptsOnly(result.cause),
+  };
+}
 
 /**
  * One atom runtime per process, wired to the single server this TUI reached.
@@ -79,6 +100,15 @@ export function createTuiConnection(options: TuiConnectionOptions) {
         Effect.flatMap((controller) => controller.loadEarlier(environmentId, threadId)),
       ),
   });
+  // Upstream's thread commands, serialized per thread like web and mobile.
+  const threadCommands = createThreadEnvironmentAtoms(runtime, snapshotAtom);
+  const runThreadCommand = <Input, A, E>(
+    command: AtomCommand<{ environmentId: EnvironmentId; input: Input }, A, E>,
+    input: Input,
+  ) =>
+    runAtomCommand(registry, command, { environmentId, input }, { reportFailure: false }).then(
+      toCommandResult,
+    );
   const serverConfigsAtom = createEnvironmentServerConfigsAtom({
     catalogValueAtom: catalog.catalogValueAtom,
     serverConfigValueAtom: server.configValueAtom,
@@ -122,6 +152,13 @@ export function createTuiConnection(options: TuiConnectionOptions) {
       };
     },
     loadEarlierHistory,
+    startTurn: (input: StartThreadTurnInput) => runThreadCommand(threadCommands.startTurn, input),
+    interruptTurn: (input: InterruptThreadTurnInput) =>
+      runThreadCommand(threadCommands.interruptTurn, input),
+    setRuntimeMode: (input: SetThreadRuntimeModeInput) =>
+      runThreadCommand(threadCommands.setRuntimeMode, input),
+    setInteractionMode: (input: SetThreadInteractionModeInput) =>
+      runThreadCommand(threadCommands.setInteractionMode, input),
     retryNow: catalog.retryNow,
     dispose: () => {
       registry.dispose();

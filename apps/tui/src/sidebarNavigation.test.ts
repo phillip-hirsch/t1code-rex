@@ -74,6 +74,28 @@ describe("resolveInitialSelection", () => {
     });
   });
 
+  it("reopens a saved new-thread draft while its project exists", () => {
+    const isNewThreadDraft = (threadId: string) => threadId === "draft-1";
+    expect(
+      resolveInitialSelection({
+        ...base,
+        savedProjectId: "beta",
+        savedThreadId: "draft-1",
+        cwd: undefined,
+        isNewThreadDraft,
+      }),
+    ).toEqual({ projectId: "beta", threadId: "draft-1" });
+    expect(
+      resolveInitialSelection({
+        ...base,
+        savedProjectId: "removed",
+        savedThreadId: "draft-1",
+        cwd: undefined,
+        isNewThreadDraft,
+      }).threadId,
+    ).not.toBe("draft-1");
+  });
+
   it("falls back to the saved project's latest thread, then the working directory", () => {
     expect(
       resolveInitialSelection({

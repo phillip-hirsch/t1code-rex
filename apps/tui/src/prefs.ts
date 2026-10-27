@@ -13,6 +13,7 @@ import type { TuiPaths } from "./config.ts";
 import type { TuiThemeId } from "./theme.ts";
 
 export interface PersistedComposerImageAttachment {
+  readonly id?: string;
   readonly type: "image";
   readonly name: string;
   readonly mimeType: string;
@@ -37,9 +38,6 @@ export interface PersistedComposerDraft {
 export interface PersistedDraftThreadState {
   readonly id: string;
   readonly projectId: string;
-  readonly branch?: string | null;
-  readonly worktreePath?: string | null;
-  readonly envMode?: "local" | "worktree";
 }
 
 export interface TuiPrefs {

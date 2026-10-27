@@ -4,7 +4,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
-import { resolveComposerSubmission, resolveImageAttachmentFromPath } from "./composerSubmit.ts";
+import { pastedImagePath, resolveImageAttachmentFromPath } from "./composerSubmit.ts";
 
 const tempRoots: string[] = [];
 
@@ -43,25 +43,18 @@ describe("resolveImageAttachmentFromPath", () => {
   });
 });
 
-describe("resolveComposerSubmission", () => {
-  it("keeps local preview paths for image attachments resolved from pasted file paths", async () => {
-    const { root, filePath } = await makeTempImage("clipboard-2026-03-25-120233-E549D4EE.png");
+describe("pastedImagePath", () => {
+  it("reads a dropped file's path, quoted or with escaped spaces", () => {
+    expect(pastedImagePath("/tmp/shot.png")).toBe("/tmp/shot.png");
+    expect(pastedImagePath("'/tmp/my shot.PNG'\n")).toBe("/tmp/my shot.PNG");
+    expect(pastedImagePath("/tmp/my\\ shot.jpg")).toBe("/tmp/my shot.jpg");
+    expect(pastedImagePath("~/Desktop/a.webp")).toBe("~/Desktop/a.webp");
+  });
 
-    await expect(
-      resolveComposerSubmission({
-        text: `${filePath}\nplease inspect this`,
-        homeDir: root,
-      }),
-    ).resolves.toMatchObject({
-      promptText: "please inspect this",
-      attachments: [
-        {
-          type: "image",
-          name: "clipboard-2026-03-25-120233-E549D4EE.png",
-          mimeType: "image/png",
-          localPath: filePath,
-        },
-      ],
-    });
+  it("leaves other pastes alone", () => {
+    expect(pastedImagePath("look at /tmp/shot.png")).toBeNull();
+    expect(pastedImagePath("/tmp/notes.txt")).toBeNull();
+    expect(pastedImagePath("/tmp/a.png\n/tmp/b.png")).toBeNull();
+    expect(pastedImagePath("relative/a.png")).toBeNull();
   });
 });

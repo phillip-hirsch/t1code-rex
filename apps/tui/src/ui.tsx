@@ -1,4 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off -- The UI deletes launch files it wrote itself.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- The UI deletes launch files it wrote itself and runs on Bun outside the Effect runtime.
+import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import type { CliRenderer, KeyEvent } from "@opentui/core";
@@ -8,16 +9,49 @@ import {
   connectionProjectionPhase,
   type SupervisorConnectionState,
 } from "@t3tools/client-runtime/connection";
-import type { ServerConfig, ServerProvider, ThreadId } from "@t3tools/contracts";
+import { threadRuntimeIsActive } from "@t3tools/client-runtime/state/models";
+import {
+  CommandId,
+  ProjectId,
+  ThreadId,
+  type ProviderInteractionMode,
+  type RuntimeMode,
+  type ServerConfig,
+  type ServerProvider,
+} from "@t3tools/contracts";
+import { createModelSelection } from "@t3tools/shared/model";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import packageJson from "../package.json" with { type: "json" };
 import { copyTextToClipboard } from "./clipboardText.ts";
+import { Composer, type ComposerHandle, type ProviderBadge } from "./composer.tsx";
+import { describeSendFailure, type ComposerTarget } from "./composerSend.ts";
+import { createComposerSender } from "./composerSender.ts";
+import {
+  applySettingsPatch,
+  interactionModeLabel,
+  nextRuntimeMode,
+  resolveNewThreadSettings,
+  runtimeModeLabel,
+  supportedRuntimeModes,
+  type ComposerSettings,
+  type ComposerSettingsPatch,
+} from "./composerSettings.ts";
+import { createComposerStore } from "./composerStore.ts";
 import type { TuiPaths } from "./config.ts";
 import type { TuiConnection } from "./connection/tuiConnection.ts";
+import { resolveTuiShortcutCommand } from "./keybindings.ts";
 import type { T1Logger } from "./log.ts";
 import type { PrefsWriter, TuiPrefs } from "./prefs.ts";
 import {
@@ -38,6 +72,7 @@ import {
   type ThreadContextMenuItem,
 } from "./sidebarContextMenu.ts";
 import { useSidebarController } from "./sidebarController.ts";
+import type { SidebarThread } from "./sidebarModel.ts";
 import type { TuiTheme } from "./theme.ts";
 import {
   buildThreadWindowCommand,
@@ -48,6 +83,15 @@ import {
 import { DEFAULT_THREAD_TITLE, truncateTitle } from "./threadTitle.ts";
 import { ThreadView, type ThreadViewHandle } from "./threadView.tsx";
 import { useMarkdownStyles } from "./messageMarkdownView.tsx";
+import {
+  buildModelPickerProviders,
+  modelSelectionLabel,
+  openModelPicker,
+  reduceModelPickerKey,
+  type ModelPickerState,
+} from "./modelPicker.ts";
+import { ModelPickerView } from "./modelPickerView.tsx";
+import { NewThreadView } from "./newThreadView.tsx";
 
 const APP_VERSION = packageJson.version ?? "0.0.0";
 const HEADER_THREAD_TITLE_MAX_LENGTH = 44;
@@ -88,7 +132,15 @@ interface ContextMenuState {
   readonly index: number;
 }
 
-type FocusArea = "sidebar" | "thread";
+type FocusArea = "sidebar" | "thread" | "composer";
+
+function threadSettings(thread: SidebarThread): ComposerSettings {
+  return {
+    modelSelection: thread.modelSelection,
+    runtimeMode: thread.runtimeMode,
+    interactionMode: thread.interactionMode,
+  };
+}
 
 type ServerConfigEnvironment = ServerConfig["environment"];
 
@@ -256,14 +308,52 @@ function Shell(props: AppProps) {
 
   const markdownStyles = useMarkdownStyles(theme);
   const threadViewRef = useRef<ThreadViewHandle | null>(null);
+  const composerRef = useRef<ComposerHandle | null>(null);
+  const [modelPicker, setModelPicker] = useState<ModelPickerState | null>(null);
+  const [stopRequestedRunId, setStopRequestedRunId] = useState<string | null>(null);
+  // Drafts are saved only by the window that owns prefs.json.
+  const [composerStore] = useState(() => {
+    const writer = props.prefsWriter;
+    return createComposerStore({
+      initialPrefs: props.initialPrefs,
+      persist: writer === null ? null : (patch) => writer.write(patch),
+    });
+  });
+  useSyncExternalStore(composerStore.subscribe, composerStore.version);
   const sidebar = useSidebarController({
     connection,
     initialPrefs: props.initialPrefs,
     prefsWriter: props.prefsWriter,
+    isNewThreadDraft: (threadId) => composerStore.findNewThreadDraft(threadId) !== undefined,
     launch: threadWindowLaunch ?? null,
     cwd: props.cwd,
   });
   const { activeThread, activeProject, selection } = sidebar;
+  const settingsOfThread = useEventCallback((threadId: string) => {
+    const thread = sidebar.threadsById.get(threadId);
+    return thread ? threadSettings(thread) : null;
+  });
+  const [sender] = useState(() =>
+    createComposerSender({
+      store: composerStore,
+      startTurn: connection.startTurn,
+      setRuntimeMode: connection.setRuntimeMode,
+      setInteractionMode: connection.setInteractionMode,
+      threadSettings: settingsOfThread,
+      schedule: (run, delayMs) => {
+        const timer = setTimeout(run, delayMs);
+        return () => clearTimeout(timer);
+      },
+      onFailure: (send, error, action) =>
+        logger.log("composer.send.failed", {
+          threadId: send.target.threadId,
+          commandId: send.commandId,
+          action,
+          error: describeSendFailure(error),
+        }),
+    }),
+  );
+  useEffect(() => () => sender.dispose(), [sender]);
 
   const connectionState = Option.getOrNull(AsyncResult.value(connectionResult));
   const connectionView = describeConnection(connectionState, connection.session.mode);
@@ -286,9 +376,21 @@ function Shell(props: AppProps) {
   // Rex tabs open from the main window only; a thread tab never opens more tabs.
   const rexTabs = rex !== null && !threadWindowLaunch;
 
+  // Unsaved draft edits go to disk before the app exits.
+  const requestExit = useCallback(() => {
+    composerStore.flush();
+    onRequestExit?.();
+  }, [composerStore, onRequestExit]);
+
   useEffect(() => {
-    if ((interruptRequestToken ?? 0) > 0) onRequestExit?.();
-  }, [interruptRequestToken, onRequestExit]);
+    if ((interruptRequestToken ?? 0) > 0) requestExit();
+  }, [interruptRequestToken, requestExit]);
+
+  // Sends that lost the connection go out again, with the same ids, once it's back.
+  const connected = connectionView.label === "Connected";
+  useEffect(() => {
+    if (connected) void sender.retryWaiting();
+  }, [connected, sender]);
 
   const retryNow = useCallback(() => {
     void runAtomCommand(connection.registry, connection.retryNow, connection.environmentId);
@@ -409,10 +511,164 @@ function Shell(props: AppProps) {
     [contextMenuItems.length, renderer],
   );
 
+  // The composer's target: the selected thread, or a new-thread draft that isn't one yet.
+  const selectedThreadId = selection.threadId;
+  const newThreadDraft =
+    selectedThreadId === null || sidebar.threadsById.has(selectedThreadId)
+      ? undefined
+      : composerStore.findNewThreadDraft(selectedThreadId);
+  const composerTarget: ComposerTarget | null =
+    selectedThreadId === null
+      ? null
+      : newThreadDraft
+        ? { kind: "draft", threadId: newThreadDraft.threadId, projectId: newThreadDraft.projectId }
+        : {
+            kind: "thread",
+            threadId: ThreadId.make(selectedThreadId),
+            projectId: ProjectId.make(activeThread?.projectId ?? selection.projectId ?? ""),
+          };
+  const pickerProviders = useMemo(() => buildModelPickerProviders(providers), [providers]);
+  const baseSettings = activeThread
+    ? threadSettings(activeThread)
+    : resolveNewThreadSettings({
+        defaults: composerStore.getDefaults(),
+        projectDefault: activeProject?.defaultModelSelection ?? null,
+        providers,
+      });
+  const effectiveSettings =
+    baseSettings === null || composerTarget === null
+      ? null
+      : applySettingsPatch(baseSettings, composerStore.getPatch(composerTarget.threadId));
+  const running = threadRuntimeIsActive(activeThread?.runtime);
+  const activeRunId = activeThread?.runtime?.activeRunId ?? null;
+  const stopRequested = running && stopRequestedRunId === (activeRunId ?? "unknown");
+
+  const openNewThread = (projectId: string | null) => {
+    const target = projectId ?? sidebar.groups[0]?.project.id ?? null;
+    if (target === null) {
+      setStatus("Add a project first");
+      return;
+    }
+    const draft = composerStore.openNewThreadDraft(ProjectId.make(target), () =>
+      ThreadId.make(NodeCrypto.randomUUID()),
+    );
+    sidebar.selectThread(target, draft.threadId);
+    setContextMenu(null);
+    setPaletteOpen(false);
+    setModelPicker(null);
+    setFocusArea("composer");
+    setStatus("New thread");
+  };
+
+  const pickSettings = (patch: ComposerSettingsPatch): ComposerSettings | null => {
+    if (composerTarget === null || baseSettings === null) return null;
+    return composerStore.pickSettings(
+      composerTarget.threadId,
+      composerTarget.kind === "draft" ? "draft" : "thread",
+      baseSettings,
+      patch,
+    );
+  };
+  const providerFor = (settings: ComposerSettings) =>
+    providers.find((provider) => provider.instanceId === settings.modelSelection.instanceId);
+  const nextRunNote = composerTarget?.kind === "thread" ? " for the next message" : "";
+
+  const pickModel = (instanceId: ServerProvider["instanceId"], model: string) => {
+    setModelPicker(null);
+    setFocusArea("composer");
+    if (baseSettings === null) return;
+    // Re-picking the thread's own model keeps its options (effort and the like).
+    const sameAsThread =
+      baseSettings.modelSelection.instanceId === instanceId &&
+      baseSettings.modelSelection.model === model;
+    const modelSelection = sameAsThread
+      ? baseSettings.modelSelection
+      : createModelSelection(instanceId, model);
+    const supported = supportedRuntimeModes(
+      providers.find((provider) => provider.instanceId === instanceId),
+    );
+    const runtimeMode = effectiveSettings?.runtimeMode;
+    const picked = pickSettings({
+      modelSelection,
+      ...(runtimeMode !== undefined && supported.length > 0 && !supported.includes(runtimeMode)
+        ? { runtimeMode: supported[0] }
+        : {}),
+    });
+    if (picked) {
+      setStatus(
+        `Model: ${modelSelectionLabel(pickerProviders, picked.modelSelection)}${nextRunNote}`,
+      );
+    }
+  };
+
+  const setRuntimeMode = (mode: RuntimeMode | "next") => {
+    if (effectiveSettings === null) return;
+    const next =
+      mode === "next"
+        ? nextRuntimeMode(
+            effectiveSettings.runtimeMode,
+            supportedRuntimeModes(providerFor(effectiveSettings)),
+          )
+        : mode;
+    if (pickSettings({ runtimeMode: next })) {
+      setStatus(`Runtime: ${runtimeModeLabel(next)}${nextRunNote}`);
+    }
+  };
+
+  const setInteractionMode = (mode: ProviderInteractionMode) => {
+    if (pickSettings({ interactionMode: mode })) {
+      setStatus(`Mode: ${interactionModeLabel(mode)}${nextRunNote}`);
+    }
+  };
+
+  const toggleModelPicker = () => {
+    if (modelPicker !== null) {
+      setModelPicker(null);
+      return;
+    }
+    if (composerTarget === null) {
+      setStatus("Select a thread first");
+      return;
+    }
+    setContextMenu(null);
+    setPaletteOpen(false);
+    setModelPicker(openModelPicker(pickerProviders, effectiveSettings?.modelSelection ?? null));
+  };
+
+  const stopRun = () => {
+    if (!activeThread || !running) return;
+    const runKey = activeRunId ?? "unknown";
+    setStopRequestedRunId(runKey);
+    setStatus("Stopping");
+    void connection
+      .interruptTurn({
+        commandId: CommandId.make(NodeCrypto.randomUUID()),
+        threadId: activeThread.id,
+        ...(activeRunId === null ? {} : { runId: activeRunId }),
+      })
+      .then((result) => {
+        if (result.ok) return;
+        setStopRequestedRunId(null);
+        setStatus(`Stop failed: ${describeSendFailure(result.error)}`);
+      });
+  };
+
+  const providerBadge = (settings: ComposerSettings): ProviderBadge => {
+    const provider = providerFor(settings);
+    if (provider?.driver === "claudeAgent") return { icon: "✱", color: palette.claude };
+    return { icon: "󰚩", color: provider?.accentColor ?? palette.muted };
+  };
+  const modelLabel = (settings: ComposerSettings) =>
+    modelSelectionLabel(pickerProviders, settings.modelSelection);
+
   // Stable, so the memoized sidebar rows don't re-render when the shell does.
   const pressSidebarRow = useEventCallback((press: SidebarPress) => {
-    setFocusArea("sidebar");
     setContextMenu(null);
+    if (press.newThread) {
+      openNewThread(press.row.projectId);
+      return;
+    }
+    setFocusArea("sidebar");
     if (!press.secondary) {
       sidebar.pressRow(press.row);
       return;
@@ -424,39 +680,46 @@ function Shell(props: AppProps) {
     }
   });
 
-  const actions = useMemo<PaletteAction[]>(() => {
-    const items: PaletteAction[] = [];
-    if (rexTabs) {
-      items.push({
-        id: "rex:thread",
-        label: "Open thread in Rex tab",
-        description: activeThread?.title ?? "Select a thread first",
-        disabled: activeThread === null,
-        run: () => openThreadInRexTab(selection.threadId),
-      });
-    }
-    items.push({
-      id: "connection:retry",
-      label: "Reconnect now",
-      description: connectionView.detail ?? connectionView.label,
-      run: retryNow,
+  const newThreadProjectId =
+    sidebarFocused && sidebar.cursorRow !== null
+      ? sidebar.cursorRow.projectId
+      : selection.projectId;
+
+  const actions: PaletteAction[] = [];
+  actions.push({
+    id: "thread:new",
+    label: "New thread",
+    description: "⌘N",
+    run: () => openNewThread(newThreadProjectId),
+  });
+  actions.push({
+    id: "model:pick",
+    label: "Pick model",
+    description: "⌘⇧M",
+    disabled: composerTarget === null,
+    run: toggleModelPicker,
+  });
+  if (rexTabs) {
+    actions.push({
+      id: "rex:thread",
+      label: "Open thread in Rex tab",
+      description: activeThread?.title ?? "Select a thread first",
+      disabled: activeThread === null,
+      run: () => openThreadInRexTab(selection.threadId),
     });
-    items.push({
-      id: "app:quit",
-      label: "Quit tr3x",
-      description: "Ctrl+C",
-      run: () => onRequestExit?.(),
-    });
-    return items;
-  }, [
-    activeThread,
-    connectionView,
-    onRequestExit,
-    openThreadInRexTab,
-    retryNow,
-    rexTabs,
-    selection.threadId,
-  ]);
+  }
+  actions.push({
+    id: "connection:retry",
+    label: "Reconnect now",
+    description: connectionView.detail ?? connectionView.label,
+    run: retryNow,
+  });
+  actions.push({
+    id: "app:quit",
+    label: "Quit tr3x",
+    description: "Ctrl+C",
+    run: requestExit,
+  });
 
   const runAction = useCallback(
     (action: PaletteAction) => {
@@ -486,19 +749,56 @@ function Shell(props: AppProps) {
     wasDocked.current = layout.showSidebar;
   }, [layout.showSidebar]);
 
-  useKeyboard((key) => {
-    if (isPaletteShortcut(key)) {
+  const composerFocused = focusArea === "composer" && composerTarget !== null;
+  const cycleFocus = () => {
+    const order: FocusArea[] = [
+      ...(sidebarVisible ? (["sidebar"] as const) : []),
+      ...(composerTarget !== null ? (["composer"] as const) : []),
+      "thread",
+    ];
+    setFocusArea((area) => order[(order.indexOf(area) + 1) % order.length] ?? "thread");
+  };
+
+  /** Every key comes here before the focused textarea; true means it was used up. */
+  const handleKey = (key: KeyEvent): boolean => {
+    if (modelPicker !== null) {
+      if (key.ctrl && key.name === "c") {
+        setModelPicker(null);
+        return true;
+      }
+      const outcome = reduceModelPickerKey(pickerProviders, modelPicker, key);
+      if (outcome?.type === "close") setModelPicker(null);
+      else if (outcome?.type === "state") setModelPicker(outcome.state);
+      else if (outcome?.type === "select") pickModel(outcome.instanceId, outcome.model);
+      return true;
+    }
+    const shortcut = resolveTuiShortcutCommand(
+      {
+        keyName: key.name,
+        sequence: key.sequence,
+        ctrl: key.ctrl,
+        meta: key.meta,
+        super: key.super ?? false,
+        shift: key.shift,
+      },
+      serverConfig?.keybindings ?? [],
+    );
+    if (isPaletteShortcut(key) || shortcut === "commandPalette.toggle") {
       setContextMenu(null);
       setPaletteIndex(0);
       setPaletteOpen((open) => !open);
-      return;
+      return true;
     }
-    if (key.ctrl && key.name === "c") {
-      onRequestExit?.();
-      return;
+    if (shortcut === "modelPicker.toggle") {
+      toggleModelPicker();
+      return true;
+    }
+    if (shortcut === "chat.new" || shortcut === "chat.newLocal") {
+      openNewThread(newThreadProjectId);
+      return true;
     }
     if (paletteOpen) {
-      if (key.name === "escape") setPaletteOpen(false);
+      if (key.name === "escape" || (key.ctrl && key.name === "c")) setPaletteOpen(false);
       else if (key.name === "up") setPaletteIndex((index) => Math.max(0, index - 1));
       else if (key.name === "down")
         setPaletteIndex((index) => Math.min(actions.length - 1, index + 1));
@@ -506,7 +806,7 @@ function Shell(props: AppProps) {
         const action = actions[paletteIndex];
         if (action) runAction(action);
       }
-      return;
+      return true;
     }
     if (contextMenu) {
       if (key.name === "escape") setContextMenu(null);
@@ -521,43 +821,65 @@ function Shell(props: AppProps) {
         const item = contextMenuItems[contextMenu.index];
         if (item) runContextAction(item, contextMenu.threadId);
       }
-      return;
+      return true;
     }
     if (key.ctrl && key.name === "b") {
       toggleSidebar();
-      return;
+      return true;
     }
     if (key.name === "escape" && sidebarOverlayOpen) {
       setSidebarOverlayOpen(false);
-      setFocusArea("thread");
-      return;
+      setFocusArea(composerTarget === null ? "thread" : "composer");
+      return true;
     }
-    // Paging the transcript works from either pane.
+    // Paging the transcript works from any pane.
     if (
       (key.name === "pageup" || key.name === "pagedown") &&
       threadViewRef.current?.handleKey(key)
     ) {
-      return;
+      return true;
     }
-    if (key.name === "tab") {
-      setFocusArea((area) => (area === "sidebar" || !sidebarVisible ? "thread" : "sidebar"));
-      return;
+    if (composerFocused && composerRef.current?.handleKey(key)) return true;
+    if (key.ctrl && key.name === "c") {
+      requestExit();
+      return true;
     }
+    if (key.name === "tab" && !key.shift) {
+      cycleFocus();
+      return true;
+    }
+    // Everything else is typing.
+    if (composerFocused) return false;
     if (sidebarFocused) {
       if (key.name === "m" && sidebar.cursorRow?.kind === "thread") {
         openContextMenu(sidebar.cursorRow.threadId, null);
-        return;
+        return true;
       }
       const outcome = sidebar.handleKey(key);
       if (outcome === "open") {
-        setFocusArea("thread");
+        setFocusArea(composerTarget === null ? "thread" : "composer");
         if (sidebarOverlayOpen) setSidebarOverlayOpen(false);
       }
-      if (outcome !== null) return;
+      if (outcome !== null) return true;
     }
-    if (!sidebarFocused && threadViewRef.current?.handleKey(key)) return;
-    if (key.name === "q") onRequestExit?.();
-    if (key.name === "r") retryNow();
+    if (!sidebarFocused && threadViewRef.current?.handleKey(key)) return true;
+    if (!sidebarFocused && composerTarget !== null && (key.name === "i" || isEnter(key.name))) {
+      setFocusArea("composer");
+      return true;
+    }
+    if (key.name === "q") {
+      requestExit();
+      return true;
+    }
+    if (key.name === "r") {
+      retryNow();
+      return true;
+    }
+    return false;
+  };
+
+  useKeyboard((key) => {
+    if (handleKey(key)) key.preventDefault();
   });
 
   const toneColor = {
@@ -569,15 +891,18 @@ function Shell(props: AppProps) {
   const title = threadWindowLaunch ? "tr3x thread tab" : "tr3x";
   const activeStatus =
     selection.threadId === null ? null : (sidebar.statusByThread.get(selection.threadId) ?? null);
-  const threadFocused = !sidebarFocused;
   const headerThreadTitle = activeThread
     ? truncateTitle(activeThread.title || DEFAULT_THREAD_TITLE, HEADER_THREAD_TITLE_MAX_LENGTH)
     : null;
   const sidebarWidth = TUI_SIDEBAR_WIDTH;
   const emptyLabel = sidebar.hasSnapshot ? "No projects yet" : "Loading projects…";
-  const footerHints = sidebarFocused
-    ? "↑↓ move  ←→ fold  ⏎ open  m menu  tab focus  ⌘K palette  q quit"
-    : `↑↓ scroll  PgUp/PgDn page  End bottom  tab sidebar${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette  q quit`;
+  const footerHints = modelPicker
+    ? "←→ provider  ↑↓ move  ⏎ pick  esc close"
+    : sidebarFocused
+      ? "↑↓ move  ←→ fold  ⏎ open  m menu  ⌘N new  tab focus  ⌘K palette  q quit"
+      : composerFocused
+        ? `⏎ send  ⇧⏎ newline  ${running ? "⌥⏎ steer  esc stop  " : ""}^Y image  ⌘⇧M model  tab focus  ⌘K palette`
+        : `↑↓ scroll  PgUp/PgDn page  End bottom  i compose  tab focus${layout.showSidebar ? "" : "  ctrl+b sidebar"}  ⌘K palette  q quit`;
 
   const sidebarElement = sidebarVisible ? (
     <Sidebar
@@ -651,22 +976,50 @@ function Shell(props: AppProps) {
       <box style={{ flexDirection: "row", flexGrow: 1, minHeight: 0 }}>
         {layout.showSidebar ? sidebarElement : null}
         <box style={{ flexDirection: "column", flexGrow: 1, minWidth: 0, padding: 1 }}>
-          {selection.threadId !== null ? (
-            <ThreadView
-              key={selection.threadId}
-              ref={threadViewRef}
-              connection={connection}
-              threadId={selection.threadId as ThreadId}
-              thread={activeThread}
-              project={activeProject}
-              statusPill={activeStatus}
-              theme={theme}
-              styles={markdownStyles}
-              timestampFormat={sidebar.settings.timestampFormat}
-              focused={threadFocused}
-              onActivate={activateThreadView}
-              onCopy={copyToClipboard}
-            />
+          {composerTarget !== null ? (
+            <>
+              {composerTarget.kind === "draft" ? (
+                <NewThreadView project={activeProject} theme={theme} />
+              ) : (
+                <ThreadView
+                  key={composerTarget.threadId}
+                  ref={threadViewRef}
+                  connection={connection}
+                  threadId={composerTarget.threadId}
+                  thread={activeThread}
+                  project={activeProject}
+                  statusPill={activeStatus}
+                  theme={theme}
+                  styles={markdownStyles}
+                  timestampFormat={sidebar.settings.timestampFormat}
+                  onActivate={activateThreadView}
+                  onCopy={copyToClipboard}
+                />
+              )}
+              <Composer
+                key={composerTarget.threadId}
+                ref={composerRef}
+                target={composerTarget}
+                store={composerStore}
+                sender={sender}
+                theme={theme}
+                focused={composerFocused && modelPicker === null && !paletteOpen}
+                baseSettings={baseSettings}
+                modelLabel={modelLabel}
+                providerBadge={providerBadge}
+                running={running}
+                stopRequested={stopRequested}
+                clipboardDir={NodePath.join(paths.stateHomeDir, "clipboard")}
+                onFocus={() => setFocusArea("composer")}
+                onStop={stopRun}
+                onExit={requestExit}
+                onNewThread={() => openNewThread(composerTarget.projectId)}
+                onOpenModelPicker={toggleModelPicker}
+                onSetInteractionMode={setInteractionMode}
+                onSetRuntimeMode={setRuntimeMode}
+                onStatus={setStatus}
+              />
+            </>
           ) : (
             <ServerSummary
               connection={connection}
@@ -771,6 +1124,15 @@ function Shell(props: AppProps) {
             ))}
           </box>
         </box>
+      ) : null}
+      {modelPicker ? (
+        <ModelPickerView
+          providers={pickerProviders}
+          state={modelPicker}
+          current={effectiveSettings?.modelSelection ?? null}
+          theme={theme}
+          onPick={pickModel}
+        />
       ) : null}
       {paletteOpen ? (
         <box
