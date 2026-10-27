@@ -1,0 +1,154 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Drives real tr3x and T3 server processes, outside any Effect runtime.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+import { afterEach, describe, expect, it } from "vite-plus/test";
+
+import { readDaemonState } from "./daemon/daemonState.ts";
+import { isProcessAlive } from "./daemon/health.ts";
+import { resolveTr3xPaths } from "./paths.ts";
+
+const CLI = NodeURL.fileURLToPath(new URL("./cli.ts", import.meta.url));
+const STARTED =
+  /started T3 server \S+ \(orchestration protocol 2\) at \S+ \(server pid (\d+), daemon pid (\d+)\)/u;
+
+interface CliProcess {
+  readonly child: NodeChildProcess.ChildProcess;
+  readonly output: () => string;
+  readonly exited: Promise<number | null>;
+}
+
+const cleanup: Array<() => void> = [];
+
+afterEach(() => {
+  for (const step of cleanup.splice(0).reverse()) step();
+});
+
+function tempHome(): string {
+  const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "tr3x-cli-"));
+  cleanup.push(() => NodeFS.rmSync(dir, { recursive: true, force: true }));
+  return NodePath.join(dir, "home");
+}
+
+function startCli(home: string, command: "daemon" | "doctor"): CliProcess {
+  const child = NodeChildProcess.spawn("bun", [CLI, command], {
+    env: { ...process.env, TR3X_HOME: home, TR3X_NODE_BIN: process.execPath },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => (output += String(chunk)));
+  child.stderr.on("data", (chunk) => (output += String(chunk)));
+  const exited = new Promise<number | null>((resolve) =>
+    child.once("exit", (code) => resolve(code)),
+  );
+  cleanup.push(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
+  return { child, output: () => output, exited };
+}
+
+/** Resolves on the first output line matching `pattern`; rejects if the process exits first. */
+function waitForLine(cli: CliProcess, pattern: RegExp): Promise<RegExpMatchArray> {
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      const match = cli.output().match(pattern);
+      if (!match) return false;
+      cli.child.stdout?.off("data", onData);
+      resolve(match);
+      return true;
+    };
+    const onData = () => void check();
+    if (check()) return;
+    cli.child.stdout?.on("data", onData);
+    void cli.exited.then(() => {
+      if (!check()) reject(new Error(`exited before printing ${pattern}:\n${cli.output()}`));
+    });
+  });
+}
+
+/** A server pid that the daemon under test started; killed after the test if it outlives it. */
+function trackServer(pid: number): number {
+  cleanup.push(() => {
+    if (isProcessAlive(pid)) process.kill(pid, "SIGKILL");
+  });
+  return pid;
+}
+
+function argvOf(pids: ReadonlyArray<number>): string {
+  return NodeChildProcess.execFileSync("ps", ["-ww", "-o", "args=", "-p", pids.join(",")], {
+    encoding: "utf8",
+  });
+}
+
+describe("tr3x daemon", () => {
+  it("starts one server, lets a second daemon attach, and stops only the server it started", async () => {
+    const home = tempHome();
+    const paths = resolveTr3xPaths({ TR3X_HOME: home });
+    const first = startCli(home, "daemon");
+    const started = await waitForLine(first, STARTED);
+    const firstServer = trackServer(Number(started[1]));
+    expect(Number(started[2])).toBe(first.child.pid);
+
+    const state = readDaemonState(paths.daemonStatePath)!;
+    expect(state.pid).toBe(first.child.pid);
+    expect(NodeFS.statSync(paths.daemonDir).mode & 0o777).toBe(0o700);
+    expect(NodeFS.statSync(paths.daemonStatePath).mode & 0o777).toBe(0o600);
+
+    const second = startCli(home, "daemon");
+    await waitForLine(second, new RegExp(`attached to daemon ${first.child.pid}: T3 server`, "u"));
+
+    const doctor = startCli(home, "doctor");
+    await doctor.exited;
+    expect(doctor.output()).toMatch(
+      new RegExp(
+        `ok\\s+daemon\\s+running \\(pid ${first.child.pid}, server pid ${firstServer}\\)`,
+        "u",
+      ),
+    );
+    expect(doctor.output()).toMatch(/ok\s+server\s+T3 \S+, orchestration protocol 2/u);
+    expect(doctor.output()).toMatch(/(ok|fail)\s+providers\s+(\d+|none) of \d+ usable/u);
+
+    const secrets = [state.bearerToken];
+    const argv = argvOf([first.child.pid!, second.child.pid!, firstServer]);
+    expect(argv).toContain("--bootstrap-fd 0");
+    for (const secret of secrets) {
+      expect(argv).not.toContain(secret);
+      expect(first.output() + second.output() + doctor.output()).not.toContain(secret);
+    }
+
+    first.child.kill("SIGTERM");
+    expect(await first.exited).toBe(0);
+    expect(isProcessAlive(firstServer)).toBe(false);
+    expect(second.output()).not.toContain("stopping server");
+
+    await waitForLine(second, /taking over/u);
+    const takenOver = await waitForLine(second, STARTED);
+    trackServer(Number(takenOver[1]));
+    second.child.kill("SIGINT");
+    expect(await second.exited).toBe(0);
+    expect(isProcessAlive(Number(takenOver[1]))).toBe(false);
+    expect(NodeFS.existsSync(paths.daemonStatePath)).toBe(false);
+  });
+
+  it("recovers after the owning daemon is killed with SIGKILL", async () => {
+    const home = tempHome();
+    const paths = resolveTr3xPaths({ TR3X_HOME: home });
+    const crashed = startCli(home, "daemon");
+    const orphan = trackServer(Number((await waitForLine(crashed, STARTED))[1]));
+    crashed.child.kill("SIGKILL");
+    await crashed.exited;
+
+    const next = startCli(home, "daemon");
+    const started = await waitForLine(next, STARTED);
+    const server = trackServer(Number(started[1]));
+    expect(server).not.toBe(orphan);
+    expect(readDaemonState(paths.daemonStatePath)?.pid).toBe(next.child.pid);
+    expect(JSON.parse(NodeFS.readFileSync(paths.serverRuntimeStatePath, "utf8")).pid).toBe(server);
+
+    next.child.kill("SIGTERM");
+    expect(await next.exited).toBe(0);
+    expect(isProcessAlive(server)).toBe(false);
+  });
+});

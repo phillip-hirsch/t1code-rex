@@ -1,0 +1,202 @@
+// @effect-diagnostics nodeBuiltinImport:off -- tr3x runs on Bun outside the Effect runtime.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import { ORCHESTRATION_PROTOCOL_VERSION, type ServerProvider } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+
+import { isDaemonAlive, readDaemonState, readRecordedServer } from "./daemon/daemonState.ts";
+import { type EnvironmentSummary, fetchEnvironmentSummary } from "./daemon/health.ts";
+import type { Tr3xPaths } from "./paths.ts";
+import { describeError } from "./redact.ts";
+import { fetchServerConfig } from "./serverConfig.ts";
+
+export const REX_APP_BUNDLE_CLIS = [
+  "/Applications/Rex Beta.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
+  "/Applications/Rex.app/Contents/Helpers/Rex Server.rex/Contents/MacOS/rex",
+];
+
+type Status = "ok" | "fail" | "info";
+
+interface Check {
+  readonly status: Status;
+  readonly name: string;
+  readonly detail: string;
+  readonly lines?: ReadonlyArray<string>;
+}
+
+export interface DoctorOptions {
+  readonly paths: Tr3xPaths;
+  readonly env: NodeJS.ProcessEnv;
+  readonly out: (line: string) => void;
+  readonly rexAppBundleClis?: ReadonlyArray<string>;
+}
+
+/** Prints one line per check and returns the exit code: 1 when a required check fails. */
+export async function runDoctor(options: DoctorOptions): Promise<number> {
+  const { paths, env } = options;
+  const checks: Check[] = [];
+  const state = readDaemonState(paths.daemonStatePath);
+  const daemon = state !== undefined && isDaemonAlive(state) ? state : undefined;
+  checks.push(
+    daemon !== undefined
+      ? {
+          status: "ok",
+          name: "daemon",
+          detail: `running (pid ${daemon.pid}, server pid ${daemon.serverPid ?? "unknown"})`,
+        }
+      : {
+          status: "fail",
+          name: "daemon",
+          detail:
+            state === undefined
+              ? "not running. Start it with `tr3x daemon`."
+              : `not running (daemon ${state.pid} exited without cleaning up; the next \`tr3x daemon\` replaces its state). Start it with \`tr3x daemon\`.`,
+        },
+  );
+
+  const serverUrl = daemon?.httpBaseUrl ?? readRecordedServer(paths.serverRuntimeStatePath)?.origin;
+  const environment =
+    serverUrl === undefined
+      ? undefined
+      : await fetchEnvironmentSummary(serverUrl).catch(() => undefined);
+  checks.push(serverCheck(serverUrl, environment, daemon !== undefined));
+  checks.push(await providersCheck(daemon, environment));
+  checks.push(rexCliCheck(env, options.rexAppBundleClis ?? REX_APP_BUNDLE_CLIS));
+  const session = env.REX_SESSION?.trim();
+  checks.push({
+    status: "info",
+    name: "rex session",
+    detail: session
+      ? `inside Rex (session ${session}${env.REX_BLOCK ? `, block ${env.REX_BLOCK}` : ""})`
+      : "not inside Rex (REX_SESSION is unset)",
+  });
+
+  options.out(`tr3x doctor: ${paths.home}`);
+  const width = Math.max(...checks.map((check) => check.name.length));
+  for (const check of checks) {
+    options.out(`  ${check.status.padEnd(4)}  ${check.name.padEnd(width)}  ${check.detail}`);
+    for (const line of check.lines ?? [])
+      options.out(`  ${"".padEnd(4)}  ${"".padEnd(width)}    ${line}`);
+  }
+  const failed = checks.filter((check) => check.status === "fail").length;
+  options.out(failed === 0 ? "All required checks passed." : `${failed} required check(s) failed.`);
+  return failed === 0 ? 0 : 1;
+}
+
+function serverCheck(
+  serverUrl: string | undefined,
+  environment: EnvironmentSummary | undefined,
+  ownedByDaemon: boolean,
+): Check {
+  if (serverUrl === undefined) return { status: "fail", name: "server", detail: "not running" };
+  if (environment === undefined) {
+    return { status: "fail", name: "server", detail: `not responding at ${serverUrl}` };
+  }
+  const protocol = environment.orchestrationProtocolVersion;
+  const detail = `T3 ${environment.serverVersion}, orchestration protocol ${protocol ?? "unknown"}, ${serverUrl}${ownedByDaemon ? "" : " (no tr3x daemon started it; stop it, or set TR3X_HOME to another directory)"}`;
+  if (protocol !== ORCHESTRATION_PROTOCOL_VERSION) {
+    return {
+      status: "fail",
+      name: "server",
+      detail: `${detail}. tr3x needs orchestration protocol ${ORCHESTRATION_PROTOCOL_VERSION}.`,
+    };
+  }
+  return { status: ownedByDaemon ? "ok" : "fail", name: "server", detail };
+}
+
+async function providersCheck(
+  daemon: { httpBaseUrl: string; wsBaseUrl: string; bearerToken: string } | undefined,
+  environment: EnvironmentSummary | undefined,
+): Promise<Check> {
+  if (daemon === undefined || environment === undefined) {
+    return { status: "fail", name: "providers", detail: "unknown: needs a running tr3x daemon" };
+  }
+  let providers: ReadonlyArray<ServerProvider>;
+  try {
+    providers = (await Effect.runPromise(fetchServerConfig(daemon))).providers;
+  } catch (error) {
+    return {
+      status: "fail",
+      name: "providers",
+      detail: `could not read the server config: ${describeError(error)}`,
+    };
+  }
+  const usable = providers.filter(isUsableProvider);
+  const nameWidth = Math.max(0, ...providers.map((provider) => providerName(provider).length));
+  return {
+    status: usable.length > 0 ? "ok" : "fail",
+    name: "providers",
+    detail:
+      usable.length > 0
+        ? `${usable.length} of ${providers.length} usable`
+        : `none of ${providers.length} usable. Install and sign in to Codex or Claude, and enable it in T3 settings.`,
+    lines: providers.map((provider) =>
+      [
+        providerName(provider).padEnd(nameWidth),
+        (provider.installed ? "installed" : "not installed").padEnd(13),
+        (provider.enabled ? "enabled" : "disabled").padEnd(8),
+        provider.status.padEnd(8),
+        `${provider.models.length} model${provider.models.length === 1 ? "" : "s"}`,
+      ].join("  "),
+    ),
+  };
+}
+
+function providerName(provider: ServerProvider): string {
+  return provider.displayName ?? provider.instanceId;
+}
+
+function isUsableProvider(provider: ServerProvider): boolean {
+  return (
+    provider.enabled &&
+    provider.installed &&
+    (provider.status === "ready" || provider.status === "warning") &&
+    provider.availability !== "unavailable"
+  );
+}
+
+function rexCliCheck(env: NodeJS.ProcessEnv, appBundleClis: ReadonlyArray<string>): Check {
+  const cli = resolveRexCli(env, appBundleClis);
+  if (cli === undefined) {
+    return {
+      status: "fail",
+      name: "rex",
+      detail: "CLI not found on PATH or in /Applications. Install Rex, or set TR3X_REX_BIN.",
+    };
+  }
+  const version = NodeChildProcess.spawnSync(cli, ["version"], {
+    encoding: "utf8",
+    timeout: 3_000,
+  });
+  const firstLine = version.status === 0 ? version.stdout.split("\n", 1)[0]?.trim() : undefined;
+  return {
+    status: "ok",
+    name: "rex",
+    detail: firstLine ? `${cli} (${firstLine})` : `${cli} (version unknown)`,
+  };
+}
+
+/** `TR3X_REX_BIN`, then `rex` on PATH, then the CLI inside the macOS app bundle. */
+export function resolveRexCli(
+  env: NodeJS.ProcessEnv,
+  appBundleClis: ReadonlyArray<string> = REX_APP_BUNDLE_CLIS,
+): string | undefined {
+  const pathCandidates = (env.PATH ?? "")
+    .split(NodePath.delimiter)
+    .filter(Boolean)
+    .map((dir) => NodePath.join(dir, "rex"));
+  const configured = env.TR3X_REX_BIN?.trim();
+  return [...(configured ? [configured] : []), ...pathCandidates, ...appBundleClis].find(
+    isExecutableFile,
+  );
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    NodeFS.accessSync(path, NodeFS.constants.X_OK);
+    return NodeFS.statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
