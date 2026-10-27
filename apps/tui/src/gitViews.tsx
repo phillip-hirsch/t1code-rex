@@ -29,6 +29,7 @@ import {
 } from "./branchToolbar.ts";
 import type { TuiConnection, VcsRefsAtom } from "./connection/tuiConnection.ts";
 import { buildGitMenuItems, isArmed, type ArmedConfirmation, type GitMenuItem } from "./gitMenu.ts";
+import { describePublishConfirmation, type PublishPlan } from "./publishCommand.ts";
 import { printableText } from "./sidebarKeys.ts";
 import type { TuiColor, TuiTheme } from "./theme.ts";
 import { describeWorktreeSetup } from "./worktreeSetupView.ts";
@@ -174,7 +175,9 @@ export interface GitOverlayHandle {
 
 export type GitOverlayMode =
   | { readonly kind: "menu" }
-  | { readonly kind: "branches"; readonly initialQuery: string };
+  | { readonly kind: "branches"; readonly initialQuery: string }
+  /** A checked `/publish` waiting for ⏎: nothing is created until then. */
+  | { readonly kind: "publish"; readonly plan: PublishPlan };
 
 export interface GitOverlayProps {
   readonly source: GitSource;
@@ -198,6 +201,7 @@ export interface GitOverlayProps {
   readonly theme: TuiTheme;
   readonly onMenuItem: (item: GitMenuItem) => void;
   readonly onBranchItem: (item: BranchPickerChoice) => void;
+  readonly onConfirmPublish: (plan: PublishPlan) => void;
   readonly onClose: () => void;
   readonly ref?: Ref<GitOverlayHandle>;
 }
@@ -275,7 +279,9 @@ export function GitOverlay(props: GitOverlayProps) {
   useImperativeHandle(ref, () => ({
     handleKey: (key: KeyEvent) => {
       if (key.name === "escape" || (key.ctrl && key.name === "c")) props.onClose();
-      else if (key.name === "up" || (mode.kind === "menu" && key.name === "k"))
+      else if (mode.kind === "publish") {
+        if (isEnter(key.name) && !key.repeated) props.onConfirmPublish(mode.plan);
+      } else if (key.name === "up" || (mode.kind === "menu" && key.name === "k"))
         setIndex(Math.max(0, selected - 1));
       else if (key.name === "down" || (mode.kind === "menu" && key.name === "j"))
         setIndex(Math.min(count - 1, selected + 1));
@@ -295,6 +301,18 @@ export function GitOverlay(props: GitOverlayProps) {
       }
     },
   }));
+
+  if (mode.kind === "publish") {
+    return (
+      <PublishConfirmation
+        plan={mode.plan}
+        left={props.left}
+        theme={theme}
+        onConfirm={() => props.onConfirmPublish(mode.plan)}
+        onCancel={props.onClose}
+      />
+    );
+  }
 
   const title =
     mode.kind === "menu"
@@ -423,6 +441,91 @@ export function GitOverlay(props: GitOverlayProps) {
         content={mode.kind === "menu" ? "↑↓ move  ⏎ run  esc close" : "↑↓ move  ⏎ pick  esc close"}
         style={{ fg: palette.subtle }}
       />
+    </box>
+  );
+}
+
+/** What `/publish` will create, and its visibility, before anything is sent. */
+function PublishConfirmation(props: {
+  readonly plan: PublishPlan;
+  readonly left: number;
+  readonly theme: TuiTheme;
+  readonly onConfirm: () => void;
+  readonly onCancel: () => void;
+}) {
+  const { palette } = props.theme;
+  const lines = describePublishConfirmation(props.plan);
+  const isPublic = props.plan.input.visibility === "public";
+  return (
+    <box
+      style={{
+        position: "absolute",
+        bottom: 3,
+        left: props.left,
+        width: 64,
+        flexDirection: "column",
+        backgroundColor: palette.popup,
+        border: true,
+        borderColor: isPublic ? palette.warning : palette.accent,
+        paddingLeft: 1,
+        paddingRight: 1,
+        zIndex: 245,
+      }}
+      onMouseDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+    >
+      <text
+        wrapMode="none"
+        truncate
+        content={`󰅧 Publish to ${props.plan.providerLabel}?`}
+        style={{ fg: palette.text }}
+      />
+      {lines.map((line, index) => (
+        <text
+          key={line}
+          wrapMode="none"
+          truncate
+          content={line}
+          style={{
+            fg:
+              index === 1
+                ? palette.text
+                : index === 0 && isPublic
+                  ? palette.warning
+                  : palette.muted,
+          }}
+        />
+      ))}
+      <text
+        wrapMode="none"
+        truncate
+        content={`in ${props.plan.input.cwd}`}
+        style={{ fg: palette.subtle }}
+      />
+      <box style={{ flexDirection: "row", height: 1 }}>
+        <text
+          wrapMode="none"
+          content="⏎ publish"
+          style={{ fg: palette.text }}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            props.onConfirm();
+          }}
+        />
+        <text
+          wrapMode="none"
+          content="  esc cancel"
+          style={{ fg: palette.subtle }}
+          onMouseDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            props.onCancel();
+          }}
+        />
+      </box>
     </box>
   );
 }

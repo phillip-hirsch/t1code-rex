@@ -98,6 +98,7 @@ import {
 } from "./archivedThreads.ts";
 import { useManagement } from "./management.ts";
 import { ArchivedThreadsView, ConfirmDialogView, PromptDialogView } from "./managementViews.tsx";
+import { SourceControlView, type SourceControlViewHandle } from "./sourceControlViews.tsx";
 import { Sidebar, sidebarRowId, type SidebarPress } from "./sidebar.tsx";
 import {
   buildMultiThreadMenuItems,
@@ -408,6 +409,8 @@ function Shell(props: AppProps) {
   const [paletteQuery, setPaletteQuery] = useState("");
   /** The archived-threads view's highlighted row; null while the view is closed. */
   const [archivedSelection, setArchivedSelection] = useState<ArchivedSelection | null>(null);
+  const [sourceControlOpen, setSourceControlOpen] = useState(false);
+  const sourceControlRef = useRef<SourceControlViewHandle | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [focusArea, setFocusArea] = useState<FocusArea>("sidebar");
   const [sidebarCollapsedPreference, setSidebarCollapsedPreference] = useState(false);
@@ -1041,6 +1044,11 @@ function Shell(props: AppProps) {
   if (archivedSelected !== archivedSelection) setArchivedSelection(archivedSelected);
   const archivedRow =
     archivedSelected === null ? null : (archivedRows[archivedSelected.index] ?? null);
+  const openSourceControl = () => {
+    setPaletteOpen(false);
+    setContextMenu(null);
+    setSourceControlOpen(true);
+  };
   const openArchivedView = () => {
     setPaletteOpen(false);
     setContextMenu(null);
@@ -1283,6 +1291,21 @@ function Shell(props: AppProps) {
       setModelPicker(openModelPicker(pickerProviders, commitModelSelection));
     },
   });
+  actions.push(
+    {
+      id: "git:publish",
+      label: "Publish repository",
+      description: "Create a hosted repository for this one  /publish owner/repo",
+      disabled: git.cwd === null,
+      run: git.startPublish,
+    },
+    {
+      id: "source-control:open",
+      label: "Source Control",
+      description: "Git and hosting providers on the server, with sign-in state",
+      run: openSourceControl,
+    },
+  );
   actions.push({
     id: "archive:open",
     label: "Archived threads",
@@ -1471,6 +1494,10 @@ function Shell(props: AppProps) {
       }
       return true;
     }
+    if (sourceControlOpen) {
+      sourceControlRef.current?.handleKey(key);
+      return true;
+    }
     const shortcut = resolveTuiShortcutCommand(
       tuiShortcutEvent(key),
       serverConfig?.keybindings ?? [],
@@ -1620,6 +1647,7 @@ function Shell(props: AppProps) {
       modelPickerRef.current !== null ||
       management.dialogOpen ||
       archivedSelected !== null ||
+      sourceControlOpen ||
       paletteOpen ||
       git.overlay !== null ||
       contextMenu !== null;
@@ -1658,7 +1686,9 @@ function Shell(props: AppProps) {
     : git.overlay !== null
       ? git.overlay.kind === "branches"
         ? "type to filter  ↑↓ move  ⏎ pick  esc close"
-        : "↑↓ move  ⏎ run  esc close"
+        : git.overlay.kind === "publish"
+          ? "⏎ publish  esc cancel"
+          : "↑↓ move  ⏎ run  esc close"
       : terminalFocused
         ? TERMINAL_FOCUS_HINTS
         : sidebarFocused
@@ -1831,6 +1861,7 @@ function Shell(props: AppProps) {
                     openBranchPicker: git.openBranchPicker,
                     toggleWorktree: git.toggleWorktree,
                     retrySetup: git.retrySetup,
+                    publish: git.publish,
                     launchWorktree: git.launchWorktree,
                     sendBlockedReason: git.sendBlockedReason,
                   },
@@ -1863,7 +1894,8 @@ function Shell(props: AppProps) {
                   paletteOpen ||
                   git.overlay !== null ||
                   management.dialogOpen ||
-                  archivedSelected !== null
+                  archivedSelected !== null ||
+                  sourceControlOpen
                     ? null
                     : composerFocused
                       ? "composer"
@@ -2042,6 +2074,7 @@ function Shell(props: AppProps) {
           theme={theme}
           onMenuItem={git.runMenuItem}
           onBranchItem={git.pickBranch}
+          onConfirmPublish={git.confirmPublish}
           onClose={git.closeOverlay}
         />
       ) : null}
@@ -2109,6 +2142,15 @@ function Shell(props: AppProps) {
           theme={theme}
           onSelect={(index) => setArchivedSelection(selectArchivedRow(archivedRows, index))}
           onClose={() => setArchivedSelection(null)}
+        />
+      ) : null}
+      {sourceControlOpen ? (
+        <SourceControlView
+          ref={sourceControlRef}
+          source={connection}
+          theme={theme}
+          height={Math.max(6, viewportRows - 14)}
+          onClose={() => setSourceControlOpen(false)}
         />
       ) : null}
       {management.prompt !== null ? (

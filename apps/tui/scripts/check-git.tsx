@@ -275,6 +275,19 @@ function createGit() {
       calls.push(`metadata ${input.threadId} ${input.branch} ${input.worktreePath}`);
       return ok({ sequence: 1 });
     },
+    // Publishing has its own check (check-publish.tsx); these only log if reached.
+    discoverSourceControl: async () => {
+      calls.push("discoverSourceControl");
+      return ok({ versionControlSystems: [], sourceControlProviders: [] });
+    },
+    lookupRepository: async (input: { repository: string }) => {
+      calls.push(`lookupRepository ${input.repository}`);
+      return { ok: false as const, error: new Error("not found"), interrupted: false };
+    },
+    publishRepository: async (input: { repository: string }) => {
+      calls.push(`publishRepository ${input.repository}`);
+      return { ok: false as const, error: new Error("not in check-git"), interrupted: false };
+    },
   };
   return {
     source,
@@ -344,6 +357,8 @@ function Harness() {
         setVersion((version) => version + 1);
       },
       setNotice: store.setNotice,
+      getDraft: store.getDraft,
+      restoreDraft: store.restoreDraft,
     },
     target: scene.target,
     thread: scene.thread,
@@ -422,6 +437,7 @@ function Harness() {
           theme={DEFAULT_TUI_THEME}
           onMenuItem={controller.runMenuItem}
           onBranchItem={controller.pickBranch}
+          onConfirmPublish={controller.confirmPublish}
           onClose={controller.closeOverlay}
         />
       ) : null}

@@ -76,6 +76,9 @@ import type {
   ProjectSearchEntriesInput,
   ServerSettingsPatch,
   SourceControlCloneRepositoryInput,
+  SourceControlDiscoveryResult,
+  SourceControlPublishRepositoryInput,
+  SourceControlRepositoryLookupInput,
   ThreadId,
   VcsCreateRefInput,
   VcsInitInput,
@@ -85,7 +88,7 @@ import type {
   VcsSwitchRefInput,
   WorktreeSetupSnapshot,
 } from "@t3tools/contracts";
-import { ORCHESTRATION_V2_WS_METHODS } from "@t3tools/contracts";
+import { ORCHESTRATION_V2_WS_METHODS, WS_METHODS } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -124,6 +127,10 @@ export type CheckpointDiffAtom = Atom.Atom<
 export type VcsStatusAtom = Atom.Atom<AsyncResult.AsyncResult<VcsStatusResult | null, unknown>>;
 /** The branch picker's refs for a query: its first pages, merged. */
 export type VcsRefsAtom = Atom.Atom<BranchRefPages>;
+/** What the server found of git, jj and each hosting provider, with sign-in state. */
+export type SourceControlDiscoveryAtom = Atom.Atom<
+  AsyncResult.AsyncResult<SourceControlDiscoveryResult, unknown>
+>;
 export type WorktreeSetupAtom = Atom.Atom<
   AsyncResult.AsyncResult<WorktreeSetupSnapshot | null, unknown>
 >;
@@ -296,6 +303,19 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     projectAtom: environmentProjects.projectAtom,
   });
   const sourceControl = createSourceControlEnvironmentAtoms(runtime);
+  const sourceControlDiscoveryAtom: SourceControlDiscoveryAtom = sourceControl.discovery({
+    environmentId,
+    input: {},
+  });
+  // A fresh scan and a repository read, for checking a publish before it's confirmed.
+  const discoverSourceControl = createEnvironmentRpcCommand(runtime, {
+    label: "tr3x:server:discover-source-control",
+    tag: WS_METHODS.serverDiscoverSourceControl,
+  });
+  const lookupRepository = createEnvironmentRpcCommand(runtime, {
+    label: "tr3x:source-control:lookup-repository",
+    tag: WS_METHODS.sourceControlLookupRepository,
+  });
   const filesystem = createFilesystemEnvironmentAtoms(runtime);
   const shellCommands = createShellEnvironmentAtoms(runtime);
   const orchestration = createOrchestrationEnvironmentAtoms(runtime);
@@ -334,7 +354,7 @@ export function createTuiConnection(options: TuiConnectionOptions) {
   /** Runs a VCS command while the checkout's action state shows it as busy. */
   const trackVcs = <Input, A, E>(
     cwd: string,
-    operation: "pull" | "switch_ref" | "create_ref" | "init",
+    operation: "pull" | "switch_ref" | "create_ref" | "init" | "publish_repository",
     label: string,
     command: AtomCommand<{ environmentId: EnvironmentId; input: Input }, A, E>,
     input: Input,
@@ -450,6 +470,23 @@ export function createTuiConnection(options: TuiConnectionOptions) {
     cloneRepository: (input: SourceControlCloneRepositoryInput) =>
       runAction(sourceControl.cloneRepository, input),
     projectClonesAtom: sourceControl.projectClones({ environmentId, input: {} }),
+    /** The Source Control view's scan; `refreshSourceControlDiscovery` scans again. */
+    sourceControlDiscoveryAtom,
+    refreshSourceControlDiscovery: () => registry.refresh(sourceControlDiscoveryAtom),
+    /** A scan of its own, never from cache, for checking a publish. */
+    discoverSourceControl: () => runAction(discoverSourceControl, {}),
+    /** Reads a hosted repository; success means the name is taken. Creates nothing. */
+    lookupRepository: (input: SourceControlRepositoryLookupInput) =>
+      runAction(lookupRepository, input),
+    /** Creates the hosted repository, adds it as a remote and pushes; the toolbar shows it running. */
+    publishRepository: (input: SourceControlPublishRepositoryInput) =>
+      trackVcs(
+        input.cwd,
+        "publish_repository",
+        "Publishing repository",
+        sourceControl.publishRepository,
+        input,
+      ),
     openInEditor: (input: LaunchEditorInput) => runAction(shellCommands.openInEditor, input),
     searchEntriesAtom: (input: ProjectSearchEntriesInput) =>
       projectCommands.searchEntries({ environmentId, input }),

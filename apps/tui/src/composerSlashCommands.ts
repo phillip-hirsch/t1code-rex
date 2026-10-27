@@ -71,6 +71,12 @@ export const COMPOSER_SLASH_COMMANDS: ReadonlyArray<ComposerSlashCommand> = [
     template: "/clone ",
   },
   {
+    command: "publish",
+    usage: "/publish owner/repo [public]",
+    description: "Create a hosted repository, add it as a remote and push",
+    template: "/publish ",
+  },
+  {
     command: "diff",
     usage: "/diff",
     description: "Show or hide the thread's diff",
@@ -140,6 +146,7 @@ export type ComposerSlashAction =
   | { readonly type: "recover" }
   | { readonly type: "toggle-diff" }
   | { readonly type: "clone"; readonly args: string }
+  | { readonly type: "publish"; readonly args: string }
   | { readonly type: "git-menu" }
   | { readonly type: "branch-picker"; readonly query: string }
   | { readonly type: "toggle-worktree" }
@@ -178,6 +185,8 @@ export function resolveComposerSlashAction(text: string): ComposerSlashAction | 
       return parsed.args.length === 0
         ? { type: "error", message: "Type owner/repo or a URL after /clone" }
         : { type: "clone", args: parsed.args };
+    case "publish":
+      return { type: "publish", args: parsed.args };
     case "git":
       return { type: "git-menu" };
     case "branch":

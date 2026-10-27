@@ -10,7 +10,7 @@ import {
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useState, type RefObject } from "react";
+import { useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 import {
   localBranchName,
@@ -36,6 +36,14 @@ import {
 } from "./gitMenu.ts";
 import type { GitOverlayHandle, GitOverlayMode } from "./gitViews.tsx";
 import { openExternalUrl } from "./openExternal.ts";
+import {
+  describePublishFailure,
+  describePublishResult,
+  parsePublishArgs,
+  repositoryTakenMessage,
+  resolvePublish,
+  type PublishPlan,
+} from "./publishCommand.ts";
 import type { SidebarThread } from "./sidebarModel.ts";
 import { worktreeSendBlock, type WorktreeLaunch } from "./worktreeLaunch.ts";
 
@@ -62,13 +70,17 @@ type GitCommands = Pick<
   | "retryWorkspacePreparation"
   | "stopThreadSession"
   | "updateThreadMetadata"
+  | "vcsActionStateAtom"
+  | "discoverSourceControl"
+  | "lookupRepository"
+  | "publishRepository"
 >;
 
 export interface GitControlsOptions {
   readonly connection: GitCommands;
   readonly store: Pick<
     ComposerStore,
-    "findNewThreadDraft" | "setNewThreadDraftWorkspace" | "setNotice"
+    "findNewThreadDraft" | "setNewThreadDraftWorkspace" | "setNotice" | "getDraft" | "restoreDraft"
   >;
   readonly target: GitTarget | null;
   readonly thread: SidebarThread | null;
@@ -133,6 +145,11 @@ export function useGitControls(options: GitControlsOptions) {
   const cwd = worktreePath ?? projectCwd;
   const pickingWorktreeBase = target?.kind === "draft" && envMode === "worktree";
   const failure = lastFailure !== null && lastFailure.cwd === cwd ? lastFailure : null;
+  // The checkout as of the latest render, for async work that must not land on another one.
+  const cwdRef = useRef(cwd);
+  useLayoutEffect(() => {
+    cwdRef.current = cwd;
+  });
 
   const close = () => {
     setOverlay(null);
@@ -356,12 +373,124 @@ export function useGitControls(options: GitControlsOptions) {
       case "retry-setup":
         await retrySetup();
         return;
+      case "publish":
+        await publish("", null);
+        return;
       case "refresh": {
         const result = await connection.refreshVcsStatus(cwd);
         setStatus(failed(result, "Refresh") ?? "Git status refreshed");
         return;
       }
     }
+  };
+
+  /**
+   * Puts a command back in the composer with a notice: the typed command after an error, or
+   * `/publish owner/` to finish. Text typed since stays; the notice says what to do.
+   */
+  const backToComposer = (text: string | null, notice: string) => {
+    if (target === null) return;
+    if (text !== null && store.getDraft(target.threadId).text.trim().length === 0) {
+      store.restoreDraft(target.threadId, { text, attachments: [] }, notice);
+    } else store.setNotice(target.threadId, notice);
+    options.onFocusComposer();
+  };
+
+  /**
+   * `/publish`: checks the command, the checkout and the server's providers, and that the
+   * name is free, then asks to confirm. Nothing is created before the confirmation.
+   * `typed` is the command as typed, put back in the composer if it can't run.
+   */
+  const publish = async (args: string, typed: string | null) => {
+    if (target === null || cwd === null) {
+      setStatus("Select a thread first");
+      return;
+    }
+    const fail = (message: string) => {
+      setStatus(message);
+      backToComposer(typed, message);
+    };
+    const parsed = parsePublishArgs(args);
+    if (!parsed.ok) {
+      fail(parsed.error);
+      return;
+    }
+    if (connection.registry.get(connection.vcsActionStateAtom(cwd)).isRunning) {
+      fail("Wait for the current git action to finish");
+      return;
+    }
+    setStatus("Checking source control providers…");
+    const [discovery, status] = await Promise.all([
+      connection.discoverSourceControl(),
+      connection.refreshVcsStatus(cwd, true),
+    ]);
+    if (cwdRef.current !== cwd) {
+      setStatus("Publish stopped: the thread changed while checking");
+      return;
+    }
+    if (!discovery.ok) {
+      fail(`Couldn't check source control providers: ${errorText(discovery.error)}`);
+      return;
+    }
+    if (!status.ok) {
+      fail(`Couldn't read git status: ${errorText(status.error)}`);
+      return;
+    }
+    const resolved = resolvePublish({
+      args: parsed.value,
+      cwd,
+      status: status.value,
+      discovery: discovery.value,
+    });
+    if (resolved.kind === "error") {
+      fail(resolved.message);
+      return;
+    }
+    if (resolved.kind === "prefill") {
+      setStatus(resolved.hint);
+      backToComposer(resolved.text, resolved.hint);
+      return;
+    }
+    const { plan } = resolved;
+    setStatus(`Checking ${plan.location}…`);
+    // A repository that reads back is taken. A failed read doesn't block: the name may be free.
+    const existing = await connection.lookupRepository({
+      provider: plan.input.provider,
+      repository: plan.input.repository,
+      cwd,
+    });
+    if (cwdRef.current !== cwd) {
+      setStatus("Publish stopped: the thread changed while checking");
+      return;
+    }
+    if (existing.ok) {
+      fail(repositoryTakenMessage(plan));
+      return;
+    }
+    setStatus(`Confirm publishing ${plan.location}`);
+    setArmed(null);
+    setOverlay({ kind: "publish", plan });
+  };
+
+  /** The confirmed publish: creates the repository, adds the remote and pushes. */
+  const confirmPublish = async (plan: PublishPlan) => {
+    close();
+    setLastFailure(null);
+    options.onFocusComposer();
+    const { cwd: planCwd, repository } = plan.input;
+    setStatus(`Publishing ${repository} to ${plan.providerLabel}…`);
+    const result = await connection.publishRepository(plan.input);
+    if (result.ok) {
+      setStatus(describePublishResult(result.value, plan.providerLabel));
+    } else if (result.interrupted) {
+      setStatus("Publish cancelled");
+    } else {
+      const message = describePublishFailure(result.error);
+      setLastFailure({ cwd: planCwd, label: "Publish", message });
+      setStatus(`Couldn't publish ${repository} to ${plan.providerLabel}: ${message}`);
+    }
+    // The toolbar picks up the new remote and upstream.
+    void connection.refreshVcsStatus(planCwd, true);
   };
 
   /** The thread whose worktree setup shows: one with a worktree, or one the server is launching into one. */
@@ -414,10 +543,18 @@ export function useGitControls(options: GitControlsOptions) {
     openBranchPicker,
     toggleWorktree,
     launchWorktree,
-    closeOverlay: close,
+    closeOverlay: () => {
+      if (overlay?.kind === "publish") setStatus("Publish cancelled; nothing was created");
+      close();
+    },
     pressToolbar,
     pickBranch: (item: BranchPickerChoice) => void pickBranch(item),
     runMenuItem: (item: GitMenuItem) => void runMenuItem(item),
+    /** `/publish <args>`; `typed` goes back in the composer if it can't run. */
+    publish: (args: string, typed: string) => void publish(args, typed),
+    /** The menu's and palette's way in: `/publish owner/` in the composer to finish. */
+    startPublish: () => void publish("", null),
+    confirmPublish: (plan: PublishPlan) => void confirmPublish(plan),
     cancelWorktreeSetup: () => void cancelWorktreeSetup(),
     retrySetup: () => void retrySetup(),
     /**

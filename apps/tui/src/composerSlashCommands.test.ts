@@ -65,6 +65,16 @@ describe("/diff", () => {
   });
 });
 
+describe("/publish", () => {
+  it("hands its arguments to the publish check, empty ones included", () => {
+    expect(resolveComposerSlashAction("/publish octo/app public")).toEqual({
+      type: "publish",
+      args: "octo/app public",
+    });
+    expect(resolveComposerSlashAction("/publish")).toEqual({ type: "publish", args: "" });
+  });
+});
+
 describe("/clone", () => {
   it("passes its arguments on, and needs a source", () => {
     expect(resolveComposerSlashAction("/clone octo/hello ~/src/hello")).toEqual({

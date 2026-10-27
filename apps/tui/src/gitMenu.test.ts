@@ -147,6 +147,32 @@ describe("buildGitMenuItems", () => {
     ).toEqual(["Git action in progress.", "Git action in progress.", "Git action in progress."]);
   });
 
+  it("leads with publishing a repository that has no remote, as web does", () => {
+    const noRemote = { hasPrimaryRemote: false, hasUpstream: false, refName: "main" };
+    expect(menu(vcsStatus(noRemote)).map(row).slice(0, 2)).toEqual([
+      { id: "publish", label: "Publish repository…", command: "publish", disabled: false },
+      { id: "commit", label: "Commit", command: "commit", disabled: true },
+    ]);
+    // With changes, committing comes first; publishing is still on offer.
+    expect(
+      menu(vcsStatus({ ...noRemote, ...DIRTY }))
+        .map(row)
+        .slice(0, 2),
+    ).toEqual([
+      { id: "quick", label: "Commit", command: "commit", disabled: false },
+      { id: "publish", label: "Publish repository…", command: "publish", disabled: false },
+    ]);
+    expect(menu(vcsStatus(noRemote), true).find((item) => item.id === "publish")).toMatchObject({
+      disabledReason: "Git action in progress.",
+    });
+  });
+
+  it("doesn't offer publishing once there's a remote, or outside a repository", () => {
+    expect(menu(vcsStatus()).some((item) => item.id === "publish")).toBe(false);
+    const notRepo = vcsStatus({ isRepo: false, hasPrimaryRemote: false, hasUpstream: false });
+    expect(menu(notRepo).some((item) => item.id === "publish")).toBe(false);
+  });
+
   it("offers no actions without a status", () => {
     expect(
       buildGitMenuItems({ status: null, busy: false, commitModelLabel: "x" }).map(

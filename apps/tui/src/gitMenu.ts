@@ -12,8 +12,8 @@ import type {
 
 /**
  * The git menu: a failed worktree setup's recovery, upstream's quick action (pull when only
- * behind), then commit, push and the PR action as web lists them, and the commit-message
- * model, as the old TUI had it.
+ * behind; publish when there's no remote, as web's), then commit, push and the PR action as
+ * web lists them, and the commit-message model, as the old TUI had it.
  */
 export type GitMenuCommand =
   | { readonly kind: "action"; readonly action: GitStackedAction }
@@ -21,6 +21,7 @@ export type GitMenuCommand =
   | { readonly kind: "retry-setup" }
   | { readonly kind: "open-pr"; readonly url: string }
   | { readonly kind: "commit-model" }
+  | { readonly kind: "publish" }
   | { readonly kind: "refresh" };
 
 export interface GitMenuItem {
@@ -108,6 +109,17 @@ export function buildGitMenuItems(input: GitMenuInput): ReadonlyArray<GitMenuIte
   }
   const hasRemote = status?.hasPrimaryRemote ?? false;
   const quick = resolveQuickAction(status, busy, status?.isDefaultRef ?? false, hasRemote);
+  // A repository with nowhere to push: web leads with publishing it.
+  const publish: GitMenuItem | null =
+    status !== null && status.isRepo && !hasRemote && !status.hasUpstream
+      ? {
+          id: "publish",
+          icon: "󰅧",
+          label: "Publish repository…",
+          command: { kind: "publish" },
+          ...(busy ? { disabledReason: "Git action in progress." } : {}),
+        }
+      : null;
   if (quick.kind === "run_action" && quick.action !== undefined) {
     const confirm = confirmFor(quick.action, status);
     items.push({
@@ -124,6 +136,9 @@ export function buildGitMenuItems(input: GitMenuInput): ReadonlyArray<GitMenuIte
       label: "Pull",
       command: { kind: "pull" },
     });
+  } else if (quick.kind === "show_hint" && publish !== null && !busy) {
+    // In place of "add an origin remote": the way to add one.
+    items.push(publish);
   } else if (quick.kind === "show_hint" && quick.hint !== undefined && status !== null) {
     items.push({
       id: "quick",
@@ -134,6 +149,7 @@ export function buildGitMenuItems(input: GitMenuInput): ReadonlyArray<GitMenuIte
       disabledReason: quick.hint,
     });
   }
+  if (publish !== null && !items.includes(publish)) items.push(publish);
   for (const item of buildMenuItems(status, busy, hasRemote)) {
     const disabledReason =
       getGitActionDisabledReason({

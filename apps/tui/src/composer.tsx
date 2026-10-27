@@ -112,6 +112,8 @@ export interface ComposerGitCommands {
   readonly openBranchPicker: (query: string) => void;
   readonly toggleWorktree: () => void;
   readonly retrySetup: () => void;
+  /** `/publish <args>`: checks, then asks to confirm; `typed` comes back here if it can't run. */
+  readonly publish: (args: string, typed: string) => void;
   /** The new worktree a draft's first send makes; undefined launches it locally. */
   readonly launchWorktree: () => LaunchWorktree | undefined;
   /** Why a message to this thread can't go out now: its worktree isn't there. */
@@ -402,6 +404,10 @@ export function Composer(props: ComposerProps) {
             return;
           case "retry-worktree":
             if (props.git) props.git.retrySetup();
+            else props.onStatus("No git here");
+            return;
+          case "publish":
+            if (props.git) props.git.publish(action.args, text);
             else props.onStatus("No git here");
             return;
           case "clone":

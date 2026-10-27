@@ -17,7 +17,7 @@ function stop(event: MouseEvent) {
 }
 
 /** A full-screen layer that swallows clicks, with a centered panel. */
-function Modal(props: {
+export function Modal(props: {
   readonly theme: TuiTheme;
   readonly borderColor: string;
   readonly onDismiss: () => void;
