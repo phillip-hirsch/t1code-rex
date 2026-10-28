@@ -98,6 +98,7 @@ export function PickerPanel(props: {
         }
         fg={palette.subtle}
       />
+      {first > 0 ? <text content={`  ↑ ${first} more`} fg={palette.subtle} /> : null}
       {visible.slice(first, first + PICKER_ROWS).map((entry, offset) => {
         const highlighted = first + offset === props.state.index;
         const current =
@@ -110,6 +111,9 @@ export function PickerPanel(props: {
           />
         );
       })}
+      {visible.length > first + PICKER_ROWS ? (
+        <text content={`  ↓ ${visible.length - first - PICKER_ROWS} more`} fg={palette.subtle} />
+      ) : null}
       {props.providerLocked ? (
         <text
           content="This thread can't switch providers; start a new thread."
@@ -117,5 +121,16 @@ export function PickerPanel(props: {
         />
       ) : null}
     </Panel>
+  );
+}
+
+/** Key hints, one per item, wrapping as a whole hint when the line is full. */
+export function Footer({ hints }: { readonly hints: ReadonlyArray<string> }) {
+  return (
+    <box style={{ flexDirection: "row", flexWrap: "wrap", flexShrink: 0, paddingLeft: 1 }}>
+      {hints.map((hint) => (
+        <text key={hint} content={hint} fg={palette.subtle} style={{ marginRight: 2 }} />
+      ))}
+    </box>
   );
 }

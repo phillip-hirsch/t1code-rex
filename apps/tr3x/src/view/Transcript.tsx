@@ -1,7 +1,7 @@
-import type { ScrollBoxRenderable, SyntaxStyle } from "@opentui/core";
+import type { ScrollBoxRenderable } from "@opentui/core";
 import { memo, useImperativeHandle, useRef, type Ref } from "react";
 
-import { palette } from "./theme.ts";
+import { palette, type MarkdownStyles } from "./theme.ts";
 import type { DividerTone, TimelineRow, WorkStatus } from "./timeline.ts";
 
 export interface TranscriptHandle {
@@ -22,23 +22,34 @@ const DIVIDER_COLOR: Record<DividerTone, string> = {
   error: palette.error,
 };
 
-const Row = memo(function Row({ row, style }: { row: TimelineRow; style: SyntaxStyle }) {
+const Row = memo(function Row({ row, styles }: { row: TimelineRow; styles: MarkdownStyles }) {
   switch (row.kind) {
     case "user":
       return (
-        <box style={{ flexDirection: "row", marginTop: 1 }}>
-          <text content="› " fg={palette.user} />
-          <text
-            content={row.note ? `${row.text}  (${row.note})` : row.text}
-            fg={palette.user}
-            style={{ flexShrink: 1 }}
-          />
+        <box style={{ flexDirection: "column", marginTop: 1 }}>
+          <box style={{ flexDirection: "row" }}>
+            <text content="› " fg={palette.user} />
+            <box style={{ flexGrow: 1, flexShrink: 1 }}>
+              <markdown
+                content={row.text}
+                syntaxStyle={styles.user}
+                conceal
+                style={{ width: "100%" }}
+              />
+            </box>
+          </box>
+          {row.note ? <text content={`  ${row.note}`} fg={palette.subtle} /> : null}
         </box>
       );
     case "assistant":
       return (
         <box style={{ marginTop: 1 }}>
-          <markdown content={row.text} syntaxStyle={style} conceal streaming={row.streaming} />
+          <markdown
+            content={row.text}
+            syntaxStyle={styles.assistant}
+            conceal
+            streaming={row.streaming}
+          />
         </box>
       );
     case "work":
@@ -62,13 +73,13 @@ const Row = memo(function Row({ row, style }: { row: TimelineRow; style: SyntaxS
 
 export function Transcript({
   rows,
-  style,
+  styles,
   header,
   empty,
   ref,
 }: {
   readonly rows: ReadonlyArray<TimelineRow>;
-  readonly style: SyntaxStyle;
+  readonly styles: MarkdownStyles;
   /** Shown above the first row: older history, loading, or nothing. */
   readonly header: string | null;
   readonly empty: string;
@@ -93,7 +104,7 @@ export function Transcript({
       {header ? <text content={header} fg={palette.subtle} /> : null}
       {rows.length === 0 ? <text content={empty} fg={palette.subtle} /> : null}
       {rows.map((row) => (
-        <Row key={row.key} row={row} style={style} />
+        <Row key={row.key} row={row} styles={styles} />
       ))}
     </scrollbox>
   );

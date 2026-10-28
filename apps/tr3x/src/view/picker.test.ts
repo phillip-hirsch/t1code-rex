@@ -5,6 +5,7 @@ import { provider } from "../testing/serverProvider.ts";
 import {
   buildPickerEntries,
   defaultSelection,
+  modelChangeBlockReason,
   openPicker,
   reducePickerKey,
   selectionLabel,
@@ -63,5 +64,40 @@ describe("model picker", () => {
       type: "state",
       state: { query: "", index: 2 },
     });
+  });
+});
+
+describe("modelChangeBlockReason", () => {
+  const codexId = ProviderInstanceId.make("codex");
+  const claudeId = ProviderInstanceId.make("claudeAgent");
+  const base = {
+    providers: [
+      { instanceId: codexId, requiresNewThreadForModelChange: true },
+      { instanceId: claudeId },
+    ],
+    hasStartedSession: true,
+    supportsHandoff: true,
+    current: { instanceId: codexId, model: "gpt-5" },
+    currentProviderInstanceId: null,
+  };
+
+  it("follows web: no limit before the session starts, or for the same selection", () => {
+    const next = { instanceId: codexId, model: "gpt-6" };
+    expect(modelChangeBlockReason({ ...base, hasStartedSession: false, next })).toBeNull();
+    expect(modelChangeBlockReason({ ...base, next: base.current })).toBeNull();
+  });
+
+  it("refuses a model change on a provider that needs a new thread for one", () => {
+    expect(
+      modelChangeBlockReason({ ...base, next: { instanceId: codexId, model: "gpt-6" } }),
+    ).toMatch(/^Start a new thread to change models/u);
+  });
+
+  it("allows a provider switch only with handoff support", () => {
+    const next = { instanceId: claudeId, model: "sonnet" };
+    expect(modelChangeBlockReason({ ...base, next })).toBeNull();
+    expect(modelChangeBlockReason({ ...base, supportsHandoff: false, next })).toBe(
+      "Start a new thread to switch providers.",
+    );
   });
 });

@@ -102,16 +102,7 @@ export function createViewConnection(server: Platform.ViewServer) {
     registry,
     connectionStateAtom: catalog.stateAtom(environmentId),
     providersAtom: serverAtoms.providersValueAtom(environmentId),
-    thread: (threadId: ThreadId) => {
-      const ref = { environmentId, threadId };
-      return {
-        stateAtom: details.stateAtom(ref),
-        structureAtom: details.quietThreadAtom(ref),
-        visibleTurnItemsAtom: details.visibleTurnItemsAtom(ref),
-        pendingRequestsAtom: details.pendingRequestsAtom(ref),
-        queueAtom: details.queueWorkflowAtom(ref),
-      };
-    },
+    thread: threadAtoms(details, environmentId),
     /** The server's shell once it arrives; mounted only for as long as this waits. */
     shellSnapshot: () =>
       new Promise<OrchestrationV2ShellSnapshot>((resolve) => {
@@ -148,3 +139,29 @@ export function createViewConnection(server: Platform.ViewServer) {
 }
 
 export type ViewConnection = ReturnType<typeof createViewConnection>;
+
+/** What the view reads and runs; the rest of `ViewConnection` serves startup. */
+export type ViewApi = Omit<
+  ViewConnection,
+  "environmentId" | "shellSnapshot" | "createProject" | "dispose"
+>;
+
+/**
+ * The atoms one thread's view reads, all derived by client-runtime from the
+ * thread's state. Tests feed `details` their own state and get the same derivations.
+ */
+export function threadAtoms(
+  details: ReturnType<typeof createEnvironmentThreadDetailAtoms>,
+  environmentId: EnvironmentId,
+) {
+  return (threadId: ThreadId) => {
+    const ref = { environmentId, threadId };
+    return {
+      stateAtom: details.stateAtom(ref),
+      structureAtom: details.quietThreadAtom(ref),
+      visibleTurnItemsAtom: details.visibleTurnItemsAtom(ref),
+      pendingRequestsAtom: details.pendingRequestsAtom(ref),
+      queueAtom: details.queueWorkflowAtom(ref),
+    };
+  };
+}

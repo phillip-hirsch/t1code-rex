@@ -4,9 +4,9 @@ import type { ThreadId } from "@t3tools/contracts";
 import { Atom } from "effect/reactivity";
 import { useMemo } from "react";
 
-import type { ViewConnection } from "./connection.ts";
+import type { ViewApi } from "./connection.ts";
 
-type ThreadAtoms = ReturnType<ViewConnection["thread"]>;
+type ThreadAtoms = ReturnType<ViewApi["thread"]>;
 
 // A thread that isn't launched yet has nothing to subscribe to.
 const IDLE: ThreadAtoms = {
@@ -18,7 +18,7 @@ const IDLE: ThreadAtoms = {
 };
 
 /** The thread's live state from `orchestration.subscribeThread`, while `enabled`. */
-export function useThreadData(connection: ViewConnection, threadId: ThreadId, enabled: boolean) {
+export function useThreadData(connection: ViewApi, threadId: ThreadId, enabled: boolean) {
   const atoms = useMemo(
     () => (enabled ? connection.thread(threadId) : IDLE),
     [connection, threadId, enabled],
@@ -26,6 +26,8 @@ export function useThreadData(connection: ViewConnection, threadId: ThreadId, en
   const state = useAtomValue(atoms.stateAtom);
   const structure = useAtomValue(atoms.structureAtom);
   return {
+    /** For handlers that must read the latest state, not the last render's. */
+    atoms,
     status: state.status,
     history: state.history,
     structure: structure?.projection ?? null,

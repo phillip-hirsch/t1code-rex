@@ -10,6 +10,7 @@ import * as NodeFS from "node:fs";
 import { createTestRenderer } from "@opentui/core/testing";
 
 import { resolveTr3xPaths } from "../paths.ts";
+import { frameWaiter } from "../testing/frames.ts";
 import { mountView, resolveViewServer } from "./main.tsx";
 import type { RexStatus } from "./status.ts";
 
@@ -19,22 +20,28 @@ if (!home || !workspace || !requestLog) {
   process.exit(2);
 }
 
-const TIMEOUT_MS = 30_000;
-let failures = 0;
+/** Each step waits at most this long for the server and the fake provider. */
+const STEP_TIMEOUT_MS = 15_000;
+
 function check(label: string, ok: boolean, detail = ""): void {
-  if (!ok) failures += 1;
-  console.log(`${ok ? "ok  " : "FAIL"} ${label}${detail ? `: ${detail}` : ""}`);
+  if (!ok) throw new Error(`${label}${detail ? `: ${detail}` : ""}`);
+  console.log(`ok   ${label}`);
 }
 
 const paths = resolveTr3xPaths({ TR3X_HOME: home });
 const server = await resolveViewServer(paths, process.env);
 const setup = await createTestRenderer({ width: 110, height: 34 });
+const frames = frameWaiter(setup, STEP_TIMEOUT_MS);
 const statuses: RexStatus[] = [];
 const view = await mountView({
   renderer: setup.renderer,
   server,
   target: { kind: "new", cwd: workspace },
-  onStatus: (status) => statuses.push(status),
+  onStatus: (status) => {
+    statuses.push(status);
+    // A report follows the render it describes, so wake the step that waits on it.
+    frames.wake();
+  },
   onQuit: () => {},
 });
 const lastStatus = () => statuses.at(-1);
@@ -43,21 +50,17 @@ const describeStatus = (status: RexStatus | undefined) =>
     ? "none"
     : `${status.state}${status.state === "blocked" ? `:${status.kind}` : ""}`;
 
-/** Renders until the frame and status satisfy `done`, or fails the check after the timeout. */
+/** Waits until the frame and status satisfy `done`; the first step that times out ends the check. */
 async function until(label: string, done: (frame: string) => boolean): Promise<string> {
-  const deadline = Date.now() + TIMEOUT_MS;
-  for (;;) {
-    await setup.renderOnce();
-    const frame = setup.captureCharFrame();
-    if (done(frame)) {
-      check(label, true);
-      return frame;
-    }
-    if (Date.now() > deadline) {
-      check(label, false, `timed out; status ${describeStatus(lastStatus())}\n${frame}`);
-      return frame;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+  try {
+    const frame = await frames.until(label, done);
+    console.log(`ok   ${label}`);
+    return frame;
+  } catch (error) {
+    throw new Error(
+      `${error instanceof Error ? error.message : String(error)}\nstatus ${describeStatus(lastStatus())}`,
+      { cause: error },
+    );
   }
 }
 
@@ -99,7 +102,7 @@ try {
   const blocked = await until(
     "a handoff row, then Grok B's approval prompt",
     (frame) =>
-      frame.includes("Context handoff: Grok Grok 4.6 → Grok B Grok 4.6") &&
+      frame.includes("Context handoff: Grok · Grok 4.6 → Grok B · Grok 4.6") &&
       frame.includes("Approval needed") &&
       lastStatus()?.state === "blocked",
   );
@@ -118,7 +121,7 @@ try {
     "approving lets Grok B finish",
     (frame) => frame.includes("hello from mock") && lastStatus()?.state === "done",
   );
-  await press("right");
+  setup.mockInput.pressArrow("right");
   await until(
     "a key press after the run marks it seen: idle",
     () => lastStatus()?.state === "idle",
@@ -132,10 +135,13 @@ try {
       (status) => !/[\u0000-\u001f\u007f-\u009f]/u.test(`${status.title}${status.message}`),
     ),
   );
+  console.log("all checks passed");
+} catch (error) {
+  console.log(`FAIL ${error instanceof Error ? error.message : String(error)}`);
+  process.exitCode = 1;
 } finally {
+  frames.dispose();
   view.dispose();
   await setup.dispose();
 }
-
-console.log(failures === 0 ? "all checks passed" : `${failures} check(s) failed`);
-process.exit(failures === 0 ? 0 : 1);
+process.exit(process.exitCode ?? 0);

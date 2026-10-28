@@ -3,13 +3,16 @@ import * as NodeCrypto from "node:crypto";
 import type { KeyEvent, TextareaRenderable } from "@opentui/core";
 import { useKeyboard, useRenderer } from "@opentui/react";
 import { useAtomValue } from "@effect/atom-react";
+import { deriveThreadStructureRuntime } from "@t3tools/client-runtime/state/thread-execution";
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
+import type { StartThreadTurnInput } from "@t3tools/client-runtime/state/threads";
 import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   MessageId,
   type ModelSelection,
   type ProjectId,
+  type ProviderInteractionMode,
   type RuntimeMode,
   type RunId,
   type ServerProvider,
@@ -17,12 +20,13 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import { AsyncResult } from "effect/reactivity";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 
-import type { ViewConnection } from "./connection.ts";
+import type { CommandResult, ViewApi } from "./connection.ts";
 import {
   buildPickerEntries,
   defaultSelection,
+  modelChangeBlockReason,
   openPicker,
   reducePickerKey,
   selectionLabel,
@@ -37,15 +41,16 @@ import {
   togglePicked,
   type QuestionDraft,
 } from "./requests.ts";
+import { PendingWork } from "./pending.ts";
 import { resolveRexStatus, sameRexStatus, type RexStatus } from "./status.ts";
-import { markdownStyle, palette } from "./theme.ts";
+import { markdownStyles, palette } from "./theme.ts";
 import { buildTimelineRows } from "./timeline.ts";
-import { ApprovalPanel, PickerPanel, QuestionPanel } from "./Panels.tsx";
+import { ApprovalPanel, Footer, PickerPanel, QuestionPanel } from "./Panels.tsx";
 import { Transcript, type TranscriptHandle } from "./Transcript.tsx";
 import { useThreadData } from "./useThreadData.ts";
 
 export interface AppProps {
-  readonly connection: ViewConnection;
+  readonly connection: ViewApi;
   readonly threadId: ThreadId;
   /** Set for `--new`: the first send launches the thread in this project. */
   readonly newThread: { readonly projectId: ProjectId } | null;
@@ -69,8 +74,12 @@ function nextRuntimeMode(mode: RuntimeMode): RuntimeMode {
 export function App(props: AppProps) {
   const { connection, threadId } = props;
   const renderer = useRenderer();
-  const style = useMemo(() => markdownStyle(renderer.nativeScene), [renderer]);
+  const styles = useMemo(() => markdownStyles(renderer.nativeScene), [renderer]);
   const [launched, setLaunched] = useState(props.newThread === null);
+  const [pending] = useState(() => new PendingWork(props.newThread === null));
+  const [, rerender] = useReducer((count: number) => count + 1, 0);
+  const composerRef = useRef<TextareaRenderable | null>(null);
+  const transcriptRef = useRef<TranscriptHandle | null>(null);
   const data = useThreadData(connection, threadId, launched);
   const loadedProviders = useAtomValue(connection.providersAtom);
   const providers = loadedProviders ?? NO_PROVIDERS;
@@ -89,7 +98,13 @@ export function App(props: AppProps) {
   const runtimeMode = thread?.runtimeMode ?? draftMode;
   const activeRun = data.queue?.activeRun ?? null;
   const supportsHandoff = !launched || threadSupportsProviderHandoff(data.structure);
-  const pickerDisabled = activeRun !== null ? RUN_ACTIVE : null;
+  /** A run is on, or about to be: no switching until it settles. */
+  const busy = () => {
+    const { registry } = connection;
+    const messages = registry.get(data.atoms.structureAtom)?.projection.messages ?? [];
+    return registry.get(data.atoms.queueAtom)?.activeRun != null || pending.busy(messages);
+  };
+  const pickerDisabled = busy() ? RUN_ACTIVE : null;
   const runs = data.structure?.runs ?? NO_RUNS;
   const latestRun = runs.at(-1) ?? null;
 
@@ -97,7 +112,9 @@ export function App(props: AppProps) {
     () => buildTimelineRows(data.items, runs, providers),
     [data.items, runs, providers],
   );
-  const request = activeRequest(data.requests);
+  const shown = activeRequest(data.requests);
+  const request =
+    shown?.type === "question" && pending.isAnswered(shown.input.requestId) ? null : shown;
   const [drafts, setDrafts] = useState<ReadonlyMap<string, QuestionDraft>>(new Map());
   const [answers, setAnswers] = useState<ReadonlyMap<string, Answer>>(new Map());
   const answerKey = (questionId: string) =>
@@ -111,6 +128,15 @@ export function App(props: AppProps) {
     question && questionKey ? (drafts.get(questionKey) ?? initialDraft(question)) : null;
 
   // Keys can arrive faster than React renders, so the key handler reads the ref.
+  // A question's suggested answer starts in the composer, as on web, until the user edits it.
+  const suggestion = questionDraft?.text ?? "";
+  useEffect(() => {
+    const composer = composerRef.current;
+    if (questionKey && composer && suggestion && composer.plainText === "") {
+      composer.setText(suggestion);
+    }
+  }, [questionKey, suggestion]);
+
   const [picker, setPickerState] = useState<PickerState | null>(null);
   const pickerRef = useRef<PickerState | null>(null);
   const setPicker = (next: PickerState | null) => {
@@ -123,8 +149,6 @@ export function App(props: AppProps) {
   );
   const [notice, setNotice] = useState<string | null>(null);
   const [seenRunId, setSeenRunId] = useState<RunId | null>(null);
-  const composerRef = useRef<TextareaRenderable | null>(null);
-  const transcriptRef = useRef<TranscriptHandle | null>(null);
 
   const lastReply = useMemo(() => {
     const reply = rows.findLast((row) => row.kind === "assistant");
@@ -152,14 +176,19 @@ export function App(props: AppProps) {
     props.onStatus(status);
   });
 
-  const answerQuestion = async (text: string) => {
+  const answerQuestion = async (text: string): Promise<boolean> => {
     if (request?.type !== "question" || !question || !questionKey || !questionDraft) return false;
+    const { requestId, questions } = request.input;
     const answer = resolveAnswer(question, { ...questionDraft, text });
     if (answer === null) return false;
     const next = new Map(answers).set(questionKey, answer);
-    setAnswers(next);
-    const { requestId, questions } = request.input;
-    if (questions.some((candidate) => !next.has(answerKey(candidate.id)))) return true;
+    if (questions.some((candidate) => !next.has(answerKey(candidate.id)))) {
+      setAnswers(next);
+      return true;
+    }
+    // The last answer counts only once the server takes it, so a failure can be retried.
+    if (!pending.beginAnswer(requestId)) return false;
+    rerender();
     const result = await connection.respondToUserInput({
       threadId,
       requestId,
@@ -167,8 +196,53 @@ export function App(props: AppProps) {
         questions.map((candidate) => [candidate.id, next.get(answerKey(candidate.id))]),
       ),
     });
+    pending.endAnswer(requestId, result.ok);
+    if (result.ok) setAnswers(next);
     setNotice(result.ok ? null : `Could not answer: ${result.error}`);
-    return true;
+    rerender();
+    return result.ok;
+  };
+
+  /** Starts the thread with its first message, once; later sends wait for that. */
+  const dispatch = async (
+    message: StartThreadTurnInput["message"],
+    interactionMode: ProviderInteractionMode,
+    modelSelection: ModelSelection,
+  ): Promise<CommandResult> => {
+    const newThread = props.newThread;
+    if (newThread !== null && !pending.isLaunched) {
+      const { result, started } = await pending.launch(() =>
+        connection.startTurn({
+          threadId,
+          message,
+          modelSelection,
+          titleSeed: message.text,
+          runtimeMode,
+          interactionMode,
+          bootstrap: {
+            createThread: {
+              projectId: newThread.projectId,
+              title: "New thread",
+              modelSelection,
+              runtimeMode,
+              interactionMode,
+              branch: null,
+              worktreePath: null,
+              createdAt: nowIso(),
+            },
+          },
+        }),
+      );
+      if (result.ok) setLaunched(true);
+      if (started || !result.ok) return result;
+    }
+    return await connection.startTurn({
+      threadId,
+      message,
+      runtimeMode,
+      interactionMode,
+      dispatchMode: "auto",
+    });
   };
 
   const send = async (text: string): Promise<boolean> => {
@@ -189,38 +263,16 @@ export function App(props: AppProps) {
       text: trimmed,
       attachments: [],
     };
-    const interactionMode = thread?.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE;
-    const result =
-      props.newThread !== null && !launched
-        ? await connection.startTurn({
-            threadId,
-            message,
-            modelSelection: selection,
-            titleSeed: trimmed,
-            runtimeMode,
-            interactionMode,
-            bootstrap: {
-              createThread: {
-                projectId: props.newThread.projectId,
-                title: "New thread",
-                modelSelection: selection,
-                runtimeMode,
-                interactionMode,
-                branch: null,
-                worktreePath: null,
-                createdAt: nowIso(),
-              },
-            },
-          })
-        : await connection.startTurn({
-            threadId,
-            message,
-            runtimeMode,
-            interactionMode,
-            dispatchMode: "auto",
-          });
-    if (result.ok && !launched) setLaunched(true);
+    pending.beginSend(message.messageId);
+    rerender();
+    const result = await dispatch(
+      message,
+      thread?.interactionMode ?? DEFAULT_PROVIDER_INTERACTION_MODE,
+      selection,
+    );
+    pending.endSend(message.messageId, result.ok);
     setNotice(result.ok ? null : `Could not send: ${result.error}`);
+    rerender();
     return result.ok;
   };
 
@@ -229,8 +281,11 @@ export function App(props: AppProps) {
     if (!composer) return;
     const text = composer.plainText;
     composer.clear();
+    // A failed send's text goes back, after anything typed or restored since.
     void send(text).then((ok) => {
-      if (!ok && composer.plainText === "") composer.setText(text);
+      if (ok || composer.isDestroyed) return;
+      const current = composer.plainText;
+      composer.setText(current ? `${current}\n${text}` : text);
     });
   };
 
@@ -245,9 +300,27 @@ export function App(props: AppProps) {
   const pick = async (next: ModelSelection) => {
     setPicker(null);
     if (!launched) return setDraftSelection(next);
-    if (activeRun !== null) return setNotice(pickerDisabled);
+    if (busy()) return setNotice(RUN_ACTIVE);
+    const fresh = connection.registry.get(data.atoms.structureAtom)?.projection ?? null;
+    const runtime = fresh === null ? null : deriveThreadStructureRuntime(fresh);
+    const blocked =
+      fresh === null
+        ? null
+        : modelChangeBlockReason({
+            providers,
+            hasStartedSession: runtime !== null,
+            supportsHandoff: threadSupportsProviderHandoff(fresh),
+            current: fresh.thread.modelSelection,
+            currentProviderInstanceId: runtime?.providerInstanceId ?? null,
+            next,
+          });
+    if (blocked !== null) return setNotice(blocked);
+    pending.beginSwitch();
+    rerender();
     const result = await connection.updateThread({ threadId, modelSelection: next });
+    pending.endSwitch();
     setNotice(result.ok ? null : `Could not switch: ${result.error}`);
+    rerender();
   };
 
   const toggleRuntimeMode = async () => {
@@ -320,6 +393,9 @@ export function App(props: AppProps) {
       const count = question.options.length;
       if ((key.name === "up" || key.name === "down") && count > 0) {
         consume();
+        // Moving to an option drops an untouched suggestion, so Enter picks the option.
+        if (suggestion && composerRef.current?.plainText === suggestion)
+          composerRef.current.clear();
         setDraft({
           ...questionDraft,
           cursor: (questionDraft.cursor + (key.name === "up" ? count - 1 : 1)) % count,
@@ -380,7 +456,7 @@ export function App(props: AppProps) {
       <Transcript
         ref={transcriptRef}
         rows={rows}
-        style={style}
+        styles={styles}
         header={historyHeader}
         empty={empty}
       />
@@ -438,19 +514,15 @@ export function App(props: AppProps) {
           style={{ flexGrow: 1 }}
         />
       </box>
-      <text
-        content={[
+      <Footer
+        hints={[
           "enter send",
           "shift+enter newline",
-          ...(activeRun ? ["esc stop"] : ["^p model"]),
+          activeRun ? "esc stop" : "^p model",
           `^t ${nextRuntimeMode(runtimeMode)}`,
-          "pgup scroll",
+          "pgup history",
           "^c quit",
-        ].join("  ")}
-        fg={palette.subtle}
-        style={{ paddingLeft: 1, flexShrink: 0 }}
-        truncate
-        wrapMode="none"
+        ]}
       />
     </box>
   );

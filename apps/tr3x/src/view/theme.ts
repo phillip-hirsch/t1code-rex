@@ -15,7 +15,20 @@ export const palette = {
   border: "#3a3a3a",
 } as const;
 
-export function markdownStyle(owner: NativeResourceOwner): SyntaxStyle {
+export interface MarkdownStyles {
+  readonly assistant: SyntaxStyle;
+  readonly user: SyntaxStyle;
+}
+
+/** Markdown for replies, and for the user's own messages in their color. */
+export function markdownStyles(owner: NativeResourceOwner): MarkdownStyles {
+  return {
+    assistant: markdownStyle(owner, palette.text),
+    user: markdownStyle(owner, palette.user),
+  };
+}
+
+function markdownStyle(owner: NativeResourceOwner, text: string): SyntaxStyle {
   const fg = (hex: string) => RGBA.fromHex(hex);
   return SyntaxStyle.fromStyles(
     {
@@ -24,10 +37,10 @@ export function markdownStyle(owner: NativeResourceOwner): SyntaxStyle {
       comment: { fg: fg(palette.subtle), italic: true },
       number: { fg: fg("#8cc8ff") },
       function: { fg: fg(palette.accent) },
-      "markup.heading": { fg: fg(palette.text), bold: true },
-      "markup.bold": { fg: fg(palette.text), bold: true },
-      "markup.strong": { fg: fg(palette.text), bold: true },
-      "markup.italic": { fg: fg(palette.text), italic: true },
+      "markup.heading": { fg: fg(text), bold: true },
+      "markup.bold": { fg: fg(text), bold: true },
+      "markup.strong": { fg: fg(text), bold: true },
+      "markup.italic": { fg: fg(text), italic: true },
       "markup.list": { fg: fg(palette.muted) },
       "markup.quote": { fg: fg(palette.muted), italic: true },
       "markup.raw": { fg: fg("#9bd1ff") },
@@ -35,7 +48,7 @@ export function markdownStyle(owner: NativeResourceOwner): SyntaxStyle {
       "markup.link.label": { fg: fg(palette.user), underline: true },
       "markup.link.url": { fg: fg(palette.accent), underline: true },
       conceal: { fg: fg(palette.subtle) },
-      default: { fg: fg(palette.text) },
+      default: { fg: fg(text) },
     },
     owner,
   );

@@ -1,5 +1,4 @@
 import { resolveHandoffEndpoints, type HandoffTimelineRun } from "@t3tools/client-runtime/handoff";
-import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
 import {
   IDLE_COMPACTION_TITLES,
   resolveUserMessagePresentation,
@@ -14,9 +13,10 @@ import {
   isOrchestrationV2WorkActive,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
-  type ProviderInstanceId,
   type ServerProvider,
 } from "@t3tools/contracts";
+
+import { endpointLabel } from "./picker.ts";
 
 type TurnItem = OrchestrationV2TurnItem;
 type ItemOf<T extends TurnItem["type"]> = Extract<TurnItem, { type: T }>;
@@ -244,18 +244,7 @@ export function presentTurnItem(row: OrchestrationV2ProjectedTurnItem): Timeline
   };
 }
 
-function endpointLabel(
-  endpoint: { readonly instanceId: ProviderInstanceId; readonly model?: string | undefined },
-  providers: ReadonlyArray<ServerProvider>,
-): string {
-  const provider = providers.find((candidate) => candidate.instanceId === endpoint.instanceId);
-  const name = provider ? resolveProviderInstanceDisplayName(provider) : endpoint.instanceId;
-  const model = provider?.models.find((candidate) => candidate.slug === endpoint.model);
-  const modelName = model?.shortName ?? model?.name ?? endpoint.model;
-  return modelName ? `${name} ${modelName}` : name;
-}
-
-/** "Context handoff: Codex GPT-5 → Claude Sonnet", as web's handoff divider reads. */
+/** "Context handoff: Codex · GPT-5 → Claude · Sonnet 5.5", as web's handoff divider reads. */
 export function handoffRow(
   row: OrchestrationV2ProjectedTurnItem,
   runs: ReadonlyArray<HandoffTimelineRun>,
@@ -264,7 +253,7 @@ export function handoffRow(
   const item = row.item;
   if (item.type !== "handoff") return null;
   const { from, to } = resolveHandoffEndpoints(item, runs);
-  const route = `${from.map((endpoint) => endpointLabel(endpoint, providers)).join(", ")} → ${endpointLabel(to, providers)}`;
+  const route = `${from.map((endpoint) => endpointLabel(providers, endpoint)).join(", ")} → ${endpointLabel(providers, to)}`;
   return divider(
     `${row.sourceThreadId}:${row.sourceItemId}`,
     item.status === "failed" ? "error" : "info",

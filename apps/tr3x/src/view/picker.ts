@@ -1,7 +1,81 @@
+import { resolveModelShortName } from "@t3tools/client-runtime/provider-clients";
 import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
-import type { ModelSelection, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
+import type {
+  ModelSelection,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ServerProvider,
+  ServerProviderModel,
+} from "@t3tools/contracts";
 
 import { isUsableProvider } from "../providers.ts";
+
+function stripLeadingQualifier(value: string, qualifier: string | undefined): string {
+  const trimmed = qualifier?.trim();
+  if (!trimmed) return value;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return value.replace(new RegExp(`^${escaped}(?:\\s*[.:/-]\\s*|\\s+)`, "iu"), "").trim() || value;
+}
+
+/**
+ * A model's names as web shows them (apps/web/src/components/chat/providerIconUtils.ts):
+ * the full one in the model list (`getDisplayModelName`), the short one on the
+ * picker's trigger and handoff rows (`getTriggerDisplayModelName`).
+ */
+function modelListLabel(model: Pick<ServerProviderModel, "name" | "subProvider">): string {
+  return stripLeadingQualifier(model.name, model.subProvider);
+}
+
+export function modelLabel(
+  model: Pick<ServerProviderModel, "name" | "shortName" | "subProvider">,
+  driver: ProviderDriverKind | null | undefined,
+): string {
+  const name = resolveModelShortName(model, driver) ?? model.name;
+  return stripLeadingQualifier(name, model.subProvider);
+}
+
+/** "Codex · GPT-5", or the provider alone when the model is unknown to it and unnamed. */
+export function endpointLabel(
+  providers: ReadonlyArray<ServerProvider>,
+  endpoint: { readonly instanceId: ProviderInstanceId; readonly model?: string | undefined },
+): string {
+  const provider = providers.find((candidate) => candidate.instanceId === endpoint.instanceId);
+  const name = provider ? resolveProviderInstanceDisplayName(provider) : endpoint.instanceId;
+  const slug = endpoint.model?.trim();
+  if (!slug) return name;
+  const model = provider?.models.find((candidate) => candidate.slug === slug);
+  return `${name} · ${model ? modelLabel(model, provider?.driver) : slug}`;
+}
+
+/**
+ * Why a started thread can't change to `next`, or null when it can. Mirrors web's
+ * `getStartedThreadModelChangeBlockReason` (apps/web/src/components/ChatView.logic.ts).
+ */
+export function modelChangeBlockReason(input: {
+  readonly providers: ReadonlyArray<
+    Pick<ServerProvider, "instanceId" | "requiresNewThreadForModelChange">
+  >;
+  readonly hasStartedSession: boolean;
+  readonly supportsHandoff: boolean;
+  readonly current: ModelSelection;
+  readonly currentProviderInstanceId: ProviderInstanceId | null;
+  readonly next: ModelSelection;
+}): string | null {
+  if (!input.hasStartedSession) return null;
+  const currentInstance = input.currentProviderInstanceId ?? input.current.instanceId;
+  if (currentInstance === input.next.instanceId && input.current.model === input.next.model) {
+    return null;
+  }
+  if (currentInstance !== input.next.instanceId) {
+    return input.supportsHandoff ? null : "Start a new thread to switch providers.";
+  }
+  const requiresNewThread = (instanceId: ProviderInstanceId) =>
+    input.providers.find((provider) => provider.instanceId === instanceId)
+      ?.requiresNewThreadForModelChange === true;
+  return requiresNewThread(currentInstance) || requiresNewThread(input.next.instanceId)
+    ? "Start a new thread to change models: this provider can't switch models mid-conversation."
+    : null;
+}
 
 /** One row of the model picker: a usable provider's model. */
 export interface PickerEntry {
@@ -28,7 +102,7 @@ export function buildPickerEntries(
         instanceId: provider.instanceId,
         model: model.slug,
         provider: name,
-        label: model.shortName ?? model.name,
+        label: modelListLabel(model),
       }));
     });
 }
@@ -46,11 +120,7 @@ export function selectionLabel(
   providers: ReadonlyArray<ServerProvider>,
   selection: ModelSelection | null,
 ): string {
-  if (selection === null) return "no model";
-  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
-  const model = provider?.models.find((candidate) => candidate.slug === selection.model);
-  const name = provider ? resolveProviderInstanceDisplayName(provider) : selection.instanceId;
-  return `${name} · ${model?.shortName ?? model?.name ?? selection.model}`;
+  return selection === null ? "no model" : endpointLabel(providers, selection);
 }
 
 export interface PickerState {
