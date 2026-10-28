@@ -21,7 +21,7 @@ Paths starting with `v2:` are in `origin/orchestration-v2` (upstream T3 Code `51
  └──────────│────────────────────────────┘                  │ rex CLI: window new/close,
             │ client-runtime (Effect RPC over WS)            │ events --all --json
             │                                  ┌─────────────▼──────────────┐
-            │                                  │ tr3x daemon (Node)         │
+            │                                  │ tr3x daemon (Bun)          │
             │                                  │  shell stream → tab map    │
             │                                  │  issues per-tab bearer     │
             │                                  │  Unix socket for Lua/CLI   │
@@ -152,7 +152,7 @@ Target: about **4–5k non-test lines** for the view, against 25k for the abando
 
 - One T3 server per user, because the server is multi-project and one server owns each base dir. A second server exits with code 78 [V `upstream-v2-api.md` §5.1, `desktopBootstrap.ts:6`].
 - The daemon starts it in desktop mode with the bootstrap over stdin, or attaches to it through `server-runtime.json`. `serverLauncher.ts` already does both [V].
-- One Rex **session per T3 project** (session label = project title) and one **tab per open thread**. The daemon is a single Node process; any `tr3x` command starts it if it isn't running, the way `rex --autostart` starts the Rex server.
+- One Rex **session per T3 project** (session label = project title) and one **tab per open thread**. The daemon is a single Bun process; any `tr3x` command starts it if it isn't running, the way `rex --autostart` starts the Rex server.
 - Its control socket is `$XDG_STATE_HOME/tr3x/daemon.sock`, mode 0600.
 
 **Thread → tab** (the daemon owns every tab change):
@@ -210,7 +210,7 @@ Target: about **4–5k non-test lines** for the view, against 25k for the abando
 ```
 apps/server              upstream, untouched
 apps/web, desktop, …     upstream, untouched, not built in tr3x CI
-apps/tr3x                Node package, bin "tr3x"
+apps/tr3x                Bun package, bin "tr3x"
   src/daemon/            shell stream → Rex map, server launcher, bearer issuing, control socket
   src/rex/               rex CLI client, events stream, labels (from rexWorkspace.ts)
   src/view/              agent view (OpenTUI + client-runtime + @effect/atom-react)
@@ -267,4 +267,4 @@ The user answered questions 1–4. Questions 5–8 take the suggested defaults u
 6. **Merge cadence:** merge `t3up/main` when needed, not on a schedule.
 7. **Rex setup:** one `require("tr3x")` line in `init.lua`.
 8. **Notifications:** the daemon's macOS notifications are opt-in until Rex ships its own.
-9. **Runtime:** the `tr3x` CLI runs on Node, the same runtime as upstream's server, not Bun (PR #26). PR 3 checks whether OpenTUI works on Node 26.4+ with `--experimental-ffi`. If it doesn't, only `tr3x view` falls back to Bun.
+9. **Runtime:** the `tr3x` CLI runs on Bun (1.3.14+, which OpenTUI 0.7.0 needs). PR #26 shipped it on Node; PR 3 moves it to Bun. The T3 server it launches stays on Node, as upstream runs it.
