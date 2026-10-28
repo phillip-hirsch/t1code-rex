@@ -17,6 +17,7 @@ import {
   TurnItemId,
   type MessageId as MessageIdType,
   type ModelSelection,
+  type OrchestrationProjectShell,
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2Run,
   type OrchestrationV2ThreadProjection,
@@ -304,6 +305,7 @@ export function createFakeView(providers: ReadonlyArray<ServerProvider>) {
     loadEarlier: commands.loadEarlier.run,
   };
   const createProject = new CommandStub<CreateProjectInput>();
+  let projects: Array<OrchestrationProjectShell> = [];
   let disposed = false;
   /** The whole connection `mountView` opens: no projects yet, and `createProject` to hold. */
   const connection: ViewConnection = {
@@ -313,7 +315,7 @@ export function createFakeView(providers: ReadonlyArray<ServerProvider>) {
       Promise.resolve({
         schemaVersion: 1,
         snapshotSequence: 0,
-        projects: [],
+        projects,
         threads: [],
         archivedThreads: [],
       }),
@@ -342,6 +344,22 @@ export function createFakeView(providers: ReadonlyArray<ServerProvider>) {
           history: { ...live.history, ...history },
         }),
       ),
+    /** Adds a project the server knows, rooted at `workspaceRoot` exactly as stored. */
+    addProject: (id: string, workspaceRoot: string) => {
+      projects = [
+        ...projects,
+        {
+          id: ProjectId.make(id),
+          title: id,
+          workspaceRoot,
+          repositoryIdentity: null,
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: "2026-10-27T00:00:00.000Z",
+          updatedAt: "2026-10-27T00:00:00.000Z",
+        },
+      ];
+    },
     /** Replaces the thread's sync state, e.g. a failed load with no projection. */
     setThreadState: (next: Partial<EnvironmentThreadState>) =>
       registry.set(state, AsyncResult.success({ ...live, ...next })),

@@ -75,8 +75,11 @@ async function resolveProject(
   signal: AbortSignal,
 ): Promise<ProjectId> {
   const root = NodeFS.realpathSync(cwd);
+  // The server resolves a workspace root without following symlinks, so a
+  // project made elsewhere under a symlinked path is found by that path too.
+  const roots = new Set([NodePath.resolve(cwd), root]);
   const snapshot = await connection.shellSnapshot(signal);
-  const existing = snapshot.projects.find((project) => project.workspaceRoot === root);
+  const existing = snapshot.projects.find((project) => roots.has(project.workspaceRoot));
   if (existing) return existing.id;
   const projectId = ProjectId.make(NodeCrypto.randomUUID());
   const result = await connection.createProject({

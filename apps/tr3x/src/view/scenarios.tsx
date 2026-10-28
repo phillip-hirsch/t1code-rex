@@ -5,6 +5,9 @@
  *
  *   bun apps/tr3x/src/view/scenarios.tsx <scenario>   (or --list)
  */
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import { createTestRenderer } from "@opentui/core/testing";
 import * as Option from "effect/Option";
@@ -212,6 +215,29 @@ const startupScenarios: Record<string, () => Promise<void>> = Object.fromEntries
 
 const scenarios: Record<string, Scenario> = {
   ...startupScenarios,
+
+  async "view --new finds a project stored under a symlinked path"() {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "tr3x-symlink-"));
+    try {
+      const real = NodePath.join(dir, "real");
+      const link = NodePath.join(dir, "link");
+      NodeFS.mkdirSync(real);
+      NodeFS.symlinkSync(real, link);
+      const view = createFakeView([codex]);
+      // The server keeps the path it was given, so a project made via `link` stays under it.
+      view.addProject("project-link", link);
+      const ended = await startup(
+        { kind: "new", cwd: link },
+        () => Promise.resolve("token"),
+        async () => {},
+        () => view.connection,
+      );
+      expect(ended.kind === "mounted", `startup ended as ${ended.kind}, not mounted`);
+      expect(view.createProject.calls.length === 0, "no second project for the same directory");
+    } finally {
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
+  },
 
   async "view --new: ctrl+c quits while the project is being created"() {
     const view = createFakeView([codex]);
