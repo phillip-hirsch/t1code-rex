@@ -343,6 +343,41 @@ const scenarios: Record<string, Scenario> = {
     await ui.dispose();
   },
 
+  async "rapid arrows then enter answer the option they reached"() {
+    const view = createFakeView([codex]);
+    const options = ["one", "two", "three"].map((label) => ({ label, description: label }));
+    const { item, request } = pendingQuestion("q4", [{ ...question, options }]);
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    const ui = await mount(view);
+    // All before React commits.
+    ui.setup.mockInput.pressArrow("down");
+    ui.setup.mockInput.pressArrow("down");
+    ui.setup.mockInput.pressEnter();
+    await ui.settle();
+    const answers = view.commands.respondToUserInput.calls[0]?.answers;
+    expect(answers?.q === "three", `both arrows count: ${JSON.stringify(answers)}`);
+    await ui.dispose();
+  },
+
+  async "rapid picks on a multi-select all count"() {
+    const view = createFakeView([codex]);
+    const options = ["one", "two", "three"].map((label) => ({ label, description: label }));
+    const { item, request } = pendingQuestion("q5", [{ ...question, options, multiSelect: true }]);
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    const ui = await mount(view);
+    ui.setup.mockInput.pressKey("TAB");
+    ui.setup.mockInput.pressArrow("down");
+    ui.setup.mockInput.pressKey("TAB");
+    ui.setup.mockInput.pressEnter();
+    await ui.settle();
+    const answers = view.commands.respondToUserInput.calls[0]?.answers;
+    expect(
+      JSON.stringify(answers?.q) === JSON.stringify(["one", "two"]),
+      `both picks count: ${JSON.stringify(answers)}`,
+    );
+    await ui.dispose();
+  },
+
   async "rapid enters keep a typed answer to an earlier question"() {
     const view = createFakeView([codex]);
     const { item, request } = pendingQuestion("q3", [

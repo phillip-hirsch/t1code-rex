@@ -131,7 +131,6 @@ export function App(props: AppProps) {
     }, APPROVAL_ARM_MS);
     return () => clearTimeout(timer);
   }, [approvalId, pending]);
-  const [drafts, setDrafts] = useState<ReadonlyMap<string, QuestionDraft>>(new Map());
   const answered = request?.type === "question" ? pending.answersTo(request.input.requestId) : null;
   const question =
     request?.type === "question"
@@ -140,7 +139,7 @@ export function App(props: AppProps) {
   const questionKey =
     request?.type === "question" && question ? `${request.input.requestId}:${question.id}` : null;
   const questionDraft =
-    question && questionKey ? (drafts.get(questionKey) ?? initialDraft(question)) : null;
+    question && questionKey ? (pending.draftOf(questionKey) ?? initialDraft(question)) : null;
 
   // Keys can arrive faster than React renders, so the key handler reads the ref.
   // A question's suggested answer starts in the composer, as on web, until the user edits it.
@@ -195,13 +194,27 @@ export function App(props: AppProps) {
    * Answers the request's first unanswered question, read fresh, so keys that
    * arrive before a render move through the questions in order.
    */
-  const answerQuestion = async (text: string): Promise<boolean> => {
-    if (request?.type !== "question") return false;
+  const currentQuestion = () => {
+    if (request?.type !== "question") return null;
     const { requestId, questions } = request.input;
     const given = pending.answersTo(requestId);
     const current = questions.find((candidate) => !given.has(candidate.id));
-    if (current === undefined) return false;
-    const draft = drafts.get(`${requestId}:${current.id}`) ?? initialDraft(current);
+    if (current === undefined) return null;
+    const key = `${requestId}:${current.id}`;
+    return {
+      requestId,
+      questions,
+      given,
+      current,
+      key,
+      draft: pending.draftOf(key) ?? initialDraft(current),
+    };
+  };
+
+  const answerQuestion = async (text: string): Promise<boolean> => {
+    const fresh = currentQuestion();
+    if (fresh === null) return false;
+    const { requestId, questions, given, current, draft } = fresh;
     const answer = resolveAnswer(current, { ...draft, text });
     if (answer === null) return false;
     if (questions.some((candidate) => candidate.id !== current.id && !given.has(candidate.id))) {
@@ -418,23 +431,28 @@ export function App(props: AppProps) {
         return;
       }
     }
-    if (question && questionKey && questionDraft) {
-      const setDraft = (draft: QuestionDraft) => setDrafts(new Map(drafts).set(questionKey, draft));
-      const count = question.options.length;
+    const fresh = currentQuestion();
+    if (fresh !== null) {
+      const { current, key: draftKey, draft } = fresh;
+      const setDraft = (next: QuestionDraft) => {
+        pending.setDraft(draftKey, next);
+        rerender();
+      };
+      const count = current.options.length;
       if ((key.name === "up" || key.name === "down") && count > 0) {
         consume();
         // Moving to an option drops an untouched suggestion, so Enter picks the option.
         if (suggestion && composerRef.current?.plainText === suggestion)
           composerRef.current.clear();
         setDraft({
-          ...questionDraft,
-          cursor: (questionDraft.cursor + (key.name === "up" ? count - 1 : 1)) % count,
+          ...draft,
+          cursor: (draft.cursor + (key.name === "up" ? count - 1 : 1)) % count,
         });
         return;
       }
-      if (key.name === "tab" && question.multiSelect) {
-        const option = question.options[questionDraft.cursor];
-        if (option) setDraft(togglePicked(questionDraft, optionValue(option)));
+      if (key.name === "tab" && current.multiSelect) {
+        const option = current.options[draft.cursor];
+        if (option) setDraft(togglePicked(draft, optionValue(option)));
         return consume();
       }
       if (key.name === "return" && !key.shift && (composerRef.current?.plainText ?? "") === "") {

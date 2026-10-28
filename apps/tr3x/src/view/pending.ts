@@ -1,7 +1,7 @@
 import type { MessageId, RuntimeRequestId } from "@t3tools/contracts";
 
 import type { CommandResult } from "./connection.ts";
-import type { Answer } from "./requests.ts";
+import type { Answer, QuestionDraft } from "./requests.ts";
 
 const NO_ANSWERS: ReadonlyMap<string, Answer> = new Map();
 
@@ -18,6 +18,7 @@ export class PendingWork {
   private readonly answered = new Set<RuntimeRequestId>();
   private readonly answers = new Map<RuntimeRequestId, Map<string, Answer>>();
   private readonly armedApprovals = new Set<RuntimeRequestId>();
+  private readonly drafts = new Map<string, QuestionDraft>();
 
   private launched: boolean;
 
@@ -85,6 +86,16 @@ export class PendingWork {
     const answers = this.answers.get(requestId) ?? new Map<string, Answer>();
     answers.set(questionId, answer);
     this.answers.set(requestId, answers);
+  }
+
+  /** What's picked or highlighted for a question, by `<requestId>:<questionId>`. */
+  draftOf(key: string): QuestionDraft | undefined {
+    return this.drafts.get(key);
+  }
+
+  /** Records a draft at once, so the next key builds on it rather than on the last render. */
+  setDraft(key: string, draft: QuestionDraft): void {
+    this.drafts.set(key, draft);
   }
 
   /** The approval has been on screen long enough that a key is meant for it. */
