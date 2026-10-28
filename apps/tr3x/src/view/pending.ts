@@ -1,6 +1,9 @@
 import type { MessageId, RuntimeRequestId } from "@t3tools/contracts";
 
 import type { CommandResult } from "./connection.ts";
+import type { Answer } from "./requests.ts";
+
+const NO_ANSWERS: ReadonlyMap<string, Answer> = new Map();
 
 /**
  * Work the server hasn't reflected yet. Key handlers read it synchronously,
@@ -13,6 +16,7 @@ export class PendingWork {
   private readonly unseen = new Set<MessageId>();
   private readonly answering = new Set<RuntimeRequestId>();
   private readonly answered = new Set<RuntimeRequestId>();
+  private readonly answers = new Map<RuntimeRequestId, Map<string, Answer>>();
 
   private launched: boolean;
 
@@ -68,6 +72,18 @@ export class PendingWork {
       if (messages.some((message) => message.id === id)) this.unseen.delete(id);
     }
     return this.launching !== null || this.switching || this.sends > 0 || this.unseen.size > 0;
+  }
+
+  /** The answers given so far to a request's questions, by question id. */
+  answersTo(requestId: RuntimeRequestId): ReadonlyMap<string, Answer> {
+    return this.answers.get(requestId) ?? NO_ANSWERS;
+  }
+
+  /** Records an answer at once, so the next key moves on to the next question. */
+  recordAnswer(requestId: RuntimeRequestId, questionId: string, answer: Answer): void {
+    const answers = this.answers.get(requestId) ?? new Map<string, Answer>();
+    answers.set(questionId, answer);
+    this.answers.set(requestId, answers);
   }
 
   /** Starts answering, unless an answer to `requestId` is in flight or accepted. */

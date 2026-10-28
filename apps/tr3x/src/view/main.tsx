@@ -16,9 +16,11 @@ import { readLiveDaemonState } from "../daemon/daemonState.ts";
 import { fetchRecordedEnvironment } from "../daemon/health.ts";
 import { issueLocalSession, type IssuedSession } from "../daemon/localSession.ts";
 import type { Tr3xPaths } from "../paths.ts";
+import { describeError } from "../redact.ts";
 import { App } from "./App.tsx";
 import { createViewConnection, type ViewConnection } from "./connection.ts";
 import type { ViewServer } from "./platform.ts";
+import { Startup } from "./Startup.tsx";
 import type { RexStatus } from "./status.ts";
 
 export type ViewTarget =
@@ -67,9 +69,13 @@ export async function resolveViewServer(
 }
 
 /** The project rooted at `cwd`, created when the server has none. */
-async function resolveProject(connection: ViewConnection, cwd: string): Promise<ProjectId> {
+async function resolveProject(
+  connection: ViewConnection,
+  cwd: string,
+  signal: AbortSignal,
+): Promise<ProjectId> {
   const root = NodeFS.realpathSync(cwd);
-  const snapshot = await connection.shellSnapshot();
+  const snapshot = await connection.shellSnapshot(signal);
   const existing = snapshot.projects.find((project) => project.workspaceRoot === root);
   if (existing) return existing.id;
   const projectId = ProjectId.make(NodeCrypto.randomUUID());
@@ -82,24 +88,82 @@ async function resolveProject(connection: ViewConnection, cwd: string): Promise<
   return projectId;
 }
 
+/** `promise`, or a rejection as soon as `signal` aborts. */
+function untilAborted<A>(promise: Promise<A>, signal: AbortSignal): Promise<A> {
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(new Error("Stopped."));
+    if (signal.aborted) return onAbort();
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
 export interface MountedView {
   readonly connection: ViewConnection;
   readonly threadId: ThreadId;
   readonly dispose: () => void;
 }
 
-/** Renders the view into `renderer`. The CLI and the scripted check share this. */
+/** How startup ended: the view is up, the user quit, or it can't start. */
+export type ViewStart =
+  | { readonly kind: "mounted"; readonly view: MountedView }
+  | { readonly kind: "quit" }
+  | { readonly kind: "failed"; readonly message: string };
+
+/**
+ * Renders the view into `renderer`; the CLI and the scripted checks share this.
+ * A startup screen shows at once, and ctrl+c (`onQuit`) or `signal` ends it. It
+ * signs in before anything waits on the server, so a session that can't be
+ * minted fails startup instead of leaving it waiting.
+ */
 export async function mountView(input: {
   readonly renderer: CliRenderer;
   readonly server: ViewServer;
   readonly target: ViewTarget;
+  readonly signal: AbortSignal;
   readonly onStatus?: (status: RexStatus) => void;
   readonly onQuit: () => void;
-}): Promise<MountedView> {
+}): Promise<ViewStart> {
+  const { renderer, target, signal } = input;
+  const root = createRoot(renderer);
+  const startup = (message: string, connection: ViewConnection | null) =>
+    root.render(
+      connection === null ? (
+        <Startup message={message} connection={null} onQuit={input.onQuit} />
+      ) : (
+        <RegistryContext.Provider value={connection.registry}>
+          <Startup message={message} connection={connection} onQuit={input.onQuit} />
+        </RegistryContext.Provider>
+      ),
+    );
+  const stop = (connection: ViewConnection | null, outcome: ViewStart): ViewStart => {
+    root.unmount();
+    connection?.dispose();
+    return outcome;
+  };
+
+  startup("Connecting to the tr3x server…", null);
+  try {
+    await untilAborted(input.server.bearerToken(), signal);
+  } catch (error) {
+    if (signal.aborted) return stop(null, { kind: "quit" });
+    return stop(null, {
+      kind: "failed",
+      message: `Could not sign in to the tr3x server: ${describeError(error)}`,
+    });
+  }
   const connection = createViewConnection(input.server);
-  const { renderer, target } = input;
-  const newThread =
-    target.kind === "new" ? { projectId: await resolveProject(connection, target.cwd) } : null;
+  let newThread: { readonly projectId: ProjectId } | null = null;
+  if (target.kind === "new") {
+    startup("Loading projects…", connection);
+    try {
+      newThread = { projectId: await resolveProject(connection, target.cwd, signal) };
+    } catch (error) {
+      if (signal.aborted) return stop(connection, { kind: "quit" });
+      return stop(connection, { kind: "failed", message: describeError(error) });
+    }
+  }
+  if (signal.aborted) return stop(connection, { kind: "quit" });
   const threadId =
     target.kind === "thread" ? target.threadId : ThreadId.make(NodeCrypto.randomUUID());
   const onStatus = (status: RexStatus) => {
@@ -111,7 +175,6 @@ export async function mountView(input: {
     }
     input.onStatus?.(status);
   };
-  const root = createRoot(renderer);
   root.render(
     <RegistryContext.Provider value={connection.registry}>
       <App
@@ -124,43 +187,49 @@ export async function mountView(input: {
     </RegistryContext.Provider>,
   );
   return {
-    connection,
-    threadId,
-    dispose: () => {
-      root.unmount();
-      connection.dispose();
-    },
+    kind: "mounted",
+    view: { connection, threadId, dispose: () => stop(connection, { kind: "quit" }) },
   };
 }
 
-/** `tr3x view`: runs until the user quits. */
+/** `tr3x view`: runs until the user quits; 1 when it can't start. */
 export async function runView(input: {
   readonly paths: Tr3xPaths;
   readonly env: NodeJS.ProcessEnv;
   readonly target: ViewTarget;
 }): Promise<number> {
+  // Before anything waits: a signal ends the view at any point.
+  const quit = new AbortController();
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.once(signal, () => quit.abort());
+  }
   const server = await resolveViewServer(input.paths, input.env);
+  if (quit.signal.aborted) return 0;
   const renderer = await createCliRenderer({
     exitOnCtrlC: false,
     useMouse: true,
     autoFocus: false,
   });
-  let quit: () => void = () => {};
-  const quitting = new Promise<void>((resolve) => (quit = resolve));
-  let view: MountedView;
-  try {
-    view = await mountView({ renderer, server, target: input.target, onQuit: () => quit() });
-  } catch (error) {
-    renderer.destroy();
-    await renderer.closed;
-    throw error;
+  const start = await mountView({
+    renderer,
+    server,
+    target: input.target,
+    signal: quit.signal,
+    onQuit: () => quit.abort(),
+  });
+  if (start.kind === "mounted") {
+    if (!quit.signal.aborted) {
+      await new Promise((resolve) =>
+        quit.signal.addEventListener("abort", resolve, { once: true }),
+      );
+    }
+    // Records belong to the terminal; leave none behind for a view that's gone.
+    renderer.setProgramStatus({ state: "clear" });
+    start.view.dispose();
   }
-  for (const signal of ["SIGTERM", "SIGHUP"] as const) process.once(signal, () => quit());
-  await quitting;
-  // Records belong to the terminal; leave none behind for a view that's gone.
-  renderer.setProgramStatus({ state: "clear" });
-  view.dispose();
   renderer.destroy();
   await renderer.closed;
-  return 0;
+  if (start.kind !== "failed") return 0;
+  process.stderr.write(`tr3x: ${start.message}\n`);
+  return 1;
 }

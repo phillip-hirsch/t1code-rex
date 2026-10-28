@@ -1,14 +1,15 @@
-// @effect-diagnostics globalConsole:off -- A Bun script outside the Effect runtime.
+// @effect-diagnostics globalConsole:off nodeBuiltinImport:off -- A Bun script outside the Effect runtime.
 /**
  * The real App in OpenTUI's test renderer, against `testing/viewFixture.ts`.
  * OpenTUI needs Bun, so `App.test.ts` runs each scenario here as its own process:
  *
- *   bun apps/tr3x/src/view/App.scenarios.tsx <scenario>   (or --list)
+ *   bun apps/tr3x/src/view/scenarios.tsx <scenario>   (or --list)
  */
+import * as NodeURL from "node:url";
 import { createTestRenderer } from "@opentui/core/testing";
 import { createRoot } from "@opentui/react";
 import { RegistryContext } from "@effect/atom-react";
-import { ProjectId, type ModelSelection } from "@t3tools/contracts";
+import { EnvironmentId, ProjectId, ThreadId, type ModelSelection } from "@t3tools/contracts";
 
 import { frameWaiter } from "../testing/frames.ts";
 import { provider } from "../testing/serverProvider.ts";
@@ -21,6 +22,7 @@ import {
   userMessage,
 } from "../testing/viewFixture.ts";
 import { App } from "./App.tsx";
+import { mountView, type ViewStart, type ViewTarget } from "./main.tsx";
 
 const model = (slug: string, name: string) => ({ slug, name, isCustom: false, capabilities: null });
 const codex = provider("codex", {
@@ -110,7 +112,119 @@ async function mount(
 
 type Scenario = () => Promise<void>;
 
+/**
+ * Starts the real view against a server whose sign-in `bearerToken` controls,
+ * and returns how startup ended, or throws if it hasn't ended in time.
+ */
+async function startup(
+  target: ViewTarget,
+  bearerToken: () => Promise<string>,
+  during: (ui: {
+    readonly frame: (label: string, done: (frame: string) => boolean) => Promise<string>;
+    readonly press: (name: string, modifiers?: { ctrl?: boolean }) => void;
+  }) => Promise<void>,
+): Promise<ViewStart> {
+  const setup = await createTestRenderer({ width: 80, height: 12, exitOnCtrlC: false });
+  const frames = frameWaiter(setup, FRAME_TIMEOUT_MS);
+  const quit = new AbortController();
+  const started = mountView({
+    renderer: setup.renderer,
+    // Nothing listens here: startup must not need the server before it signs in.
+    server: {
+      environmentId: EnvironmentId.make("env-startup"),
+      label: "Startup",
+      httpBaseUrl: "http://127.0.0.1:9",
+      wsBaseUrl: "ws://127.0.0.1:9",
+      bearerToken,
+    },
+    target,
+    signal: quit.signal,
+    onQuit: () => quit.abort(),
+  });
+  try {
+    await during({
+      frame: frames.until,
+      press: (name, modifiers) => setup.mockInput.pressKey(name, modifiers),
+    });
+    const deadline = AbortSignal.timeout(FRAME_TIMEOUT_MS);
+    const ended = await new Promise<ViewStart | "timeout">((resolve) => {
+      deadline.addEventListener("abort", () => resolve("timeout"), { once: true });
+      void started.then(resolve);
+    });
+    if (ended === "timeout") throw new Error(`startup never ended\n${setup.captureCharFrame()}`);
+    if (ended.kind === "mounted") ended.view.dispose();
+    return ended;
+  } finally {
+    frames.dispose();
+    await setup.dispose();
+  }
+}
+
+const TARGETS: ReadonlyArray<readonly [string, ViewTarget]> = [
+  ["view <threadId>", { kind: "thread", threadId: ThreadId.make("thread-startup") }],
+  ["view --new", { kind: "new", cwd: NodeURL.fileURLToPath(new URL(".", import.meta.url)) }],
+];
+
+const startupScenarios: Record<string, () => Promise<void>> = Object.fromEntries(
+  TARGETS.flatMap(([name, target]) => [
+    [
+      `${name}: a session that can't be minted ends startup with the reason`,
+      async () => {
+        const ended = await startup(
+          target,
+          () => Promise.reject(new Error("The T3 server runs on Node, and no `node` is on PATH.")),
+          async () => {},
+        );
+        expect(ended.kind === "failed", `startup ended as ${ended.kind}, not failed`);
+        expect(
+          ended.kind === "failed" && ended.message.includes("no `node` is on PATH"),
+          `the failure says why: ${ended.kind === "failed" ? ended.message : ""}`,
+        );
+      },
+    ],
+    [
+      `${name}: ctrl+c quits while it is still connecting`,
+      async () => {
+        const ended = await startup(
+          target,
+          () => new Promise<string>(() => {}),
+          async (ui) => {
+            await ui.frame("the startup screen shows", (frame) => frame.includes("Connecting"));
+            ui.press("c", { ctrl: true });
+          },
+        );
+        expect(ended.kind === "quit", `startup ended as ${ended.kind}, not quit`);
+      },
+    ],
+  ]),
+);
+
 const scenarios: Record<string, Scenario> = {
+  ...startupScenarios,
+
+  async "rapid enters keep a typed answer to an earlier question"() {
+    const view = createFakeView([codex]);
+    const { item, request } = pendingQuestion("q3", [
+      question,
+      { ...question, id: "q2", question: "Which base?" },
+    ]);
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    const ui = await mount(view);
+    await ui.setup.mockInput.typeText("feature");
+    // Both before React commits: the first answers q, the second answers q2.
+    ui.setup.mockInput.pressEnter();
+    ui.setup.mockInput.pressEnter();
+    await ui.settle();
+    const answers = view.commands.respondToUserInput.calls[0]?.answers;
+    expect(view.commands.respondToUserInput.calls.length === 1, "one response for the request");
+    expect(answers?.q === "feature", `the typed answer stands: ${JSON.stringify(answers)}`);
+    expect(
+      answers?.q2 === "main",
+      `the second Enter picks q2's option: ${JSON.stringify(answers)}`,
+    );
+    await ui.dispose();
+  },
+
   async "a failed answer keeps the question, retries it, and never sends it twice"() {
     const view = createFakeView([codex]);
     const { item, request } = pendingQuestion("q1", [question]);

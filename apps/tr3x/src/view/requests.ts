@@ -48,6 +48,9 @@ export function approvalChoices(approval: ThreadPendingApproval): ReadonlyArray<
   }));
 }
 
+/** An answer to one question: typed text or an option's value, or several for a multi-select. */
+export type Answer = string | ReadonlyArray<string>;
+
 /** What the user picked or typed for one question. */
 export interface QuestionDraft {
   readonly cursor: number;
@@ -75,7 +78,7 @@ export function initialDraft(question: ThreadUserInputQuestion): QuestionDraft {
 export function resolveAnswer(
   question: ThreadUserInputQuestion,
   draft: QuestionDraft,
-): string | ReadonlyArray<string> | null {
+): Answer | null {
   const text = question.allowCustomAnswer === false ? "" : draft.text.trim();
   if (text) return text;
   if (question.multiSelect && draft.picked.length > 0) return draft.picked;

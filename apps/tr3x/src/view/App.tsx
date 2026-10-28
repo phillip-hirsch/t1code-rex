@@ -58,8 +58,6 @@ export interface AppProps {
   readonly onQuit: () => void;
 }
 
-type Answer = string | ReadonlyArray<string>;
-
 const NO_PROVIDERS: ReadonlyArray<ServerProvider> = [];
 const NO_RUNS: ReadonlyArray<never> = [];
 
@@ -116,14 +114,13 @@ export function App(props: AppProps) {
   const request =
     shown?.type === "question" && pending.isAnswered(shown.input.requestId) ? null : shown;
   const [drafts, setDrafts] = useState<ReadonlyMap<string, QuestionDraft>>(new Map());
-  const [answers, setAnswers] = useState<ReadonlyMap<string, Answer>>(new Map());
-  const answerKey = (questionId: string) =>
-    request?.type === "question" ? `${request.input.requestId}:${questionId}` : "";
+  const answered = request?.type === "question" ? pending.answersTo(request.input.requestId) : null;
   const question =
     request?.type === "question"
-      ? request.input.questions.find((candidate) => !answers.has(answerKey(candidate.id)))
+      ? request.input.questions.find((candidate) => !answered?.has(candidate.id))
       : undefined;
-  const questionKey = question ? answerKey(question.id) : null;
+  const questionKey =
+    request?.type === "question" && question ? `${request.input.requestId}:${question.id}` : null;
   const questionDraft =
     question && questionKey ? (drafts.get(questionKey) ?? initialDraft(question)) : null;
 
@@ -176,14 +173,22 @@ export function App(props: AppProps) {
     props.onStatus(status);
   });
 
+  /**
+   * Answers the request's first unanswered question, read fresh, so keys that
+   * arrive before a render move through the questions in order.
+   */
   const answerQuestion = async (text: string): Promise<boolean> => {
-    if (request?.type !== "question" || !question || !questionKey || !questionDraft) return false;
+    if (request?.type !== "question") return false;
     const { requestId, questions } = request.input;
-    const answer = resolveAnswer(question, { ...questionDraft, text });
+    const given = pending.answersTo(requestId);
+    const current = questions.find((candidate) => !given.has(candidate.id));
+    if (current === undefined) return false;
+    const draft = drafts.get(`${requestId}:${current.id}`) ?? initialDraft(current);
+    const answer = resolveAnswer(current, { ...draft, text });
     if (answer === null) return false;
-    const next = new Map(answers).set(questionKey, answer);
-    if (questions.some((candidate) => !next.has(answerKey(candidate.id)))) {
-      setAnswers(next);
+    if (questions.some((candidate) => candidate.id !== current.id && !given.has(candidate.id))) {
+      pending.recordAnswer(requestId, current.id, answer);
+      rerender();
       return true;
     }
     // The last answer counts only once the server takes it, so a failure can be retried.
@@ -193,11 +198,14 @@ export function App(props: AppProps) {
       threadId,
       requestId,
       answers: Object.fromEntries(
-        questions.map((candidate) => [candidate.id, next.get(answerKey(candidate.id))]),
+        questions.map((candidate) => [
+          candidate.id,
+          candidate.id === current.id ? answer : given.get(candidate.id),
+        ]),
       ),
     });
     pending.endAnswer(requestId, result.ok);
-    if (result.ok) setAnswers(next);
+    if (result.ok) pending.recordAnswer(requestId, current.id, answer);
     setNotice(result.ok ? null : `Could not answer: ${result.error}`);
     rerender();
     return result.ok;

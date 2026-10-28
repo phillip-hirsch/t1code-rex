@@ -33,10 +33,11 @@ const server = await resolveViewServer(paths, process.env);
 const setup = await createTestRenderer({ width: 110, height: 34 });
 const frames = frameWaiter(setup, STEP_TIMEOUT_MS);
 const statuses: RexStatus[] = [];
-const view = await mountView({
+const start = await mountView({
   renderer: setup.renderer,
   server,
   target: { kind: "new", cwd: workspace },
+  signal: new AbortController().signal,
   onStatus: (status) => {
     statuses.push(status);
     // A report follows the render it describes, so wake the step that waits on it.
@@ -44,6 +45,11 @@ const view = await mountView({
   },
   onQuit: () => {},
 });
+if (start.kind !== "mounted") {
+  console.log(`FAIL the view didn't start: ${start.kind === "failed" ? start.message : "quit"}`);
+  process.exit(1);
+}
+const view = start.view;
 const lastStatus = () => statuses.at(-1);
 const describeStatus = (status: RexStatus | undefined) =>
   status === undefined

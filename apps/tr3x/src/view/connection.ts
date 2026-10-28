@@ -103,23 +103,41 @@ export function createViewConnection(server: Platform.ViewServer) {
     connectionStateAtom: catalog.stateAtom(environmentId),
     providersAtom: serverAtoms.providersValueAtom(environmentId),
     thread: threadAtoms(details, environmentId),
-    /** The server's shell once it arrives; mounted only for as long as this waits. */
-    shellSnapshot: () =>
-      new Promise<OrchestrationV2ShellSnapshot>((resolve) => {
-        const atom = shell.stateValueAtom(environmentId);
-        const unmount = registry.mount(atom);
-        const check = () => {
-          const snapshot = Option.getOrNull(registry.get(atom).snapshot);
-          if (snapshot === null) return false;
-          resolve(snapshot);
-          return true;
+    /**
+     * The server's shell once it arrives; mounted only for as long as this waits.
+     * Rejects when `signal` aborts or the connection is refused for good.
+     */
+    shellSnapshot: (signal: AbortSignal) =>
+      new Promise<OrchestrationV2ShellSnapshot>((resolve, reject) => {
+        const shellAtom = shell.stateValueAtom(environmentId);
+        const connectionAtom = catalog.stateAtom(environmentId);
+        const cleanup: Array<() => void> = [];
+        let settled = false;
+        const settle = (finish: () => void) => {
+          if (settled) return;
+          settled = true;
+          for (const step of cleanup) step();
+          finish();
         };
-        if (check()) return unmount();
-        const unsubscribe = registry.subscribe(atom, () => {
-          if (!check()) return;
-          unsubscribe();
-          unmount();
-        });
+        const check = () => {
+          const snapshot = Option.getOrNull(registry.get(shellAtom).snapshot);
+          if (snapshot !== null) return settle(() => resolve(snapshot));
+          const state = Option.getOrNull(AsyncResult.value(registry.get(connectionAtom)));
+          if (state?.phase === "blocked") {
+            const detail = state.lastFailure?.detail ?? "The server refused the connection.";
+            settle(() => reject(new Error(detail)));
+          }
+        };
+        const onAbort = () => settle(() => reject(new Error("Stopped while connecting.")));
+        signal.addEventListener("abort", onAbort, { once: true });
+        cleanup.push(
+          () => signal.removeEventListener("abort", onAbort),
+          registry.mount(shellAtom),
+          registry.subscribe(shellAtom, check),
+          registry.subscribe(connectionAtom, check),
+        );
+        if (signal.aborted) onAbort();
+        else check();
       }),
     startTurn: (input: StartThreadTurnInput) => run(threadCommands.startTurn, input),
     interruptTurn: (input: InterruptThreadTurnInput) => run(threadCommands.interruptTurn, input),
