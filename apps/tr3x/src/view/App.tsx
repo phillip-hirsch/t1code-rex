@@ -65,6 +65,7 @@ const nowIso = () => new Date().toISOString();
 
 const RUN_ACTIVE = "Model switching waits until the run finishes.";
 const APPROVAL_ARM_MS = 300;
+const APPROVAL_FIRST = "Answer the approval first (a/s/d); your message stays here.";
 
 function nextRuntimeMode(mode: RuntimeMode): RuntimeMode {
   return mode === "full-access" ? "approval-required" : "full-access";
@@ -292,6 +293,11 @@ export function App(props: AppProps) {
       return true;
     }
     if (questionDraft) return await answerQuestion(text);
+    // A run waiting on an approval would take the message as a steer; answer first.
+    if (request?.type === "approval") {
+      setNotice(APPROVAL_FIRST);
+      return false;
+    }
     if (selection === null) {
       setNotice(noProviders);
       return false;
@@ -428,9 +434,9 @@ export function App(props: AppProps) {
       const choice = approvalChoices(request.approval).find(
         (candidate) => candidate.key === key.name && !key.ctrl && !key.meta,
       );
-      if (choice && pending.isApprovalArmed(requestId)) {
+      // While an answer is in flight, a key passes on to the composer rather than vanishing.
+      if (choice && pending.isApprovalArmed(requestId) && pending.beginAnswer(requestId)) {
         consume();
-        if (!pending.beginAnswer(requestId)) return;
         rerender();
         void connection
           .respondToApproval({ threadId, requestId, decision: choice.decision })

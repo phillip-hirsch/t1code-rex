@@ -487,6 +487,38 @@ const scenarios: Record<string, Scenario> = {
     await ui.dispose();
   },
 
+  async "sending under an approval keeps the message and asks for an answer first"() {
+    const view = createFakeView([codex]);
+    const running = run("r1", 1, "running", selection);
+    const { item, request } = pendingApproval("a3", "rm -rf build");
+    view.setProjection(
+      projection({ selection, runs: [running], items: [item], requests: [request] }),
+    );
+    const ui = await mount(view);
+    await ui.frame("the approval is armed", (frame) => frame.includes("[a] accept"));
+    await ui.setup.mockInput.typeText("then run the tests");
+    const frame = await ui.enter();
+    expect(view.commands.startTurn.calls.length === 0, "nothing is sent into the blocked run");
+    expect(frame.includes("Answer the approval first"), "the view says why", frame);
+    expect(frame.includes("then run the tests"), "the message stays in the composer", frame);
+    await ui.dispose();
+  },
+
+  async "keys typed while an approval answer is in flight reach the composer"() {
+    const view = createFakeView([codex]);
+    const { item, request } = pendingApproval("a4", "rm -rf build");
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    view.commands.respondToApproval.next = "hold";
+    const ui = await mount(view);
+    await ui.frame("the approval is armed", (frame) => frame.includes("[a] accept"));
+    await ui.setup.mockInput.typeText("add");
+    const frame = await ui.settle();
+    expect(view.commands.respondToApproval.calls.length === 1, "the first a answers once");
+    expect(frame.includes("│ dd"), "the keys after it land in the composer", frame);
+    view.commands.respondToApproval.release();
+    await ui.dispose();
+  },
+
   async "rapid enters keep a typed answer to an earlier question"() {
     const view = createFakeView([codex]);
     const { item, request } = pendingQuestion("q3", [
