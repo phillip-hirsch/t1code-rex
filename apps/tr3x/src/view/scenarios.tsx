@@ -41,6 +41,8 @@ const question = {
 };
 
 const FRAME_TIMEOUT_MS = 5_000;
+/** OpenTUI's mock keys have no name for page up; this is its escape sequence. */
+const PAGE_UP = "\u001b[5~";
 
 function expect(condition: boolean, message: string, frame?: string): void {
   if (!condition) throw new Error(frame === undefined ? message : `${message}\n${frame}`);
@@ -290,6 +292,36 @@ const scenarios: Record<string, Scenario> = {
     expect(frame.includes("› Approach 3"), "the last option scrolls into view", frame);
     expect(frame.includes("custom answer"), "the composer stays on screen", frame);
     console.log(frame);
+    await ui.dispose();
+  },
+
+  async "loading earlier history keeps the row you were reading"() {
+    const view = createFakeView([codex]);
+    const rows = (from: number) =>
+      Array.from({ length: 150 - from }, (_, index) =>
+        userMessage(`u${from + index}`, from + index, `row ${from + index}`),
+      );
+    view.setProjection(projection({ selection, items: rows(100) }), { hasMoreHistory: true });
+    const ui = await mount(view, { width: 80, height: 24 });
+    /** The screen line row `n` is on, or -1 when it's off screen. */
+    const lineOf = (frame: string, n: number) =>
+      frame.split("\n").findIndex((line) => line.trim() === `› row ${n}`);
+    let frame = await ui.settle();
+    for (let press = 0; press < 40 && view.commands.loadEarlier.calls.length === 0; press += 1) {
+      frame = await ui.press(PAGE_UP);
+    }
+    expect(view.commands.loadEarlier.calls.length === 1, "paging to the top loads earlier history");
+    const reading = lineOf(frame, 100);
+    expect(reading > 0, "row 100 is on screen at the top", frame);
+    view.setProjection(projection({ selection, items: rows(50) }), { hasMoreHistory: true });
+    frame = await ui.settle();
+    expect(lineOf(frame, 100) === reading, "row 100 stays where it was read", frame);
+    frame = await ui.press(PAGE_UP);
+    expect(
+      lineOf(frame, 100) === -1 && lineOf(frame, 99) >= 0,
+      "the next page up reads just above it",
+      frame,
+    );
     await ui.dispose();
   },
 

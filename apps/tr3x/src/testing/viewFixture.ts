@@ -329,9 +329,19 @@ export function createFakeView(providers: ReadonlyArray<ServerProvider>) {
     connection,
     createProject,
     isDisposed: () => disposed,
-    /** Replaces the thread as if the server streamed it. */
-    setProjection: (next: OrchestrationV2ThreadProjection) =>
-      registry.set(state, AsyncResult.success({ ...live, data: Option.some(next) })),
+    /** Replaces the thread as if the server streamed it; `history` as its paging reports. */
+    setProjection: (
+      next: OrchestrationV2ThreadProjection,
+      history: Partial<EnvironmentThreadState["history"]> = {},
+    ) =>
+      registry.set(
+        state,
+        AsyncResult.success({
+          ...live,
+          data: Option.some(next),
+          history: { ...live.history, ...history },
+        }),
+      ),
     instance: (id: string) => ProviderInstanceId.make(id),
   };
 }
