@@ -45,7 +45,8 @@ import { PendingWork } from "./pending.ts";
 import { resolveRexStatus, sameRexStatus, type RexStatus } from "./status.ts";
 import { markdownStyles, palette } from "./theme.ts";
 import { buildTimelineRows } from "./timeline.ts";
-import { ApprovalPanel, Footer, PickerPanel, QuestionPanel } from "./Panels.tsx";
+import { hintRows, lastItems, wrapText } from "./layout.ts";
+import { ApprovalPanel, Footer, PickerPanel, pickerHeight, QuestionPanel } from "./Panels.tsx";
 import { Transcript, type TranscriptHandle } from "./Transcript.tsx";
 import { useThreadData } from "./useThreadData.ts";
 
@@ -65,6 +66,10 @@ const nowIso = () => new Date().toISOString();
 
 const RUN_ACTIVE = "Model switching waits until the run finishes.";
 const APPROVAL_ARM_MS = 300;
+/** Queued messages shown at once; older ones are counted. */
+const QUEUE_ROWS = 3;
+/** Composer text lines before it scrolls. */
+const COMPOSER_LINES = 8;
 const APPROVAL_FIRST = "Answer the approval first (a/s/d); your message stays here.";
 
 function nextRuntimeMode(mode: RuntimeMode): RuntimeMode {
@@ -78,8 +83,9 @@ export function App(props: AppProps) {
   const [launched, setLaunched] = useState(props.newThread === null);
   const [pending] = useState(() => new PendingWork(props.newThread === null));
   const [, rerender] = useReducer((count: number) => count + 1, 0);
-  // A request panel leaves room for the header, a line of transcript, the composer and hints.
-  const panelHeight = Math.max(6, useTerminalDimensions().height - 10);
+  const terminal = useTerminalDimensions();
+  // The composer's wrapped lines, which set its height and so the rest of the layout.
+  const [composerLines, setComposerLines] = useState(1);
   const composerRef = useRef<TextareaRenderable | null>(null);
   const transcriptRef = useRef<TranscriptHandle | null>(null);
   const data = useThreadData(connection, threadId, launched);
@@ -514,6 +520,42 @@ export function App(props: AppProps) {
           ? "No messages yet."
           : "Loading thread…";
 
+  const footerHints = [
+    "enter send",
+    "shift+enter newline",
+    activeRun ? "esc stop" : "^p model",
+    `^t ${nextRuntimeMode(runtimeMode)}`,
+    "pgup history",
+    "^c quit",
+  ];
+  const queuedRuns = data.queue?.queuedRuns ?? [];
+  const queue = lastItems(queuedRuns, QUEUE_ROWS);
+  const queueHint = data.queue?.isHeld
+    ? "held since stop; sending a message resumes them  ·  ctrl+x cancels the last"
+    : "ctrl+x cancels the last queued message";
+  const syncLine =
+    data.error && rows.length > 0 ? `The thread stopped syncing: ${data.error}` : null;
+  // The run-active notice is moot once the run ends.
+  const shownNotice = notice && !(notice === RUN_ACTIVE && activeRun === null) ? notice : null;
+  const linesOf = (text: string | null) => (text ? wrapText(text, terminal.width - 1).length : 0);
+  const composerHeight = 2 + Math.min(COMPOSER_LINES, Math.max(1, composerLines));
+  // The composer and key hints come first, then a line of transcript and what else
+  // shows; a request panel gets the rest.
+  const panelHeight = Math.max(
+    4,
+    terminal.height -
+      1 -
+      1 -
+      composerHeight -
+      hintRows(footerHints, terminal.width) -
+      (queuedRuns.length > 0
+        ? queue.shown.length + (queue.hidden > 0 ? 1 : 0) + linesOf(queueHint)
+        : 0) -
+      (picker ? pickerHeight(pickerEntries, picker, !supportsHandoff) : 0) -
+      linesOf(syncLine) -
+      linesOf(shownNotice),
+  );
+
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%" }}>
       <box style={{ flexDirection: "row", paddingLeft: 1, paddingRight: 1, flexShrink: 0 }}>
@@ -536,19 +578,24 @@ export function App(props: AppProps) {
           approval={request.approval}
           armed={pending.isApprovalArmed(request.approval.requestId)}
           maxHeight={panelHeight}
+          width={terminal.width}
         />
       ) : null}
       {question && questionDraft ? (
         <QuestionPanel
           maxHeight={panelHeight}
+          width={terminal.width}
           question={question}
           draft={questionDraft}
           dismissible={request?.type === "question" && request.input.dismissible}
         />
       ) : null}
-      {data.queue?.queuedRuns.length ? (
+      {queuedRuns.length > 0 ? (
         <box style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 1 }}>
-          {data.queue.queuedRuns.map((queued) => (
+          {queue.hidden > 0 ? (
+            <text content={`+${queue.hidden} more queued`} fg={palette.subtle} />
+          ) : null}
+          {queue.shown.map((queued) => (
             <text
               key={queued.run.id}
               content={`${queued.run.queueHeld === true ? "held" : "queued"}: ${queued.text}`}
@@ -557,14 +604,7 @@ export function App(props: AppProps) {
               wrapMode="none"
             />
           ))}
-          <text
-            content={
-              data.queue.isHeld
-                ? "held since stop; sending a message resumes them  ·  ctrl+x cancels the last"
-                : "ctrl+x cancels the last queued message"
-            }
-            fg={palette.subtle}
-          />
+          <text content={queueHint} fg={palette.subtle} />
         </box>
       ) : null}
       {picker ? (
@@ -575,21 +615,16 @@ export function App(props: AppProps) {
           providerLocked={!supportsHandoff}
         />
       ) : null}
-      {data.error && rows.length > 0 ? (
-        <text
-          content={`The thread stopped syncing: ${data.error}`}
-          fg={palette.warning}
-          style={{ paddingLeft: 1, flexShrink: 0 }}
-        />
+      {syncLine ? (
+        <text content={syncLine} fg={palette.warning} style={{ paddingLeft: 1, flexShrink: 0 }} />
       ) : null}
-      {/* The run-active notice is moot once the run ends. */}
-      {notice && !(notice === RUN_ACTIVE && activeRun === null) ? (
-        <text content={notice} fg={palette.error} style={{ paddingLeft: 1, flexShrink: 0 }} />
+      {shownNotice ? (
+        <text content={shownNotice} fg={palette.error} style={{ paddingLeft: 1, flexShrink: 0 }} />
       ) : null}
       <box
         border
         borderColor={palette.border}
-        style={{ flexShrink: 0, minHeight: 3, maxHeight: 10, paddingLeft: 1 }}
+        style={{ flexShrink: 0, height: composerHeight, paddingLeft: 1 }}
       >
         <textarea
           ref={composerRef}
@@ -603,19 +638,16 @@ export function App(props: AppProps) {
             { name: "linefeed", action: "newline" },
           ]}
           onSubmit={submitComposer}
+          onContentChange={() =>
+            // The border and padding take 3 columns; `virtualLineCount` lags behind the text.
+            setComposerLines(
+              wrapText(composerRef.current?.plainText ?? "", terminal.width - 3).length,
+            )
+          }
           style={{ flexGrow: 1 }}
         />
       </box>
-      <Footer
-        hints={[
-          "enter send",
-          "shift+enter newline",
-          activeRun ? "esc stop" : "^p model",
-          `^t ${nextRuntimeMode(runtimeMode)}`,
-          "pgup history",
-          "^c quit",
-        ]}
-      />
+      <Footer hints={footerHints} />
     </box>
   );
 }

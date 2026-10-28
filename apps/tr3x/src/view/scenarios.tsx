@@ -103,10 +103,7 @@ async function mount(
     setup.mockInput.pressEnter();
     return await settle();
   };
-  await frame(
-    "the view renders",
-    (current) => current.includes("Message") || current.includes("Which"),
-  );
+  await frame("the view renders", (current) => current.includes("enter send"));
   return {
     setup,
     settle,
@@ -315,7 +312,7 @@ const scenarios: Record<string, Scenario> = {
     let frame = await ui.settle();
     expect(frame.includes("custom answer"), "the composer shows what's typed", frame);
     expect(frame.includes("enter send"), "the key hints show", frame);
-    expect(frame.includes("↓ 1 more"), "the panel says more options follow", frame);
+    expect(frame.includes("more lines"), "a cut description says so", frame);
     for (let press = 0; press < 3; press += 1) frame = await ui.arrow("down");
     expect(frame.includes("› Approach 3"), "the last option scrolls into view", frame);
     expect(frame.includes("custom answer"), "the composer stays on screen", frame);
@@ -516,6 +513,127 @@ const scenarios: Record<string, Scenario> = {
     expect(view.commands.respondToApproval.calls.length === 1, "the first a answers once");
     expect(frame.includes("│ dd"), "the keys after it land in the composer", frame);
     view.commands.respondToApproval.release();
+    await ui.dispose();
+  },
+
+  async "a long approval shows the command's start and end, and says what's hidden"() {
+    const lines = [
+      "rm -rf with the following arguments:",
+      ...Array.from({ length: 28 }, (_, index) => `  filler-line-${index} lorem ipsum dolor`),
+      "TARGET=/very/important/production.db",
+    ];
+    for (const [width, height] of [
+      [80, 24],
+      [120, 40],
+    ] as const) {
+      const view = createFakeView([codex]);
+      const { item, request } = pendingApproval("a5", lines.join("\n"));
+      view.setProjection(projection({ selection, items: [item], requests: [request] }));
+      const ui = await mount(view, { width, height });
+      const frame = await ui.frame("the approval is armed", (current) =>
+        current.includes("[a] accept"),
+      );
+      expect(frame.includes("rm -rf with the following arguments:"), "the start shows", frame);
+      expect(frame.includes("TARGET=/very/important/production.db"), "the end shows", frame);
+      expect(/… \d+ lines hidden …/u.test(frame), "the cut says how much", frame);
+      expect(
+        frame.includes("enter send") && frame.includes("Message"),
+        "the composer shows",
+        frame,
+      );
+      console.log(`--- ${width}x${height}\n${frame}`);
+      await ui.dispose();
+    }
+  },
+
+  async "a long question shows all of its text when the panel has room"() {
+    const view = createFakeView([codex]);
+    const text =
+      "The migration touches the users table, the sessions table and the audit log. " +
+      "Each has a legacy column that nothing reads any more, and the indexes on them slow " +
+      "every write. The backfill finished last week and the dashboards moved to the new " +
+      "columns. Before I write the down migration: should I drop the legacy column?";
+    const { item, request } = pendingQuestion("q7", [
+      { ...question, question: text, options: [{ label: "yes", description: "Drop it" }] },
+    ]);
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    const ui = await mount(view, { width: 120, height: 40 });
+    const frame = await ui.frame("the question shows", (current) => current.includes("migration"));
+    // The transcript's one-line summary can end with it too, so look inside the panel.
+    const panel = frame.split("\n").filter((line) => line.startsWith("│"));
+    expect(
+      panel.some((line) => line.includes("should I drop the legacy column?")),
+      "its last sentence shows in the panel",
+      frame,
+    );
+    expect(!frame.includes("more lines"), "nothing is cut", frame);
+    console.log(frame);
+    await ui.dispose();
+  },
+
+  async "a question with ten queued messages keeps the composer on screen at 80x24"() {
+    const view = createFakeView([codex]);
+    const queued = Array.from({ length: 10 }, (_, index) =>
+      run(`q${index}`, index + 2, "queued", selection),
+    );
+    const { item, request } = pendingQuestion("q8", [
+      {
+        ...question,
+        options: Array.from({ length: 4 }, (_, index) => ({
+          label: `Approach ${index}`,
+          description: "A valid possible implementation for the task. ".repeat(8).trim(),
+        })),
+      },
+    ]);
+    view.setProjection(
+      projection({
+        selection,
+        items: [item],
+        requests: [request],
+        runs: [run("r1", 1, "running", selection), ...queued],
+        messages: queued.map((entry, index) => ({
+          id: entry.userMessageId,
+          text: `follow-up ${index}`,
+        })),
+      }),
+    );
+    const ui = await mount(view, { width: 80, height: 24 });
+    await ui.setup.mockInput.typeText("custom answer");
+    const frame = await ui.settle();
+    expect(frame.includes("custom answer"), "the typed answer shows", frame);
+    expect(frame.includes("enter send"), "the key hints show", frame);
+    expect(
+      frame.includes("+7 more queued") && frame.includes("follow-up 9"),
+      "the queue is windowed",
+      frame,
+    );
+    console.log(frame);
+    await ui.dispose();
+  },
+
+  async "an eight-line draft keeps the key hints on screen at 80x24"() {
+    const view = createFakeView([codex]);
+    const { item, request } = pendingQuestion("q9", [
+      {
+        ...question,
+        options: Array.from({ length: 4 }, (_, index) => ({
+          label: `Approach ${index}`,
+          description: "A valid possible implementation for the task. ".repeat(8).trim(),
+        })),
+      },
+    ]);
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    const ui = await mount(view, { width: 80, height: 24 });
+    for (let line = 1; line <= 8; line += 1) {
+      await ui.setup.mockInput.typeText(`draft line ${line}`);
+      // Ctrl+J: a legacy terminal sends shift+enter as a plain enter.
+      if (line < 8) ui.setup.mockInput.pressKey("LINEFEED");
+    }
+    const frame = await ui.settle();
+    expect(frame.includes("draft line 8"), "the draft shows", frame);
+    expect(frame.includes("Approach 0"), "the question is still open", frame);
+    expect(frame.includes("enter send") && frame.includes("^c quit"), "the key hints show", frame);
+    console.log(frame);
     await ui.dispose();
   },
 

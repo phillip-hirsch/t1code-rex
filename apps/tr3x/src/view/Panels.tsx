@@ -7,6 +7,7 @@ import type { ReactNode } from "react";
 
 import { filterPickerEntries, type PickerEntry, type PickerState } from "./picker.ts";
 import { approvalChoices, optionValue, type QuestionDraft } from "./requests.ts";
+import { clipLines, headAndTail, wrapText } from "./layout.ts";
 import { palette } from "./theme.ts";
 
 function Panel(props: {
@@ -29,42 +30,55 @@ function Panel(props: {
         ...(props.maxHeight === undefined ? {} : { maxHeight: props.maxHeight }),
       }}
     >
-      <text content={props.heading} fg={props.color} />
+      <text content={props.heading} fg={props.color} truncate wrapMode="none" />
       {props.children}
     </box>
   );
 }
+
+/** Lines already wrapped to the panel, so none wraps again. */
+function Lines(props: { readonly lines: ReadonlyArray<string>; readonly color: string }) {
+  if (props.lines.length === 0) return null;
+  return <text content={props.lines.join("\n")} fg={props.color} wrapMode="none" />;
+}
+
+/** A panel's text width: the terminal less its border and padding. */
+const textWidth = (width: number) => Math.max(10, width - 4);
+
+const APPROVAL_HINT = "keys answer while the message box is empty";
 
 export function ApprovalPanel(props: {
   readonly approval: ThreadPendingApproval;
   /** On screen long enough for keys to answer it. */
   readonly armed: boolean;
   readonly maxHeight: number;
+  readonly width: number;
 }) {
   const { approval } = props;
+  const columns = textWidth(props.width);
+  const choices = wrapText(
+    approvalChoices(approval)
+      .map((choice) => `[${choice.key}] ${choice.label}`)
+      .join("   "),
+    columns,
+  );
+  const hint = wrapText(APPROVAL_HINT, columns);
+  // Borders and heading, then the choices (their lines kept while arming) and the hint.
+  const room = props.maxHeight - 3 - choices.length - hint.length;
+  const detail = headAndTail(
+    wrapText(approval.detail ?? approval.reason ?? approval.requestKind, columns),
+    Math.max(1, room),
+  );
   return (
     <Panel heading="Approval needed" color={palette.warning} maxHeight={props.maxHeight}>
-      <box style={{ maxHeight: Math.max(1, props.maxHeight - 5), overflow: "hidden" }}>
-        <text
-          content={approval.detail ?? approval.reason ?? approval.requestKind}
-          fg={palette.text}
-        />
-      </box>
-      {props.armed ? (
-        <text
-          content={approvalChoices(approval)
-            .map((choice) => `[${choice.key}] ${choice.label}`)
-            .join("   ")}
-          fg={palette.warning}
-        />
-      ) : null}
-      <text content="keys answer while the message box is empty" fg={palette.subtle} />
+      <Lines lines={detail} color={palette.text} />
+      <Lines lines={props.armed ? choices : choices.map(() => "")} color={palette.warning} />
+      <Lines lines={hint} color={palette.subtle} />
     </Panel>
   );
 }
 
-/** Lines a question panel keeps for its question and the highlighted option's description. */
-const QUESTION_LINES = 2;
+/** Lines kept for the highlighted option's description. */
 const DESCRIPTION_LINES = 3;
 
 export function QuestionPanel(props: {
@@ -72,26 +86,38 @@ export function QuestionPanel(props: {
   readonly draft: QuestionDraft;
   readonly dismissible: boolean;
   readonly maxHeight: number;
+  readonly width: number;
 }) {
   const { question, draft } = props;
-  const hints = [
-    "↑↓ choose",
-    ...(question.multiSelect ? ["tab pick"] : []),
-    "enter answer",
-    ...(question.allowCustomAnswer === false ? [] : ["or type an answer below"]),
-    ...(props.dismissible ? ["esc dismiss"] : []),
-  ];
-  // Borders, heading, question, the cues above and below, description and hints.
-  const rows = Math.max(1, props.maxHeight - 6 - QUESTION_LINES - DESCRIPTION_LINES);
-  const count = question.options.length;
-  const first = Math.min(Math.max(0, draft.cursor - rows + 1), Math.max(0, count - rows));
+  const columns = textWidth(props.width);
+  const hints = wrapText(
+    [
+      "↑↓ choose",
+      ...(question.multiSelect ? ["tab pick"] : []),
+      "enter answer",
+      ...(question.allowCustomAnswer === false ? [] : ["or type an answer below"]),
+      ...(props.dismissible ? ["esc dismiss"] : []),
+    ].join("  "),
+    columns,
+  );
   const highlighted = question.options[draft.cursor];
+  const description = highlighted
+    ? clipLines(wrapText(highlighted.description, columns - 2), DESCRIPTION_LINES)
+    : [];
+  // Borders, heading, hints and description first; then the options; the question takes the rest.
+  const room = props.maxHeight - 3 - hints.length - description.length;
+  const count = question.options.length;
+  // Options leave at least one line for the question; a window needs lines for its cues.
+  const rows = count <= room - 1 ? count : Math.max(1, room - 3);
+  const first = Math.min(Math.max(0, draft.cursor - rows + 1), Math.max(0, count - rows));
+  const above = first;
+  const below = Math.max(0, count - first - rows);
+  const optionLines = rows + (above > 0 ? 1 : 0) + (below > 0 ? 1 : 0);
+  const text = clipLines(wrapText(question.question, columns), Math.max(1, room - optionLines));
   return (
     <Panel heading={question.header} color={palette.accent} maxHeight={props.maxHeight}>
-      <box style={{ maxHeight: QUESTION_LINES, overflow: "hidden" }}>
-        <text content={question.question} fg={palette.text} />
-      </box>
-      {first > 0 ? <text content={`  ↑ ${first} more`} fg={palette.subtle} /> : null}
+      <Lines lines={text} color={palette.text} />
+      {above > 0 ? <text content={`  ↑ ${above} more`} fg={palette.subtle} /> : null}
       {question.options.slice(first, first + rows).map((option, offset) => {
         const index = first + offset;
         const mark = question.multiSelect
@@ -109,20 +135,35 @@ export function QuestionPanel(props: {
           />
         );
       })}
-      {count > first + rows ? (
-        <text content={`  ↓ ${count - first - rows} more`} fg={palette.subtle} />
-      ) : null}
-      {highlighted ? (
-        <box style={{ maxHeight: DESCRIPTION_LINES, overflow: "hidden", paddingLeft: 2 }}>
-          <text content={highlighted.description} fg={palette.subtle} />
-        </box>
-      ) : null}
-      <text content={hints.join("  ")} fg={palette.subtle} />
+      {below > 0 ? <text content={`  ↓ ${below} more`} fg={palette.subtle} /> : null}
+      <box style={{ paddingLeft: 2, flexDirection: "column" }}>
+        <Lines lines={description} color={palette.subtle} />
+      </box>
+      <Lines lines={hints} color={palette.subtle} />
     </Panel>
   );
 }
 
 const PICKER_ROWS = 8;
+
+/** The lines `PickerPanel` takes, so the layout can leave room for it. */
+export function pickerHeight(
+  entries: ReadonlyArray<PickerEntry>,
+  state: PickerState,
+  providerLocked: boolean,
+): number {
+  const visible = filterPickerEntries(entries, state.query).length;
+  const first = Math.max(0, state.index - (PICKER_ROWS - 1));
+  const shown = Math.min(PICKER_ROWS, Math.max(0, visible - first));
+  // Borders, heading and filter line, cues above and below, and the locked note.
+  return (
+    4 +
+    shown +
+    (first > 0 ? 1 : 0) +
+    (visible > first + PICKER_ROWS ? 1 : 0) +
+    (providerLocked ? 1 : 0)
+  );
+}
 
 export function PickerPanel(props: {
   readonly entries: ReadonlyArray<PickerEntry>;
