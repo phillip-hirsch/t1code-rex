@@ -342,6 +342,9 @@ export function createFakeView(providers: ReadonlyArray<ServerProvider>) {
           history: { ...live.history, ...history },
         }),
       ),
+    /** Replaces the thread's sync state, e.g. a failed load with no projection. */
+    setThreadState: (next: Partial<EnvironmentThreadState>) =>
+      registry.set(state, AsyncResult.success({ ...live, ...next })),
     instance: (id: string) => ProviderInstanceId.make(id),
   };
 }

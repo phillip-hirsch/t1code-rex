@@ -462,16 +462,20 @@ export function App(props: AppProps) {
   ].join("  ·  ");
   const historyHeader = data.history.loading
     ? "Loading earlier messages…"
-    : data.history.hasMoreHistory
-      ? "PgUp at the top loads earlier messages"
-      : null;
+    : data.history.error
+      ? `Could not load earlier messages: ${data.history.error}`
+      : data.history.hasMoreHistory
+        ? "PgUp at the top loads earlier messages"
+        : null;
   const empty = !launched
     ? "New thread. Type a message; the first send starts it."
     : data.status === "deleted"
       ? "This thread was deleted."
-      : data.status === "live"
-        ? "No messages yet."
-        : "Loading thread…";
+      : data.error
+        ? `Could not load this thread: ${data.error}`
+        : data.status === "live"
+          ? "No messages yet."
+          : "Loading thread…";
 
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%" }}>
@@ -525,6 +529,13 @@ export function App(props: AppProps) {
           state={picker}
           current={selection}
           providerLocked={!supportsHandoff}
+        />
+      ) : null}
+      {data.error && rows.length > 0 ? (
+        <text
+          content={`The thread stopped syncing: ${data.error}`}
+          fg={palette.warning}
+          style={{ paddingLeft: 1, flexShrink: 0 }}
         />
       ) : null}
       {/* The run-active notice is moot once the run ends. */}

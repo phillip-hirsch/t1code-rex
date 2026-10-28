@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import { EMPTY_ENVIRONMENT_THREAD_STATE } from "@t3tools/client-runtime/state/threads";
 import type { ThreadId } from "@t3tools/contracts";
+import * as Option from "effect/Option";
 import { Atom } from "effect/reactivity";
 import { useMemo } from "react";
 
@@ -29,6 +30,8 @@ export function useThreadData(connection: ViewApi, threadId: ThreadId, enabled: 
     /** For handlers that must read the latest state, not the last render's. */
     atoms,
     status: state.status,
+    /** Why the thread didn't load or stopped syncing, from client-runtime. */
+    error: Option.getOrNull(state.error),
     history: state.history,
     structure: structure?.projection ?? null,
     items: useAtomValue(atoms.visibleTurnItemsAtom),

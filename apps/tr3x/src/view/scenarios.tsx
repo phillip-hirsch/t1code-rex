@@ -7,6 +7,7 @@
  */
 import * as NodeURL from "node:url";
 import { createTestRenderer } from "@opentui/core/testing";
+import * as Option from "effect/Option";
 import { createRoot } from "@opentui/react";
 import { RegistryContext } from "@effect/atom-react";
 import { EnvironmentId, ProjectId, ThreadId, type ModelSelection } from "@t3tools/contracts";
@@ -321,6 +322,23 @@ const scenarios: Record<string, Scenario> = {
       lineOf(frame, 100) === -1 && lineOf(frame, 99) >= 0,
       "the next page up reads just above it",
       frame,
+    );
+    await ui.dispose();
+  },
+
+  async "a thread that can't load says why instead of loading forever"() {
+    const view = createFakeView([codex]);
+    view.setThreadState({ status: "synchronizing", error: Option.some("Thread not found.") });
+    const ui = await mount(view, { width: 80, height: 24 });
+    let frame = await ui.frame("the reason shows", (current) =>
+      current.includes("Could not load this thread: Thread not found."),
+    );
+    expect(!frame.includes("Loading thread"), "no endless loading", frame);
+    view.setProjection(projection({ selection, items: [userMessage("u1", 0, "hello")] }), {
+      error: "History request failed.",
+    });
+    frame = await ui.frame("the history error shows", (current) =>
+      current.includes("Could not load earlier messages: History request failed."),
     );
     await ui.dispose();
   },
