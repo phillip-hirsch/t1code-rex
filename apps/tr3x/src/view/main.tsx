@@ -14,12 +14,13 @@ import {
 
 import { readLiveDaemonState } from "../daemon/daemonState.ts";
 import { fetchRecordedEnvironment } from "../daemon/health.ts";
-import { issueLocalSession, type IssuedSession } from "../daemon/localSession.ts";
+import { issueLocalSession } from "../daemon/localSession.ts";
 import type { Tr3xPaths } from "../paths.ts";
 import { describeError } from "../redact.ts";
 import { App } from "./App.tsx";
 import { createViewConnection, type ViewConnection } from "./connection.ts";
 import type { ViewServer } from "./platform.ts";
+import { sessionBearer } from "./sessionBearer.ts";
 import { Startup } from "./Startup.tsx";
 import type { RexStatus } from "./status.ts";
 
@@ -46,25 +47,22 @@ export async function resolveViewServer(
   }
   // Never send a credential to a server the daemon didn't record.
   const environment = await fetchRecordedEnvironment(daemon);
-  let session: Promise<IssuedSession> | null = null;
   return {
     environmentId: environment.environmentId,
     label: environment.label,
     httpBaseUrl: daemon.httpBaseUrl,
     wsBaseUrl: daemon.wsBaseUrl,
-    bearerToken: async () => {
-      const current = await session?.catch(() => null);
-      if (!current || Date.parse(current.expiresAt) - Date.now() < SESSION_REFRESH_MS) {
-        session = issueLocalSession({
+    bearerToken: sessionBearer(
+      () =>
+        issueLocalSession({
           baseDir: paths.home,
           scopes: [AuthOrchestrationReadScope, AuthOrchestrationOperateScope],
           ttl: SESSION_TTL,
           label: "tr3x view",
           env,
-        });
-      }
-      return (await session!).token;
-    },
+        }),
+      SESSION_REFRESH_MS,
+    ),
   };
 }
 
