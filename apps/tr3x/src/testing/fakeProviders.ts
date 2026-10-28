@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Test fixtures on disk, outside any Effect runtime.
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
@@ -19,20 +20,59 @@ const MODELS_OUTPUT = [
   "",
 ].join("\n");
 
-/** A stand-in Grok CLI: canned `--version` and `models`, and upstream's mock ACP agent for `agent`. */
-function writeFakeGrok(directory: string, env: Readonly<Record<string, string>>): string {
+/** Where each fake provider process records its pid, so teardown can find and reap it. */
+function pidDir(home: string): string {
+  return NodePath.join(home, "fake-bin", "pids");
+}
+
+/**
+ * A stand-in Grok CLI: canned `--version` and `models`, and upstream's mock ACP
+ * agent for `agent`, which records its pid in `pids`.
+ */
+function writeFakeGrok(
+  directory: string,
+  pids: string,
+  env: Readonly<Record<string, string>>,
+): string {
   return writeFakeCli({
     directory,
     name: "grok",
     env,
     source: [
+      'import { mkdirSync as makePidDir, writeFileSync as writePid } from "node:fs";',
       'if (process.argv[2] === "--version") { process.stdout.write("grok 1.0.13\\n"); process.exit(0); }',
       `if (process.argv[2] === "models") { process.stdout.write(${JSON.stringify(MODELS_OUTPUT)}); process.exit(0); }`,
       // Approval modes put `--permission-mode <mode>` before `agent`.
       'if (!process.argv.includes("agent")) process.exit(1);',
+      `makePidDir(${JSON.stringify(pids)}, { recursive: true });`,
+      `writePid(${JSON.stringify(pids)} + "/" + process.pid, "");`,
       execScriptSource({ scriptPath: MOCK_AGENT }),
     ].join("\n"),
   });
+}
+
+/**
+ * Fake provider processes from `home` that still run. A recorded pid counts
+ * only while its command line still names `home`, so a reused pid is never ours.
+ */
+export function liveFakeProviders(home: string): ReadonlyArray<number> {
+  let names: ReadonlyArray<string>;
+  try {
+    names = NodeFS.readdirSync(pidDir(home));
+  } catch {
+    return [];
+  }
+  return names
+    .map((name) => Number.parseInt(name, 10))
+    .filter((pid) => Number.isInteger(pid) && commandLine(pid)?.includes(home) === true);
+}
+
+/** A process's command line, or undefined once it's gone. */
+export function commandLine(pid: number): string | undefined {
+  const result = NodeChildProcess.spawnSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], {
+    encoding: "utf8",
+  });
+  return result.status === 0 ? result.stdout.trim() : undefined;
 }
 
 export interface FakeProviders {
@@ -49,11 +89,11 @@ export function installFakeProviders(home: string, firstReply: string): FakeProv
   const bin = NodePath.join(home, "fake-bin");
   const secondRequestLog = NodePath.join(bin, "grok-b-requests.ndjson");
   // The mock's model option doesn't list Grok's slugs; without it the adapter keeps the default.
-  const first = writeFakeGrok(NodePath.join(bin, "a"), {
+  const first = writeFakeGrok(NodePath.join(bin, "a"), pidDir(home), {
     T3_ACP_PROMPT_RESPONSE_TEXT: firstReply,
     T3_ACP_OMIT_MODEL_CONFIG_OPTION: "1",
   });
-  const second = writeFakeGrok(NodePath.join(bin, "b"), {
+  const second = writeFakeGrok(NodePath.join(bin, "b"), pidDir(home), {
     T3_ACP_OMIT_MODEL_CONFIG_OPTION: "1",
     T3_ACP_EMIT_TOOL_CALLS: "1",
     T3_ACP_REQUEST_LOG_PATH: secondRequestLog,
