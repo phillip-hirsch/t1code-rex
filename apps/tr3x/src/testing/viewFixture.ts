@@ -178,6 +178,17 @@ export function run(
   };
 }
 
+/** A finished reasoning item: one "Thinking - <text>" work row. */
+export function reasoning(id: string, ordinal: number, text: string): OrchestrationV2TurnItem {
+  return {
+    ...itemBase(id, ordinal),
+    type: "reasoning",
+    status: "completed",
+    text,
+    streaming: false,
+  };
+}
+
 /** A pending question: its runtime request and the turn item that carries its questions. */
 export function pendingQuestion(
   id: string,
