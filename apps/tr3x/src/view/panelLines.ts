@@ -63,7 +63,13 @@ function plan(
   min: number,
   lines: (room: number) => ReadonlyArray<PanelLine>,
 ): PanelPlan {
-  const content = (rows: number) => lines(Math.max(0, rows - 2));
+  const columns = textWidth(width);
+  // Cues are built without the width, so every line is cut here.
+  const content = (rows: number) =>
+    lines(Math.max(0, rows - 2)).map((line) => ({
+      ...line,
+      text: truncateText(line.text, columns),
+    }));
   return {
     title: title ? borderText(truncateText(title, Math.max(1, width - 6)), width) : "",
     hint,
@@ -95,7 +101,11 @@ export function approvalPlan(
     // Kept blank until armed, so the panel doesn't jump.
     return { key: `choice:${index}`, text: armed ? text : "", tone: "warning" };
   });
-  const detail = wrapText(approval.detail ?? approval.reason ?? approval.requestKind, columns);
+  // Trailing blank lines would take the place of the target.
+  const detail = wrapText(
+    (approval.detail ?? approval.reason ?? approval.requestKind).trimEnd(),
+    columns,
+  );
   return plan(
     "Approval needed",
     width,
@@ -136,7 +146,8 @@ export function questionPlan(
     ...typed,
     ...(dismissible ? ["esc dismiss"] : []),
   ];
-  const text = wrapText(question.question, columns);
+  const asked = question.question.trimEnd();
+  const text = wrapText(asked, columns);
   const options = question.options;
   const highlighted = options[draft.cursor];
   const description = highlighted
@@ -165,7 +176,7 @@ export function questionPlan(
       text.length <= 1 + extra
         ? text
         : extra === 0
-          ? [truncateText(question.question, columns)]
+          ? [truncateText(asked, columns)]
           : clipLines(text, 1 + extra);
     return shown.map((line, index) => ({ key: `question:${index}`, text: line, tone: "text" }));
   };

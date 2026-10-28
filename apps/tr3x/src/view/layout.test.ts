@@ -30,6 +30,16 @@ describe("wrapText", () => {
   });
 });
 
+describe("expandTabs", () => {
+  it("measures and draws tabs as spaces to the next stop", () => {
+    expect(wrapText("\tTARGET", 20)).toEqual(["    TARGET"]);
+    expect(truncateText("a\tb", 10)).toBe("a   b");
+    const lines = wrapText(`${"abc\t".repeat(17)}/tmp/TARGET`, 40);
+    for (const line of lines) expect(displayWidth(line)).toBeLessThanOrEqual(40);
+    expect(lines.at(-1)).toContain("/tmp/TARGET");
+  });
+});
+
 describe("truncateText", () => {
   it("fits one line in columns and says it cut", () => {
     expect(truncateText("short", 10)).toBe("short");
@@ -83,16 +93,18 @@ describe("planLayout", () => {
     footerRows: 2,
     composerLines: 8,
     queue: { length: 10, window: 3, hintLines: 1 },
-    fixedLines: 0,
+    messages: [],
     request: { natural: 30, min: 4 },
     picker: null,
   };
-  const used = (plan: ReturnType<typeof planLayout>) =>
+  /** Every row the plan hands out; it should be the whole height. */
+  const used = (plan: ReturnType<typeof planLayout>, queued = 10) =>
     (plan.header ? 1 : 0) +
-    (plan.transcriptLine ? 1 : 0) +
-    (plan.queueFolded
+    plan.transcriptRows +
+    (plan.queueFolded || queued === 0
       ? 0
       : (plan.queueShown < 10 ? 1 : 0) + plan.queueShown + (plan.queueHint ? 1 : 0)) +
+    plan.messageLines.reduce((sum, lines) => sum + lines, 0) +
     2 +
     plan.composerLines +
     (plan.footerFolded ? 1 : 2) +
@@ -107,6 +119,7 @@ describe("planLayout", () => {
       transcriptLine: true,
     });
     expect(plan.requestRows).toBe(24 - 1 - 1 - 5 - 10 - 2);
+    expect(used(plan)).toBe(24);
   });
 
   it("shrinks the queue, the composer, the transcript, the header, then the footer before the panel", () => {
@@ -120,9 +133,19 @@ describe("planLayout", () => {
     expect(plans[4]).toMatchObject({ header: false, footerFolded: true });
   });
 
-  it("goes below a panel's minimum only when nothing else can shrink", () => {
+  it("turns a request that can't keep its lines into one line, and leaves no row unused", () => {
     const plan = planLayout({ ...input, height: 6 });
-    expect(plan.requestRows).toBe(2);
+    expect(plan).toMatchObject({ requestFits: false, requestRows: 1, header: false });
     expect(used(plan)).toBe(6);
+  });
+
+  it("cuts messages to a line each before the composer, and drops them before the panel", () => {
+    const messages = { ...input, queue: { length: 0, window: 3, hintLines: 0 }, messages: [3, 3] };
+    expect(planLayout(messages)).toMatchObject({ messageLines: [3, 3], requestRows: 4 });
+    const tight = planLayout({ ...messages, height: 16 });
+    expect(tight).toMatchObject({ messageLines: [1, 1], composerLines: 4, requestRows: 4 });
+    const tightest = planLayout({ ...messages, height: 8 });
+    expect(tightest).toMatchObject({ messageLines: [0, 0], requestFits: true, requestRows: 4 });
+    expect([tight, tightest].map((plan) => used(plan, 0))).toEqual([16, 8]);
   });
 });

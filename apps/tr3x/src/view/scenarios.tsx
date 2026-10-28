@@ -327,6 +327,10 @@ const CJK_TARGET = "終端=/本番/データ.db";
 /** One long line of double-width text, its target at the very end. */
 const CJK_APPROVAL = `削除の対象：${"漢字かな交じり文👍🏽".repeat(22)} ${CJK_TARGET}`;
 const SWEEP_CHOICES = "[a] accept   [s] accept for session   [d] decline";
+const TAB_TARGET = "TARGET=/production.db";
+/** Tabs a terminal draws wider than string-width counts them, the target after them. */
+const TAB_APPROVAL = `START tabbed operation\n\tindented\n${"abc\t".repeat(17)}${TAB_TARGET}`;
+const DIAGNOSTICS = Array.from({ length: 25 }, (_, index) => `diagnostic line ${index}`).join("\n");
 const SWEEP_QUESTION = {
   id: "sweep",
   header: "Migration",
@@ -521,6 +525,112 @@ const sweepScenarios: Record<string, Scenario> = {
         expect(frame.includes("queued"), "the queue is counted", frame);
       },
     );
+  },
+
+  async "the layout holds at every size: a tab-indented approval"() {
+    await sweep(
+      "tab-approval",
+      async (view, ui) => {
+        const { item, request } = pendingApproval("sweep-t", TAB_APPROVAL);
+        view.setProjection(projection({ selection, items: [item], requests: [request] }));
+        return await armed(ui);
+      },
+      (frame, boxes) => checkApproval(frame, boxes, TAB_APPROVAL, TAB_TARGET),
+    );
+  },
+
+  async "the layout holds at every size: an approval ending in a newline"() {
+    await sweep(
+      "newline-approval",
+      async (view, ui) => {
+        const { item, request } = pendingApproval("sweep-n", `${SWEEP_APPROVAL}\n`);
+        view.setProjection(projection({ selection, items: [item], requests: [request] }));
+        return await armed(ui);
+      },
+      (frame, boxes) => checkApproval(frame, boxes, SWEEP_APPROVAL, SWEEP_TARGET),
+    );
+  },
+
+  async "the layout holds at every size: an approval under a 25-line error"() {
+    await sweep(
+      "error-approval",
+      async (view, ui) => {
+        const { item, request } = pendingApproval("sweep-e", SWEEP_APPROVAL);
+        view.setProjection(projection({ selection, items: [item], requests: [request] }));
+        view.commands.respondToApproval.next = { ok: false, error: DIAGNOSTICS };
+        await armed(ui);
+        await ui.press("a");
+        // The failure's notice lands after the command settles.
+        return await ui.settle();
+      },
+      (frame, boxes) => {
+        checkApproval(frame, boxes, SWEEP_APPROVAL, SWEEP_TARGET);
+        const shown = frame.split("\n").filter((row) => row.includes("diagnostic line"));
+        expect(shown.length < 3, "the error is cut to a few lines", frame);
+        expect(
+          !frame.includes("diagnostic line 24"),
+          "the error's end gives way to its cue",
+          frame,
+        );
+      },
+    );
+    // Where there's room, the error shows with its cue.
+    const view = createFakeView([codex]);
+    const ui = await mount(view, { width: 80, height: 24 });
+    try {
+      const { item, request } = pendingApproval("sweep-e2", SWEEP_APPROVAL);
+      view.setProjection(projection({ selection, items: [item], requests: [request] }));
+      view.commands.respondToApproval.next = { ok: false, error: DIAGNOSTICS };
+      await armed(ui);
+      await ui.press("a");
+      const frame = await ui.frame("the error shows", (current) =>
+        current.includes("Could not answer"),
+      );
+      expect(/… \d+ more lines/u.test(frame), "the cut error says how much", frame);
+    } finally {
+      await ui.dispose();
+    }
+  },
+
+  async "a request in a pane too short for it shows a line, and its keys wait"() {
+    for (const kind of ["approval", "question"] as const) {
+      const view = createFakeView([codex]);
+      const ui = await mount(view, { width: 80, height: 24 });
+      try {
+        const pending =
+          kind === "approval"
+            ? pendingApproval("short-a", SWEEP_APPROVAL)
+            : pendingQuestion("short-q", [SWEEP_QUESTION]);
+        view.setProjection(
+          projection({ selection, items: [pending.item], requests: [pending.request] }),
+        );
+        if (kind === "approval") await armed(ui);
+        else await ui.frame("the question shows", (frame) => frame.includes("› Option 0"));
+        ui.setup.resize(80, 6);
+        const frame = await ui.frame("the request waits", (current) =>
+          current.includes("waiting: make the pane taller to answer"),
+        );
+        console.log(`--- short ${kind} 80x6\n${frame}`);
+        const rows = frame.split("\n").slice(0, 6);
+        expect(
+          rows.every((row) => row.trim() !== ""),
+          "no row is left blank",
+          frame,
+        );
+        checkFrame(frame, 80, 6);
+        await ui.press(kind === "approval" ? "a" : "ESCAPE");
+        await ui.enter();
+        expect(view.commands.respondToApproval.calls.length === 0, "a answers nothing", frame);
+        expect(view.commands.respondToUserInput.calls.length === 0, "enter answers nothing", frame);
+        expect(view.commands.dismissUserInput.calls.length === 0, "esc dismisses nothing", frame);
+        ui.setup.resize(80, 24);
+        await ui.frame("the panel comes back", (current) =>
+          current.includes(kind === "approval" ? "[a] accept" : "› Option 0"),
+        );
+      } finally {
+        await ui.dispose();
+      }
+    }
   },
 
   async "the model picker fits a narrow terminal"() {

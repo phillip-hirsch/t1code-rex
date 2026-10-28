@@ -10,9 +10,33 @@ export const displayWidth = (text: string): number => stringWidth(text);
 const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const graphemes = (text: string) => Array.from(segmenter.segment(text), (part) => part.segment);
 
+const TAB_STOP = 4;
+
+/**
+ * Tabs as spaces to the next tab stop. string-width counts a tab as no
+ * columns while the terminal draws it wider, so no tab is measured or drawn.
+ */
+export function expandTabs(text: string): string {
+  if (!text.includes("\t")) return text;
+  return text
+    .split("\n")
+    .map((line) => {
+      const [first = "", ...rest] = line.split("\t");
+      let expanded = first;
+      let column = displayWidth(first);
+      for (const part of rest) {
+        const pad = TAB_STOP - (column % TAB_STOP);
+        expanded += `${" ".repeat(pad)}${part}`;
+        column += pad + displayWidth(part);
+      }
+      return expanded;
+    })
+    .join("\n");
+}
+
 /** `text` on one line of `width` columns, ending in "…" when cut. */
 export function truncateText(text: string, width: number): string {
-  const line = text.replace(/\s*[\r\n\t]\s*/gu, " ");
+  const line = expandTabs(text).replace(/\s*[\r\n]\s*/gu, " ");
   if (displayWidth(line) <= width) return line;
   if (width <= 0) return "";
   let kept = "";
@@ -30,7 +54,7 @@ export function truncateText(text: string, width: number): string {
 export function wrapText(text: string, width: number): ReadonlyArray<string> {
   const columns = Math.max(1, width);
   const lines: string[] = [];
-  for (const paragraph of text.split(/\r?\n/u)) {
+  for (const paragraph of expandTabs(text).split(/\r?\n/u)) {
     // A line keeps its indentation, which commands and code read by.
     const indent = /^ */u.exec(paragraph)?.[0] ?? "";
     let line = indent.length < columns ? indent : "";
@@ -198,8 +222,8 @@ export interface LayoutInput {
   /** The composer's text lines, before it scrolls. */
   readonly composerLines: number;
   readonly queue: { readonly length: number; readonly window: number; readonly hintLines: number };
-  /** Lines nothing shrinks: the sync and notice lines. */
-  readonly fixedLines: number;
+  /** Each message's lines, such as an error or a notice, already capped. */
+  readonly messages: ReadonlyArray<number>;
   readonly request: PanelSize | null;
   readonly picker: PanelSize | null;
 }
@@ -207,31 +231,46 @@ export interface LayoutInput {
 export interface LayoutPlan {
   readonly header: boolean;
   readonly transcriptLine: boolean;
+  /** Rows left to the transcript, its line included. */
+  readonly transcriptRows: number;
+  /** Lines shown of each message, in input order. */
+  readonly messageLines: ReadonlyArray<number>;
   readonly footerFolded: boolean;
   readonly composerLines: number;
   /** Queued messages listed; the rest are counted, on their own line or, folded, in the composer's border. */
   readonly queueShown: number;
   readonly queueHint: boolean;
   readonly queueFolded: boolean;
+  /** False when the request panel can't keep its lines: `requestRows` is then one line saying so. */
+  readonly requestFits: boolean;
   readonly requestRows: number;
   readonly pickerRows: number;
 }
 
 /**
- * One height budget for the whole view. Before a panel goes below what it must
- * keep, the rest shrinks in order: the queue down to a count in the composer's
- * border, the composer to one line, the transcript's line, the header, the footer to one row.
+ * One height budget for the whole view. Before a panel goes below what it must keep,
+ * the queue folds, messages go to a line each, then the composer, transcript line,
+ * header, footer and messages shrink. A request that still can't fit becomes one line.
  */
 export function planLayout(input: LayoutInput): LayoutPlan {
+  const plan = fitLayout(input);
+  if (!input.request || plan.requestRows >= input.request.min) return plan;
+  return { ...fitLayout({ ...input, request: { natural: 1, min: 1 } }), requestFits: false };
+}
+
+function fitLayout(input: LayoutInput): LayoutPlan {
   const { queue } = input;
   let plan: LayoutPlan = {
     header: true,
     transcriptLine: true,
+    transcriptRows: 0,
+    messageLines: input.messages,
     footerFolded: false,
     composerLines: Math.max(1, input.composerLines),
     queueShown: Math.min(queue.window, queue.length),
     queueHint: queue.length > 0,
     queueFolded: false,
+    requestFits: true,
     requestRows: 0,
     pickerRows: 0,
   };
@@ -245,20 +284,32 @@ export function planLayout(input: LayoutInput): LayoutPlan {
     (next.header ? 1 : 0) +
     (next.transcriptLine ? 1 : 0) +
     queueRows(next) +
-    input.fixedLines +
+    next.messageLines.reduce((sum, lines) => sum + lines, 0) +
     2 +
     next.composerLines +
     (next.footerFolded ? 1 : input.footerRows);
+  /** The longest message one line shorter, if one is longer than `floor`. */
+  const shorterMessages = (next: LayoutPlan, floor: number): LayoutPlan | null => {
+    const longest = Math.max(0, ...next.messageLines);
+    if (longest <= floor) return null;
+    const index = next.messageLines.indexOf(longest);
+    return {
+      ...next,
+      messageLines: next.messageLines.map((lines, at) => (at === index ? lines - 1 : lines)),
+    };
+  };
   const needed = (input.request?.min ?? 0) + (input.picker?.min ?? 0);
   const shrink = (next: LayoutPlan): LayoutPlan | null => {
     if (next.queueShown > 0) return { ...next, queueShown: next.queueShown - 1 };
     if (next.queueHint) return { ...next, queueHint: false };
     if (queue.length > 0 && !next.queueFolded) return { ...next, queueFolded: true };
+    const oneLine = shorterMessages(next, 1);
+    if (oneLine) return oneLine;
     if (next.composerLines > 1) return { ...next, composerLines: next.composerLines - 1 };
     if (next.transcriptLine) return { ...next, transcriptLine: false };
     if (next.header) return { ...next, header: false };
     if (!next.footerFolded && input.footerRows > 1) return { ...next, footerFolded: true };
-    return null;
+    return shorterMessages(next, 0);
   };
   while (used(plan) + needed > input.height) {
     const next = shrink(plan);
@@ -275,5 +326,10 @@ export function planLayout(input: LayoutInput): LayoutPlan {
       )
     : 0;
   const picker = input.picker ? Math.min(input.picker.natural, room - request) : 0;
-  return { ...plan, requestRows: request, pickerRows: picker };
+  return {
+    ...plan,
+    transcriptRows: room - request - picker + (plan.transcriptLine ? 1 : 0),
+    requestRows: request,
+    pickerRows: picker,
+  };
 }

@@ -45,7 +45,15 @@ import { PendingWork } from "./pending.ts";
 import { resolveRexStatus, sameRexStatus, type RexStatus } from "./status.ts";
 import { markdownStyles, palette } from "./theme.ts";
 import { buildTimelineRows } from "./timeline.ts";
-import { fitItems, hintRows, lastItems, planLayout, truncateText, wrapText } from "./layout.ts";
+import {
+  clipLines,
+  fitItems,
+  hintRows,
+  lastItems,
+  planLayout,
+  truncateText,
+  wrapText,
+} from "./layout.ts";
 import { approvalPlan, pickerPlan, questionPlan } from "./panelLines.ts";
 import { Footer, Lines, Panel } from "./Panels.tsx";
 import { Transcript, type TranscriptHandle } from "./Transcript.tsx";
@@ -71,6 +79,8 @@ const APPROVAL_ARM_MS = 300;
 const QUEUE_ROWS = 3;
 /** Composer text lines before it scrolls. */
 const COMPOSER_LINES = 8;
+/** Lines an error or notice shows before it's cut. */
+const MESSAGE_LINES = 3;
 const APPROVAL_FIRST = "Answer the approval first (a/s/d); your message stays here.";
 
 function nextRuntimeMode(mode: RuntimeMode): RuntimeMode {
@@ -202,6 +212,76 @@ export function App(props: AppProps) {
    * Answers the request's first unanswered question, read fresh, so keys that
    * arrive before a render move through the questions in order.
    */
+  const modelHint = activeRun ? "esc stop" : "^p model";
+  const modeHint = `^t ${nextRuntimeMode(runtimeMode)}`;
+  const footerHints = [
+    "enter send",
+    "shift+enter newline",
+    modelHint,
+    modeHint,
+    "pgup history",
+    "^c quit",
+  ];
+  const queuedRuns = data.queue?.queuedRuns ?? [];
+  const queueHint = data.queue?.isHeld
+    ? "held since stop; sending a message resumes them  ·  ctrl+x cancels the last"
+    : "ctrl+x cancels the last queued message";
+  const syncLine =
+    data.error && rows.length > 0 ? `The thread stopped syncing: ${data.error}` : null;
+  // The run-active notice is moot once the run ends.
+  const shownNotice = notice && !(notice === RUN_ACTIVE && activeRun === null) ? notice : null;
+  // Lines below the transcript sit after one column of padding.
+  const wrapLine = (text: string | null) => (text ? wrapText(text, terminal.width - 1) : []);
+  const syncLines = wrapLine(syncLine);
+  const noticeLines = wrapLine(shownNotice);
+  // A message shows a few lines, and its start when down to one.
+  const clipMessage = (lines: ReadonlyArray<string>, max: number) =>
+    max === 1 && lines.length > 1
+      ? [truncateText(lines.join(" "), terminal.width - 1)]
+      : clipLines(lines, max);
+  const queueHintLines = wrapLine(queueHint);
+  const requestPlan =
+    request?.type === "approval"
+      ? approvalPlan(
+          request.approval,
+          pending.isApprovalArmed(request.approval.requestId),
+          terminal.width,
+        )
+      : question && questionDraft
+        ? questionPlan(
+            question,
+            questionDraft,
+            request?.type === "question" && request.input.dismissible,
+            terminal.width,
+          )
+        : null;
+  const picked = picker
+    ? pickerPlan(pickerEntries, picker, selection, !supportsHandoff, terminal.width)
+    : null;
+  const layout = planLayout({
+    height: terminal.height,
+    footerRows: hintRows(footerHints, terminal.width),
+    composerLines: Math.min(COMPOSER_LINES, composerLines),
+    queue: { length: queuedRuns.length, window: QUEUE_ROWS, hintLines: queueHintLines.length },
+    messages: [syncLines, noticeLines].map((lines) => Math.min(MESSAGE_LINES, lines.length)),
+    request: requestPlan,
+    picker: picked,
+  });
+  // Its keys answer only while it shows.
+  const requestHidden = requestPlan !== null && !layout.requestFits;
+  const queue = lastItems(queuedRuns, layout.queueShown);
+  const queueCount =
+    queue.shown.length > 0 ? `+${queue.hidden} more queued` : `+${queue.hidden} queued`;
+  // Folded, the footer keeps what fits one row; sending and quitting go last.
+  const shownHints = layout.footerFolded
+    ? fitItems(footerHints, (kept) => hintRows(kept, terminal.width) === 1, [
+        "pgup history",
+        "shift+enter newline",
+        modeHint,
+        modelHint,
+      ])
+    : footerHints;
+
   const currentQuestion = () => {
     if (request?.type !== "question") return null;
     const { requestId, questions } = request.input;
@@ -299,6 +379,8 @@ export function App(props: AppProps) {
       togglePicker();
       return true;
     }
+    // An answer the user can't see would go unread; the text stays in the composer.
+    if (requestHidden) return false;
     if (questionDraft) return await answerQuestion(text);
     // A run waiting on an approval would take the message as a steer; answer first.
     if (request?.type === "approval") {
@@ -436,7 +518,11 @@ export function App(props: AppProps) {
       return;
     }
     // a/s/d answer an approval only from an empty composer, once it's armed, once per request.
-    if (request?.type === "approval" && (composerRef.current?.plainText ?? "") === "") {
+    if (
+      request?.type === "approval" &&
+      !requestHidden &&
+      (composerRef.current?.plainText ?? "") === ""
+    ) {
       const requestId = request.approval.requestId;
       const choice = approvalChoices(request.approval).find(
         (candidate) => candidate.key === key.name && !key.ctrl && !key.meta,
@@ -455,7 +541,7 @@ export function App(props: AppProps) {
         return;
       }
     }
-    const fresh = currentQuestion();
+    const fresh = requestHidden ? null : currentQuestion();
     if (fresh !== null) {
       const { current, key: draftKey, draft } = fresh;
       const setDraft = (next: QuestionDraft) => {
@@ -521,69 +607,6 @@ export function App(props: AppProps) {
           ? "No messages yet."
           : "Loading thread…";
 
-  const modelHint = activeRun ? "esc stop" : "^p model";
-  const modeHint = `^t ${nextRuntimeMode(runtimeMode)}`;
-  const footerHints = [
-    "enter send",
-    "shift+enter newline",
-    modelHint,
-    modeHint,
-    "pgup history",
-    "^c quit",
-  ];
-  const queuedRuns = data.queue?.queuedRuns ?? [];
-  const queueHint = data.queue?.isHeld
-    ? "held since stop; sending a message resumes them  ·  ctrl+x cancels the last"
-    : "ctrl+x cancels the last queued message";
-  const syncLine =
-    data.error && rows.length > 0 ? `The thread stopped syncing: ${data.error}` : null;
-  // The run-active notice is moot once the run ends.
-  const shownNotice = notice && !(notice === RUN_ACTIVE && activeRun === null) ? notice : null;
-  // Lines below the transcript sit after one column of padding.
-  const wrapLine = (text: string | null) => (text ? wrapText(text, terminal.width - 1) : []);
-  const syncLines = wrapLine(syncLine);
-  const noticeLines = wrapLine(shownNotice);
-  const queueHintLines = wrapLine(queueHint);
-  const requestPlan =
-    request?.type === "approval"
-      ? approvalPlan(
-          request.approval,
-          pending.isApprovalArmed(request.approval.requestId),
-          terminal.width,
-        )
-      : question && questionDraft
-        ? questionPlan(
-            question,
-            questionDraft,
-            request?.type === "question" && request.input.dismissible,
-            terminal.width,
-          )
-        : null;
-  const picked = picker
-    ? pickerPlan(pickerEntries, picker, selection, !supportsHandoff, terminal.width)
-    : null;
-  const layout = planLayout({
-    height: terminal.height,
-    footerRows: hintRows(footerHints, terminal.width),
-    composerLines: Math.min(COMPOSER_LINES, composerLines),
-    queue: { length: queuedRuns.length, window: QUEUE_ROWS, hintLines: queueHintLines.length },
-    fixedLines: syncLines.length + noticeLines.length,
-    request: requestPlan,
-    picker: picked,
-  });
-  const queue = lastItems(queuedRuns, layout.queueShown);
-  const queueCount =
-    queue.shown.length > 0 ? `+${queue.hidden} more queued` : `+${queue.hidden} queued`;
-  // Folded, the footer keeps what fits one row; sending and quitting go last.
-  const shownHints = layout.footerFolded
-    ? fitItems(footerHints, (kept) => hintRows(kept, terminal.width) === 1, [
-        "pgup history",
-        "shift+enter newline",
-        modeHint,
-        modelHint,
-      ])
-    : footerHints;
-
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%" }}>
       {layout.header ? (
@@ -601,9 +624,19 @@ export function App(props: AppProps) {
         styles={styles}
         header={historyHeader}
         empty={empty}
-        visible={layout.transcriptLine}
+        visible={layout.transcriptRows > 0}
       />
-      {requestPlan ? (
+      {requestHidden ? (
+        <Lines
+          lines={[
+            truncateText(
+              `${request?.type === "approval" ? "Approval" : "Question"} waiting: make the pane taller to answer`,
+              terminal.width - 1,
+            ),
+          ].slice(0, layout.requestRows)}
+          color={palette.warning}
+        />
+      ) : requestPlan ? (
         <Panel
           plan={requestPlan}
           rows={layout.requestRows}
@@ -626,8 +659,8 @@ export function App(props: AppProps) {
         </box>
       ) : null}
       {picked ? <Panel plan={picked} rows={layout.pickerRows} color={palette.accent} /> : null}
-      <Lines lines={syncLines} color={palette.warning} />
-      <Lines lines={noticeLines} color={palette.error} />
+      <Lines lines={clipMessage(syncLines, layout.messageLines[0] ?? 0)} color={palette.warning} />
+      <Lines lines={clipMessage(noticeLines, layout.messageLines[1] ?? 0)} color={palette.error} />
       <box
         border
         borderColor={palette.border}
