@@ -123,6 +123,8 @@ export async function mountView(input: {
   readonly signal: AbortSignal;
   readonly onStatus?: (status: RexStatus) => void;
   readonly onQuit: () => void;
+  /** Opens the connection; tests pass one that needs no server. */
+  readonly connect?: (server: ViewServer) => ViewConnection;
 }): Promise<ViewStart> {
   const { renderer, target, signal } = input;
   const root = createRoot(renderer);
@@ -152,12 +154,15 @@ export async function mountView(input: {
       message: `Could not sign in to the tr3x server: ${describeError(error)}`,
     });
   }
-  const connection = createViewConnection(input.server);
+  const connection = (input.connect ?? createViewConnection)(input.server);
   let newThread: { readonly projectId: ProjectId } | null = null;
   if (target.kind === "new") {
     startup("Loading projects…", connection);
     try {
-      newThread = { projectId: await resolveProject(connection, target.cwd, signal) };
+      // Each step can stall on the server (the shell, then creating the project); quit wins.
+      newThread = {
+        projectId: await untilAborted(resolveProject(connection, target.cwd, signal), signal),
+      };
     } catch (error) {
       if (signal.aborted) return stop(connection, { kind: "quit" });
       return stop(connection, { kind: "failed", message: describeError(error) });

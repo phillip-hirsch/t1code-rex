@@ -27,7 +27,13 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 import { AsyncResult, Atom, AtomRegistry } from "effect/reactivity";
 
-import { threadAtoms, type CommandResult, type ViewApi } from "../view/connection.ts";
+import {
+  threadAtoms,
+  type CommandResult,
+  type ViewApi,
+  type ViewConnection,
+} from "../view/connection.ts";
+import type { CreateProjectInput } from "@t3tools/client-runtime/operations";
 
 /**
  * A view without a server: thread state the test sets, derived into structure,
@@ -268,9 +274,32 @@ export function createFakeView(providers: ReadonlyArray<ServerProvider>) {
     cancelQueuedRun: commands.cancelQueuedRun.run,
     loadEarlier: commands.loadEarlier.run,
   };
+  const createProject = new CommandStub<CreateProjectInput>();
+  let disposed = false;
+  /** The whole connection `mountView` opens: no projects yet, and `createProject` to hold. */
+  const connection: ViewConnection = {
+    ...api,
+    environmentId: ENVIRONMENT_ID,
+    shellSnapshot: () =>
+      Promise.resolve({
+        schemaVersion: 1,
+        snapshotSequence: 0,
+        projects: [],
+        threads: [],
+        archivedThreads: [],
+      }),
+    createProject: createProject.run,
+    dispose: () => {
+      disposed = true;
+      registry.dispose();
+    },
+  };
   return {
     api,
     commands,
+    connection,
+    createProject,
+    isDisposed: () => disposed,
     /** Replaces the thread as if the server streamed it. */
     setProjection: (next: OrchestrationV2ThreadProjection) =>
       registry.set(state, AsyncResult.success({ ...live, data: Option.some(next) })),

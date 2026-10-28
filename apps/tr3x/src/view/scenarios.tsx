@@ -22,7 +22,9 @@ import {
   userMessage,
 } from "../testing/viewFixture.ts";
 import { App } from "./App.tsx";
+import type { ViewConnection } from "./connection.ts";
 import { mountView, type ViewStart, type ViewTarget } from "./main.tsx";
+import type { ViewServer } from "./platform.ts";
 
 const model = (slug: string, name: string) => ({ slug, name, isCustom: false, capabilities: null });
 const codex = provider("codex", {
@@ -123,6 +125,7 @@ async function startup(
     readonly frame: (label: string, done: (frame: string) => boolean) => Promise<string>;
     readonly press: (name: string, modifiers?: { ctrl?: boolean }) => void;
   }) => Promise<void>,
+  connect?: (server: ViewServer) => ViewConnection,
 ): Promise<ViewStart> {
   const setup = await createTestRenderer({ width: 80, height: 12, exitOnCtrlC: false });
   const frames = frameWaiter(setup, FRAME_TIMEOUT_MS);
@@ -140,6 +143,7 @@ async function startup(
     target,
     signal: quit.signal,
     onQuit: () => quit.abort(),
+    ...(connect === undefined ? {} : { connect }),
   });
   try {
     await during({
@@ -201,6 +205,25 @@ const startupScenarios: Record<string, () => Promise<void>> = Object.fromEntries
 
 const scenarios: Record<string, Scenario> = {
   ...startupScenarios,
+
+  async "view --new: ctrl+c quits while the project is being created"() {
+    const view = createFakeView([codex]);
+    view.createProject.next = "hold";
+    const ended = await startup(
+      { kind: "new", cwd: NodeURL.fileURLToPath(new URL(".", import.meta.url)) },
+      () => Promise.resolve("token"),
+      async (ui) => {
+        await ui.frame(
+          "the shell arrived and creating the project is held",
+          (frame) => frame.includes("Loading projects") && view.createProject.calls.length === 1,
+        );
+        ui.press("c", { ctrl: true });
+      },
+      () => view.connection,
+    );
+    expect(ended.kind === "quit", `startup ended as ${ended.kind}, not quit`);
+    expect(view.isDisposed(), "quitting disposes the connection");
+  },
 
   async "rapid enters keep a typed answer to an earlier question"() {
     const view = createFakeView([codex]);
