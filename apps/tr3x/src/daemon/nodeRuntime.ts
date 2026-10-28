@@ -58,7 +58,7 @@ function compare(a: ReadonlyArray<number>, b: ReadonlyArray<number>): number {
 }
 
 /** Whether `version` meets a range of `^x.y` and `>=x.y` terms joined by `||`, as npm reads them. */
-export function satisfiesNodeRange(version: string, range: string): boolean {
+export function satisfiesVersionRange(version: string, range: string): boolean {
   const actual = parseVersion(version);
   if (actual === null) return false;
   return range.split("||").some((term) => {
@@ -95,7 +95,7 @@ export function checkNodeRuntime(env: NodeJS.ProcessEnv): NodeRuntimeCheck {
     };
   }
   const range = serverNodeRange();
-  if (!satisfiesNodeRange(version, range)) {
+  if (!satisfiesVersionRange(version, range)) {
     return {
       ok: false,
       detail: `${node} is Node ${version}; the T3 server needs ${range}. Install a newer Node, or set TR3X_NODE_BIN.`,

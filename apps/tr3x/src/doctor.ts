@@ -19,6 +19,7 @@ import {
   fetchEnvironmentSummary,
 } from "./daemon/health.ts";
 import { issueLocalSession } from "./daemon/localSession.ts";
+import { checkBunRuntime } from "./bunRuntime.ts";
 import { checkNodeRuntime } from "./daemon/nodeRuntime.ts";
 import { findOnPath, isExecutableFile } from "./executables.ts";
 import type { Tr3xPaths } from "./paths.ts";
@@ -45,13 +46,19 @@ export interface DoctorOptions {
   readonly env: NodeJS.ProcessEnv;
   readonly out: (line: string) => void;
   readonly rexAppBundleClis?: ReadonlyArray<string>;
+  /** The running Bun's version, `process.versions.bun`; undefined outside Bun. */
+  readonly bunVersion: string | undefined;
 }
 
 /** Prints one line per check and returns the exit code: 1 when a required check fails. */
 export async function runDoctor(options: DoctorOptions): Promise<number> {
   const { paths, env } = options;
   const node = checkNodeRuntime(env);
+  const bun = checkBunRuntime(options.bunVersion);
   const checks: Check[] = [
+    bun.ok
+      ? { status: "ok", name: "bun", detail: `Bun ${bun.version} runs tr3x` }
+      : { status: "fail", name: "bun", detail: bun.detail },
     node.ok
       ? { status: "ok", name: "node", detail: `${node.node} (${node.version}) runs the T3 server` }
       : { status: "fail", name: "node", detail: node.detail },

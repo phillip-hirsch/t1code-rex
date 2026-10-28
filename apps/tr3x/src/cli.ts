@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 // @effect-diagnostics globalDate:off -- The CLI runs on Bun outside the Effect runtime.
 import { parseArgs, USAGE } from "./args.ts";
+import { checkBunRuntime } from "./bunRuntime.ts";
 import { runDaemon } from "./daemon/daemon.ts";
 import { runDoctor } from "./doctor.ts";
 import { resolveTr3xPaths } from "./paths.ts";
@@ -20,6 +21,11 @@ async function main(argv: ReadonlyArray<string>): Promise<number> {
     process.stdout.write(USAGE);
     return 0;
   }
+  const bun = checkBunRuntime(process.versions.bun);
+  if (!bun.ok) {
+    process.stderr.write(`tr3x: ${bun.detail}\n`);
+    return 1;
+  }
   const paths = resolveTr3xPaths(process.env);
   if (command.kind === "view" || command.kind === "new") {
     // Loaded only here, so daemon and doctor never load OpenTUI.
@@ -38,6 +44,7 @@ async function main(argv: ReadonlyArray<string>): Promise<number> {
     return await runDoctor({
       paths,
       env: process.env,
+      bunVersion: process.versions.bun,
       out: (line) => process.stdout.write(`${line}\n`),
     });
   }

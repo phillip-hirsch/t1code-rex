@@ -24,13 +24,18 @@ function tempDir(): string {
   return dir;
 }
 
-async function doctor(env: NodeJS.ProcessEnv, rexAppBundleClis: ReadonlyArray<string> = []) {
+async function doctor(
+  env: NodeJS.ProcessEnv,
+  rexAppBundleClis: ReadonlyArray<string> = [],
+  bun: { readonly version: string | undefined } = { version: "1.4.4" },
+) {
   const lines: string[] = [];
   const code = await runDoctor({
     paths: resolveTr3xPaths(env),
     env,
     out: (line) => lines.push(line),
     rexAppBundleClis,
+    bunVersion: bun.version,
   });
   return { code, lines };
 }
@@ -103,6 +108,26 @@ describe("tr3x doctor", () => {
     });
     expect(current.lines).toContainEqual(
       expect.stringMatching(/ok\s+node\s+\S+ \(v\d+\.\d+\.\d+\) runs the T3 server$/u),
+    );
+  });
+
+  it("reports the Bun running tr3x, and fails one older than engines.bun or none", async () => {
+    const home = () => NodePath.join(tempDir(), "home");
+    const current = await doctor({ TR3X_HOME: home(), PATH: "" }, [], { version: "1.4.4" });
+    expect(current.lines).toContainEqual(
+      expect.stringMatching(/ok\s+bun\s+Bun 1\.4\.4 runs tr3x$/u),
+    );
+    const old = await doctor({ TR3X_HOME: home(), PATH: "" }, [], { version: "1.3.9" });
+    expect(old.lines).toContainEqual(
+      expect.stringMatching(
+        /fail\s+bun\s+This is Bun 1\.3\.9; tr3x needs Bun >=1\.3\.14\. Upgrade Bun\.$/u,
+      ),
+    );
+    const none = await doctor({ TR3X_HOME: home(), PATH: "" }, [], { version: undefined });
+    expect(none.lines).toContainEqual(
+      expect.stringMatching(
+        /fail\s+bun\s+tr3x runs on Bun >=1\.3\.14, and this process isn't Bun\.$/u,
+      ),
     );
   });
 
