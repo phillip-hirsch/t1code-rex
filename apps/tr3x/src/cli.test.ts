@@ -3,23 +3,13 @@ import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeURL from "node:url";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { readDaemonState } from "./daemon/daemonState.ts";
 import { isProcessAlive } from "./daemon/health.ts";
 import { resolveServerCommand } from "./daemon/serverLauncher.ts";
 import { resolveTr3xPaths } from "./paths.ts";
-
-const CLI = NodeURL.fileURLToPath(new URL("./cli.ts", import.meta.url));
-const STARTED =
-  /started T3 server \S+ \(orchestration protocol 2\) at \S+ \(server pid (\d+), daemon pid (\d+)\)/u;
-
-interface CliProcess {
-  readonly child: NodeChildProcess.ChildProcess;
-  readonly output: () => string;
-  readonly exited: Promise<number | null>;
-}
+import { type BunProcess, CLI, spawnBun, STARTED, waitForLine } from "./testing/bunProcess.ts";
 
 const cleanup: Array<() => void> = [];
 
@@ -33,40 +23,8 @@ function tempHome(): string {
   return NodePath.join(dir, "home");
 }
 
-function startCli(home: string, command: "daemon" | "doctor"): CliProcess {
-  const child = NodeChildProcess.spawn(process.execPath, [CLI, command], {
-    env: { ...process.env, TR3X_HOME: home, TR3X_NODE_BIN: process.execPath },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let output = "";
-  child.stdout.on("data", (chunk) => (output += String(chunk)));
-  child.stderr.on("data", (chunk) => (output += String(chunk)));
-  const exited = new Promise<number | null>((resolve) =>
-    child.once("exit", (code) => resolve(code)),
-  );
-  cleanup.push(() => {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-  });
-  return { child, output: () => output, exited };
-}
-
-/** Resolves on the first output line matching `pattern`; rejects if the process exits first. */
-function waitForLine(cli: CliProcess, pattern: RegExp): Promise<RegExpMatchArray> {
-  return new Promise((resolve, reject) => {
-    const check = () => {
-      const match = cli.output().match(pattern);
-      if (!match) return false;
-      cli.child.stdout?.off("data", onData);
-      resolve(match);
-      return true;
-    };
-    const onData = () => void check();
-    if (check()) return;
-    cli.child.stdout?.on("data", onData);
-    void cli.exited.then(() => {
-      if (!check()) reject(new Error(`exited before printing ${pattern}:\n${cli.output()}`));
-    });
-  });
+function startCli(home: string, command: "daemon" | "doctor"): BunProcess {
+  return spawnBun([CLI, command], { TR3X_HOME: home }, (step) => cleanup.push(step));
 }
 
 /** A server pid that the daemon under test started; killed after the test if it outlives it. */

@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off -- The daemon runs on Node outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off -- The daemon runs on Bun outside the Effect runtime.
 import * as NodeFS from "node:fs";
 
 import type { Tr3xPaths } from "../paths.ts";

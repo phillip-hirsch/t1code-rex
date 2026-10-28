@@ -9,21 +9,28 @@
   },
   "type": "module",
   "scripts": {
-    "start": "node src/cli.ts",
+    "start": "bun src/cli.ts",
     "typecheck": "tsc --noEmit",
     "test": "vp test run --config ../../vite.config.ts --dir ."
   },
   "dependencies": {
+    "@effect/atom-react": "catalog:",
+    "@opentui/core": "0.7.0",
+    "@opentui/react": "0.7.0",
     "@t3tools/client-runtime": "workspace:*",
     "@t3tools/contracts": "workspace:*",
-    "effect": "catalog:"
+    "effect": "catalog:",
+    "react": "catalog:",
+    "string-width": "8.2.1"
   },
   "devDependencies": {
+    "@t3tools/provider-testing": "workspace:*",
     "@types/node": "catalog:",
+    "@types/react": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:"
   },
   "engines": {
-    "node": "^22.23.4 || ^24.22.1 || >=26.12.1"
+    "bun": ">=1.3.14"
   }
 }

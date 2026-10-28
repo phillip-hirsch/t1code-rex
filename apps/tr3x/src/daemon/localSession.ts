@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off -- tr3x runs on Node outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off -- tr3x runs on Bun outside the Effect runtime.
 import * as NodeChildProcess from "node:child_process";
 import type { AuthGrantScope } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
@@ -52,8 +52,16 @@ export async function issueLocalSession(input: IssueLocalSessionInput): Promise<
       { cwd, env: stripReservedLaunchEnv(input.env), timeout: 20_000, encoding: "utf8" },
       (error, out, err) => {
         if (error) {
-          const detail = err.trim().split("\n").at(-1);
-          reject(new Error(`Could not issue a session${detail ? `: ${detail}` : "."}`));
+          // A Node that can't run says so in the spawn error, not on stderr.
+          const detail =
+            err.trim().split("\n").at(-1) ||
+            (error.code === "ENOENT" || error.code === "EACCES"
+              ? `${command} can't run (${error.code}). Set TR3X_NODE_BIN to a Node binary.`
+              : error.killed
+                ? "it took too long"
+                : undefined);
+          // Not "session: …": redaction reads that as a credential and hides the reason.
+          reject(new Error(`Could not issue a session.${detail ? ` ${detail}` : ""}`));
         } else resolve(out);
       },
     );

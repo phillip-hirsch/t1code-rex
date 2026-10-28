@@ -3,13 +3,12 @@ import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { ServerProvider } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { currentProcessStartedAt, writeDaemonState } from "./daemon/daemonState.ts";
 import { runDoctor, summarizeProviders } from "./doctor.ts";
 import { resolveTr3xPaths } from "./paths.ts";
+import { provider } from "./testing/serverProvider.ts";
 
 const dirs: string[] = [];
 const servers: NodeHttp.Server[] = [];
@@ -25,13 +24,18 @@ function tempDir(): string {
   return dir;
 }
 
-async function doctor(env: NodeJS.ProcessEnv, rexAppBundleClis: ReadonlyArray<string> = []) {
+async function doctor(
+  env: NodeJS.ProcessEnv,
+  rexAppBundleClis: ReadonlyArray<string> = [],
+  bun: { readonly version: string | undefined } = { version: "1.4.4" },
+) {
   const lines: string[] = [];
   const code = await runDoctor({
     paths: resolveTr3xPaths(env),
     env,
     out: (line) => lines.push(line),
     rexAppBundleClis,
+    bunVersion: bun.version,
   });
   return { code, lines };
 }
@@ -50,6 +54,11 @@ describe("tr3x doctor", () => {
     });
 
     expect(code).toBe(1);
+    expect(lines).toContainEqual(
+      expect.stringMatching(
+        /fail\s+node\s+The T3 server runs on Node, and no `node` is on PATH\./u,
+      ),
+    );
     expect(lines.join("\n")).toMatch(
       /fail\s+daemon\s+not running\. Start it with `tr3x daemon`\./u,
     );
@@ -59,7 +68,7 @@ describe("tr3x doctor", () => {
     expect(lines).toContainEqual(
       expect.stringMatching(/info\s+rex session\s+inside Rex \(session s1, block b1\)$/u),
     );
-    expect(lines.at(-1)).toBe("3 required check(s) failed.");
+    expect(lines.at(-1)).toBe("4 required check(s) failed.");
   });
 
   it("fails when no Rex CLI is installed", async () => {
@@ -80,6 +89,44 @@ describe("tr3x doctor", () => {
     expect(lines).toContainEqual(
       expect.stringMatching(
         /fail\s+daemon\s+refusing its state file: .*daemon\.json is accessible to other users \(mode 644\)/u,
+      ),
+    );
+  });
+
+  it("fails on a Node too old for the server, and passes on the one running these tests", async () => {
+    const bin = tempDir();
+    const oldNode = NodePath.join(bin, "node");
+    NodeFS.writeFileSync(oldNode, '#!/bin/sh\necho "v20.11.0"\n', { mode: 0o755 });
+    const old = await doctor({ TR3X_HOME: NodePath.join(tempDir(), "home"), PATH: bin });
+    expect(old.lines).toContainEqual(
+      expect.stringMatching(/fail\s+node\s+.*\/node is Node v20\.11\.0; the T3 server needs \^22/u),
+    );
+    const current = await doctor({
+      TR3X_HOME: NodePath.join(tempDir(), "home"),
+      PATH: "",
+      TR3X_NODE_BIN: process.execPath,
+    });
+    expect(current.lines).toContainEqual(
+      expect.stringMatching(/ok\s+node\s+\S+ \(v\d+\.\d+\.\d+\) runs the T3 server$/u),
+    );
+  });
+
+  it("reports the Bun running tr3x, and fails one older than engines.bun or none", async () => {
+    const home = () => NodePath.join(tempDir(), "home");
+    const current = await doctor({ TR3X_HOME: home(), PATH: "" }, [], { version: "1.4.4" });
+    expect(current.lines).toContainEqual(
+      expect.stringMatching(/ok\s+bun\s+Bun 1\.4\.4 runs tr3x$/u),
+    );
+    const old = await doctor({ TR3X_HOME: home(), PATH: "" }, [], { version: "1.3.9" });
+    expect(old.lines).toContainEqual(
+      expect.stringMatching(
+        /fail\s+bun\s+This is Bun 1\.3\.9; tr3x needs Bun >=1\.3\.14\. Upgrade Bun\.$/u,
+      ),
+    );
+    const none = await doctor({ TR3X_HOME: home(), PATH: "" }, [], { version: undefined });
+    expect(none.lines).toContainEqual(
+      expect.stringMatching(
+        /fail\s+bun\s+tr3x runs on Bun >=1\.3\.14, and this process isn't Bun\.$/u,
       ),
     );
   });
@@ -138,24 +185,6 @@ describe("tr3x doctor", () => {
     expect(authorizations).toEqual([undefined]);
   });
 });
-
-const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
-
-function provider(name: string, overrides: Record<string, unknown> = {}): ServerProvider {
-  return decodeProvider({
-    instanceId: name,
-    driver: name,
-    displayName: name,
-    enabled: true,
-    installed: true,
-    version: "1.0.0",
-    status: "ready",
-    auth: { status: "authenticated" },
-    checkedAt: "2026-10-27T00:00:00.000Z",
-    models: [],
-    ...overrides,
-  });
-}
 
 describe("summarizeProviders", () => {
   it("counts a provider as usable only when it is signed in, as upstream web does", () => {

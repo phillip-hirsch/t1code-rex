@@ -3,7 +3,7 @@
 This repository is tr3x. The plan is T3 Code's server and orchestration v2, used from Rex, with each thread in a Rex tab. The rest of this file is upstream T3 Code's guide and still applies to the shared code.
 
 - The design is in [PR #24](https://github.com/phillip-hirsch/tr3x/pull/24).
-- `apps/tr3x` is fork-only: a Node CLI (`node apps/tr3x/src/cli.ts daemon|doctor`). It runs upstream's `apps/server` unchanged, in `TR3X_HOME` (default `~/.tr3x`), never `~/.t3`.
+- `apps/tr3x` is fork-only: a Bun CLI (`bun apps/tr3x/src/cli.ts daemon|doctor|view`). It runs upstream's `apps/server` unchanged on Node (`TR3X_NODE_BIN`, else `node` on `PATH`), in `TR3X_HOME` (default `~/.tr3x`), never `~/.t3`. Its tests run under Vitest on Node, so code they reach must work on both runtimes.
 - Everything else tracks upstream `pingdotgg/t3code`. Keep it as close to upstream as possible, so future merges stay cheap.
 - This fork doesn't publish to npm and has no GitHub workflows.
 - Use conventional commit messages, e.g. `feat(tr3x): open threads as Rex tabs`.

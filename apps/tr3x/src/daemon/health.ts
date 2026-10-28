@@ -1,4 +1,4 @@
-// @effect-diagnostics globalFetch:off -- tr3x runs on Node outside the Effect runtime.
+// @effect-diagnostics globalFetch:off -- tr3x runs on Bun outside the Effect runtime.
 import { type EnvironmentId, ExecutionEnvironmentDescriptor } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 

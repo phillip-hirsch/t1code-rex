@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off -- tr3x runs on Node outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off -- tr3x runs on Bun outside the Effect runtime.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
