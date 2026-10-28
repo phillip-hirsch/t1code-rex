@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off -- The view runs on Bun outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off -- The view runs on Bun outside the Effect runtime.
 import * as NodeCrypto from "node:crypto";
 import type { KeyEvent, TextareaRenderable } from "@opentui/core";
 import { useKeyboard, useRenderer } from "@opentui/react";
@@ -64,6 +64,7 @@ const NO_RUNS: ReadonlyArray<never> = [];
 const nowIso = () => new Date().toISOString();
 
 const RUN_ACTIVE = "Model switching waits until the run finishes.";
+const APPROVAL_ARM_MS = 300;
 
 function nextRuntimeMode(mode: RuntimeMode): RuntimeMode {
   return mode === "full-access" ? "approval-required" : "full-access";
@@ -111,8 +112,23 @@ export function App(props: AppProps) {
     [data.items, runs, providers],
   );
   const shown = activeRequest(data.requests);
-  const request =
-    shown?.type === "question" && pending.isAnswered(shown.input.requestId) ? null : shown;
+  const shownId =
+    shown?.type === "question"
+      ? shown.input.requestId
+      : shown?.type === "approval"
+        ? shown.approval.requestId
+        : null;
+  const request = shownId !== null && pending.isAnswered(shownId) ? null : shown;
+  const approvalId = request?.type === "approval" ? request.approval.requestId : null;
+  // Keys typed as an approval appears were meant for the composer; arm it after a beat.
+  useEffect(() => {
+    if (approvalId === null) return;
+    const timer = setTimeout(() => {
+      pending.armApproval(approvalId);
+      rerender();
+    }, APPROVAL_ARM_MS);
+    return () => clearTimeout(timer);
+  }, [approvalId, pending]);
   const [drafts, setDrafts] = useState<ReadonlyMap<string, QuestionDraft>>(new Map());
   const answered = request?.type === "question" ? pending.answersTo(request.input.requestId) : null;
   const question =
@@ -380,21 +396,25 @@ export function App(props: AppProps) {
       if (queued) void connection.cancelQueuedRun({ threadId, runId: queued.run.id });
       return;
     }
-    if (request?.type === "approval") {
+    // a/s/d answer an approval only from an empty composer, once it's armed, once per request.
+    if (request?.type === "approval" && (composerRef.current?.plainText ?? "") === "") {
+      const requestId = request.approval.requestId;
       const choice = approvalChoices(request.approval).find(
-        (candidate) =>
-          candidate.key === key.name || (key.name === "return" && candidate.decision === "accept"),
+        (candidate) => candidate.key === key.name && !key.ctrl && !key.meta,
       );
-      if (!choice) return;
-      consume();
-      void connection
-        .respondToApproval({
-          threadId,
-          requestId: request.approval.requestId,
-          decision: choice.decision,
-        })
-        .then((result) => setNotice(result.ok ? null : `Could not answer: ${result.error}`));
-      return;
+      if (choice && pending.isApprovalArmed(requestId)) {
+        consume();
+        if (!pending.beginAnswer(requestId)) return;
+        rerender();
+        void connection
+          .respondToApproval({ threadId, requestId, decision: choice.decision })
+          .then((result) => {
+            pending.endAnswer(requestId, result.ok);
+            setNotice(result.ok ? null : `Could not answer: ${result.error}`);
+            rerender();
+          });
+        return;
+      }
     }
     if (question && questionKey && questionDraft) {
       const setDraft = (draft: QuestionDraft) => setDrafts(new Map(drafts).set(questionKey, draft));
@@ -468,7 +488,12 @@ export function App(props: AppProps) {
         header={historyHeader}
         empty={empty}
       />
-      {request?.type === "approval" ? <ApprovalPanel approval={request.approval} /> : null}
+      {request?.type === "approval" ? (
+        <ApprovalPanel
+          approval={request.approval}
+          armed={pending.isApprovalArmed(request.approval.requestId)}
+        />
+      ) : null}
       {question && questionDraft ? (
         <QuestionPanel
           question={question}
@@ -509,7 +534,7 @@ export function App(props: AppProps) {
       >
         <textarea
           ref={composerRef}
-          focused={request?.type !== "approval" && picker === null}
+          focused={picker === null}
           placeholder={
             questionDraft ? "Type an answer, or enter picks the highlighted option" : "Message"
           }

@@ -26,19 +26,27 @@ function Panel(props: {
   );
 }
 
-export function ApprovalPanel({ approval }: { readonly approval: ThreadPendingApproval }) {
+export function ApprovalPanel(props: {
+  readonly approval: ThreadPendingApproval;
+  /** On screen long enough for keys to answer it. */
+  readonly armed: boolean;
+}) {
+  const { approval } = props;
   return (
     <Panel heading="Approval needed" color={palette.warning}>
       <text
         content={approval.detail ?? approval.reason ?? approval.requestKind}
         fg={palette.text}
       />
-      <text
-        content={approvalChoices(approval)
-          .map((choice) => `[${choice.key}] ${choice.label}`)
-          .join("   ")}
-        fg={palette.warning}
-      />
+      {props.armed ? (
+        <text
+          content={approvalChoices(approval)
+            .map((choice) => `[${choice.key}] ${choice.label}`)
+            .join("   ")}
+          fg={palette.warning}
+        />
+      ) : null}
+      <text content="keys answer while the message box is empty" fg={palette.subtle} />
     </Panel>
   );
 }

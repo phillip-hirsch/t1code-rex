@@ -10,6 +10,7 @@ import {
   NodeId,
   ProjectId,
   ProviderInstanceId,
+  ProviderSessionId,
   RunId,
   RuntimeRequestId,
   ThreadId,
@@ -197,6 +198,34 @@ export function pendingQuestion(
     kind: "user_input",
     status: "pending",
     responseCapability: { type: "message" },
+    createdAt: NOW,
+    resolvedAt: null,
+  };
+  return { item, request };
+}
+
+/** A pending approval: its runtime request and the turn item that describes it. */
+export function pendingApproval(id: string, prompt: string) {
+  const requestId = RuntimeRequestId.make(id);
+  const item: OrchestrationV2TurnItem = {
+    ...itemBase(`item-${id}`, 0),
+    type: "approval_request",
+    status: "running",
+    requestId,
+    requestKind: "command",
+    prompt,
+  };
+  const request: OrchestrationV2ThreadProjection["runtimeRequests"][number] = {
+    id: requestId,
+    nodeId: NodeId.make("node-fixture"),
+    providerTurnId: null,
+    nativeRequestRef: null,
+    kind: "command",
+    status: "pending",
+    responseCapability: {
+      type: "live",
+      providerSessionId: ProviderSessionId.make("session-fixture"),
+    },
     createdAt: NOW,
     resolvedAt: null,
   };

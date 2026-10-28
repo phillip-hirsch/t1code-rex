@@ -105,7 +105,7 @@ try {
   );
 
   await send("Repeat the code word");
-  const blocked = await until(
+  await until(
     "a handoff row, then Grok B's approval prompt",
     (frame) =>
       frame.includes("Context handoff: Grok · Grok 4.6 → Grok B · Grok 4.6") &&
@@ -116,7 +116,9 @@ try {
     "Rex status is blocked, kind=permission",
     describeStatus(lastStatus()) === "blocked:permission",
   );
-  check("the approval offers the provider's choices", /\[a\] Approve/u.test(blocked));
+  await until("the approval offers the provider's choices once armed", (frame) =>
+    /\[a\] Approve/u.test(frame),
+  );
   await press("p", { ctrl: true });
   await until("the picker is disabled while the run is active", (frame) =>
     frame.includes("Model switching waits until the run finishes."),

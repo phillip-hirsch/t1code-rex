@@ -16,6 +16,7 @@ import { provider } from "../testing/serverProvider.ts";
 import {
   createFakeView,
   FIXTURE_THREAD_ID,
+  pendingApproval,
   pendingQuestion,
   projection,
   run,
@@ -223,6 +224,43 @@ const scenarios: Record<string, Scenario> = {
     );
     expect(ended.kind === "quit", `startup ended as ${ended.kind}, not quit`);
     expect(view.isDisposed(), "quitting disposes the connection");
+  },
+
+  async "typing through an approval keeps the text and answers nothing"() {
+    const view = createFakeView([codex]);
+    const running = run("r1", 1, "running", selection);
+    view.setProjection(projection({ selection, runs: [running] }));
+    const ui = await mount(view);
+    await ui.setup.mockInput.typeText("ple");
+    const { item, request } = pendingApproval("a1", "rm -rf build");
+    view.setProjection(
+      projection({ selection, runs: [running], items: [item], requests: [request] }),
+    );
+    await ui.frame("the approval is armed", (frame) => frame.includes("[a] accept"));
+    await ui.setup.mockInput.typeText("ase add");
+    const frame = await ui.settle();
+    expect(view.commands.respondToApproval.calls.length === 0, "typing answers nothing");
+    expect(frame.includes("please add"), "the text stays in the composer", frame);
+    await ui.dispose();
+  },
+
+  async "an approval takes one answer, and enter gives none"() {
+    const view = createFakeView([codex]);
+    const { item, request } = pendingApproval("a2", "rm -rf build");
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    view.commands.respondToApproval.next = "hold";
+    const ui = await mount(view);
+    await ui.enter();
+    await ui.frame("the approval is armed", (frame) => frame.includes("[a] accept"));
+    await ui.enter();
+    expect(view.commands.respondToApproval.calls.length === 0, "enter answers nothing");
+    ui.setup.mockInput.pressKey("a");
+    ui.setup.mockInput.pressKey("a");
+    await ui.settle();
+    expect(view.commands.respondToApproval.calls.length === 1, "a held key answers once");
+    expect(view.commands.respondToApproval.calls[0]?.decision === "accept", "a accepts");
+    view.commands.respondToApproval.release();
+    await ui.dispose();
   },
 
   async "rapid enters keep a typed answer to an earlier question"() {

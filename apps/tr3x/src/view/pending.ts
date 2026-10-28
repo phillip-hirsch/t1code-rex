@@ -17,6 +17,7 @@ export class PendingWork {
   private readonly answering = new Set<RuntimeRequestId>();
   private readonly answered = new Set<RuntimeRequestId>();
   private readonly answers = new Map<RuntimeRequestId, Map<string, Answer>>();
+  private readonly armedApprovals = new Set<RuntimeRequestId>();
 
   private launched: boolean;
 
@@ -84,6 +85,15 @@ export class PendingWork {
     const answers = this.answers.get(requestId) ?? new Map<string, Answer>();
     answers.set(questionId, answer);
     this.answers.set(requestId, answers);
+  }
+
+  /** The approval has been on screen long enough that a key is meant for it. */
+  armApproval(requestId: RuntimeRequestId): void {
+    this.armedApprovals.add(requestId);
+  }
+
+  isApprovalArmed(requestId: RuntimeRequestId): boolean {
+    return this.armedApprovals.has(requestId);
   }
 
   /** Starts answering, unless an answer to `requestId` is in flight or accepted. */
