@@ -3,13 +3,12 @@ import * as NodeFS from "node:fs";
 import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import { ServerProvider } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { currentProcessStartedAt, writeDaemonState } from "./daemon/daemonState.ts";
 import { runDoctor, summarizeProviders } from "./doctor.ts";
 import { resolveTr3xPaths } from "./paths.ts";
+import { provider } from "./testing/serverProvider.ts";
 
 const dirs: string[] = [];
 const servers: NodeHttp.Server[] = [];
@@ -161,24 +160,6 @@ describe("tr3x doctor", () => {
     expect(authorizations).toEqual([undefined]);
   });
 });
-
-const decodeProvider = Schema.decodeUnknownSync(ServerProvider);
-
-function provider(name: string, overrides: Record<string, unknown> = {}): ServerProvider {
-  return decodeProvider({
-    instanceId: name,
-    driver: name,
-    displayName: name,
-    enabled: true,
-    installed: true,
-    version: "1.0.0",
-    status: "ready",
-    auth: { status: "authenticated" },
-    checkedAt: "2026-10-27T00:00:00.000Z",
-    models: [],
-    ...overrides,
-  });
-}
 
 describe("summarizeProviders", () => {
   it("counts a provider as usable only when it is signed in, as upstream web does", () => {

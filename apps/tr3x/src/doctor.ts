@@ -22,6 +22,7 @@ import { issueLocalSession } from "./daemon/localSession.ts";
 import { checkNodeRuntime } from "./daemon/nodeRuntime.ts";
 import { findOnPath, isExecutableFile } from "./executables.ts";
 import type { Tr3xPaths } from "./paths.ts";
+import { isUsableProvider } from "./providers.ts";
 import { describeError } from "./redact.ts";
 import { fetchServerConfig } from "./serverConfig.ts";
 
@@ -208,17 +209,6 @@ export function summarizeProviders(providers: ReadonlyArray<ServerProvider>): Ch
 
 function providerName(provider: ServerProvider): string {
   return provider.displayName ?? provider.instanceId;
-}
-
-/** Upstream web's rule for a provider it will route a new thread to (`useDraftEnvironmentRouting`). */
-function isUsableProvider(provider: ServerProvider): boolean {
-  return (
-    provider.enabled &&
-    provider.installed &&
-    (provider.status === "ready" || provider.status === "warning") &&
-    provider.auth.status !== "unauthenticated" &&
-    provider.availability !== "unavailable"
-  );
 }
 
 function rexCliCheck(env: NodeJS.ProcessEnv, appBundleClis: ReadonlyArray<string>): Check {
