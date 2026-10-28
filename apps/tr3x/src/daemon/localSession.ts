@@ -60,7 +60,8 @@ export async function issueLocalSession(input: IssueLocalSessionInput): Promise<
               : error.killed
                 ? "it took too long"
                 : undefined);
-          reject(new Error(`Could not issue a session${detail ? `: ${detail}` : "."}`));
+          // Not "session: …": redaction reads that as a credential and hides the reason.
+          reject(new Error(`Could not issue a session.${detail ? ` ${detail}` : ""}`));
         } else resolve(out);
       },
     );
