@@ -48,9 +48,12 @@ function expect(condition: boolean, message: string, frame?: string): void {
 
 async function mount(
   view: ReturnType<typeof createFakeView>,
-  options: { readonly newThread?: boolean; readonly width?: number } = {},
+  options: { readonly newThread?: boolean; readonly width?: number; readonly height?: number } = {},
 ) {
-  const setup = await createTestRenderer({ width: options.width ?? 100, height: 30 });
+  const setup = await createTestRenderer({
+    width: options.width ?? 100,
+    height: options.height ?? 30,
+  });
   const root = createRoot(setup.renderer);
   root.render(
     <RegistryContext.Provider value={view.api.registry}>
@@ -260,6 +263,33 @@ const scenarios: Record<string, Scenario> = {
     expect(view.commands.respondToApproval.calls.length === 1, "a held key answers once");
     expect(view.commands.respondToApproval.calls[0]?.decision === "accept", "a accepts");
     view.commands.respondToApproval.release();
+    await ui.dispose();
+  },
+
+  async "a question with long options keeps the composer on screen at 80x24"() {
+    const view = createFakeView([codex]);
+    const { item, request } = pendingQuestion("long", [
+      {
+        id: "q",
+        header: "Choose implementation",
+        question: "Which approach?",
+        options: Array.from({ length: 4 }, (_, index) => ({
+          label: `Approach ${index}`,
+          description: "A valid possible implementation for the task. ".repeat(8).trim(),
+        })),
+      },
+    ]);
+    view.setProjection(projection({ selection, items: [item], requests: [request] }));
+    const ui = await mount(view, { width: 80, height: 24 });
+    await ui.setup.mockInput.typeText("custom answer");
+    let frame = await ui.settle();
+    expect(frame.includes("custom answer"), "the composer shows what's typed", frame);
+    expect(frame.includes("enter send"), "the key hints show", frame);
+    expect(frame.includes("↓ 1 more"), "the panel says more options follow", frame);
+    for (let press = 0; press < 3; press += 1) frame = await ui.arrow("down");
+    expect(frame.includes("› Approach 3"), "the last option scrolls into view", frame);
+    expect(frame.includes("custom answer"), "the composer stays on screen", frame);
+    console.log(frame);
     await ui.dispose();
   },
 

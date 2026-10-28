@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off -- The view runs on Bun outside the Effect runtime.
 import * as NodeCrypto from "node:crypto";
 import type { KeyEvent, TextareaRenderable } from "@opentui/core";
-import { useKeyboard, useRenderer } from "@opentui/react";
+import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import { useAtomValue } from "@effect/atom-react";
 import { deriveThreadStructureRuntime } from "@t3tools/client-runtime/state/thread-execution";
 import { threadSupportsProviderHandoff } from "@t3tools/client-runtime/state/thread-workflows";
@@ -77,6 +77,8 @@ export function App(props: AppProps) {
   const [launched, setLaunched] = useState(props.newThread === null);
   const [pending] = useState(() => new PendingWork(props.newThread === null));
   const [, rerender] = useReducer((count: number) => count + 1, 0);
+  // A request panel leaves room for the header, a line of transcript, the composer and hints.
+  const panelHeight = Math.max(6, useTerminalDimensions().height - 10);
   const composerRef = useRef<TextareaRenderable | null>(null);
   const transcriptRef = useRef<TranscriptHandle | null>(null);
   const data = useThreadData(connection, threadId, launched);
@@ -492,10 +494,12 @@ export function App(props: AppProps) {
         <ApprovalPanel
           approval={request.approval}
           armed={pending.isApprovalArmed(request.approval.requestId)}
+          maxHeight={panelHeight}
         />
       ) : null}
       {question && questionDraft ? (
         <QuestionPanel
+          maxHeight={panelHeight}
           question={question}
           draft={questionDraft}
           dismissible={request?.type === "question" && request.input.dismissible}
