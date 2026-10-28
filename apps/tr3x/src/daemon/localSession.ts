@@ -52,7 +52,14 @@ export async function issueLocalSession(input: IssueLocalSessionInput): Promise<
       { cwd, env: stripReservedLaunchEnv(input.env), timeout: 20_000, encoding: "utf8" },
       (error, out, err) => {
         if (error) {
-          const detail = err.trim().split("\n").at(-1);
+          // A Node that can't run says so in the spawn error, not on stderr.
+          const detail =
+            err.trim().split("\n").at(-1) ||
+            (error.code === "ENOENT" || error.code === "EACCES"
+              ? `${command} can't run (${error.code}). Set TR3X_NODE_BIN to a Node binary.`
+              : error.killed
+                ? "it took too long"
+                : undefined);
           reject(new Error(`Could not issue a session${detail ? `: ${detail}` : "."}`));
         } else resolve(out);
       },
