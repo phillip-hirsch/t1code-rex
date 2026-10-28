@@ -9,9 +9,12 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { readDaemonState } from "./daemon/daemonState.ts";
 import { isProcessAlive } from "./daemon/health.ts";
 import { resolveServerCommand } from "./daemon/serverLauncher.ts";
+import { findOnPath } from "./executables.ts";
 import { resolveTr3xPaths } from "./paths.ts";
 
 const CLI = NodeURL.fileURLToPath(new URL("./cli.ts", import.meta.url));
+/** The CLI runs on Bun; Vitest, and so the server's Node, runs on Node. */
+const BUN = findOnPath("bun", process.env);
 const STARTED =
   /started T3 server \S+ \(orchestration protocol 2\) at \S+ \(server pid (\d+), daemon pid (\d+)\)/u;
 
@@ -34,7 +37,8 @@ function tempHome(): string {
 }
 
 function startCli(home: string, command: "daemon" | "doctor"): CliProcess {
-  const child = NodeChildProcess.spawn(process.execPath, [CLI, command], {
+  if (BUN === undefined) throw new Error("These tests run the tr3x CLI with Bun; install it.");
+  const child = NodeChildProcess.spawn(BUN, [CLI, command], {
     env: { ...process.env, TR3X_HOME: home, TR3X_NODE_BIN: process.execPath },
     stdio: ["ignore", "pipe", "pipe"],
   });

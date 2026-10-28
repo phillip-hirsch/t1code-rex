@@ -1,7 +1,5 @@
-// @effect-diagnostics nodeBuiltinImport:off -- tr3x runs on Node outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off -- tr3x runs on Bun outside the Effect runtime.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFS from "node:fs";
-import * as NodePath from "node:path";
 import {
   AuthOrchestrationReadScope,
   ORCHESTRATION_PROTOCOL_VERSION,
@@ -21,6 +19,8 @@ import {
   fetchEnvironmentSummary,
 } from "./daemon/health.ts";
 import { issueLocalSession } from "./daemon/localSession.ts";
+import { checkNodeRuntime } from "./daemon/nodeRuntime.ts";
+import { findOnPath, isExecutableFile } from "./executables.ts";
 import type { Tr3xPaths } from "./paths.ts";
 import { describeError } from "./redact.ts";
 import { fetchServerConfig } from "./serverConfig.ts";
@@ -49,7 +49,12 @@ export interface DoctorOptions {
 /** Prints one line per check and returns the exit code: 1 when a required check fails. */
 export async function runDoctor(options: DoctorOptions): Promise<number> {
   const { paths, env } = options;
-  const checks: Check[] = [];
+  const node = checkNodeRuntime(env);
+  const checks: Check[] = [
+    node.ok
+      ? { status: "ok", name: "node", detail: `${node.node} (${node.version}) runs the T3 server` }
+      : { status: "fail", name: "node", detail: node.detail },
+  ];
   let state: DaemonState | undefined;
   let refused: string | undefined;
   try {
@@ -248,21 +253,7 @@ export function resolveRexCli(
   env: NodeJS.ProcessEnv,
   appBundleClis: ReadonlyArray<string> = REX_APP_BUNDLE_CLIS,
 ): string | undefined {
-  const pathCandidates = (env.PATH ?? "")
-    .split(NodePath.delimiter)
-    .filter(Boolean)
-    .map((dir) => NodePath.join(dir, "rex"));
   const configured = env.TR3X_REX_BIN?.trim();
-  return [...(configured ? [configured] : []), ...pathCandidates, ...appBundleClis].find(
-    isExecutableFile,
-  );
-}
-
-function isExecutableFile(path: string): boolean {
-  try {
-    NodeFS.accessSync(path, NodeFS.constants.X_OK);
-    return NodeFS.statSync(path).isFile();
-  } catch {
-    return false;
-  }
+  if (configured && isExecutableFile(configured)) return configured;
+  return findOnPath("rex", env) ?? appBundleClis.find(isExecutableFile);
 }

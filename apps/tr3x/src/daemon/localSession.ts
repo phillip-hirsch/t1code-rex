@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off -- tr3x runs on Node outside the Effect runtime.
+// @effect-diagnostics nodeBuiltinImport:off -- tr3x runs on Bun outside the Effect runtime.
 import * as NodeChildProcess from "node:child_process";
 import type { AuthGrantScope } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";

@@ -12,6 +12,9 @@ import {
   startManagedServer,
 } from "./serverLauncher.ts";
 
+/** No real Node runs: the fake spawn never starts it. */
+const FAKE_NODE = { TR3X_NODE_BIN: "/opt/node" };
+
 const environment: EnvironmentSummary = {
   environmentId: "env-1" as EnvironmentSummary["environmentId"],
   label: "Test",
@@ -128,7 +131,7 @@ describe("startManagedServer", () => {
     const { children, spawnImpl } = fakeSpawn();
     const server = await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43117 },
-      { spawnImpl, waitUntilReady: ready, killGraceMs: 100, env: {} },
+      { spawnImpl, waitUntilReady: ready, killGraceMs: 100, env: FAKE_NODE },
     );
     const child = children[0]!;
     child.ignoredSignals.add("SIGTERM");
@@ -157,7 +160,7 @@ describe("startManagedServer", () => {
           return Promise.reject(new Error("not ready"));
         },
         killGraceMs: 100,
-        env: {},
+        env: FAKE_NODE,
       },
     );
     const outcome = expect(started).rejects.toThrow("not ready");
@@ -174,7 +177,7 @@ describe("startManagedServer", () => {
       { baseDir: "/tmp/.tr3x", port: 43118, signal: controller.signal },
       {
         spawnImpl,
-        env: {},
+        env: FAKE_NODE,
         waitUntilReady: async ({ process }) => {
           controller.abort();
           expect(process.exitCode !== null || process.signalCode !== null).toBe(true);
@@ -194,7 +197,7 @@ describe("startManagedServer", () => {
       { baseDir: "/tmp/.tr3x", signal: controller.signal },
       {
         spawnImpl,
-        env: {},
+        env: FAKE_NODE,
         waitUntilReady,
         reservePort: async () => {
           await Promise.resolve();
@@ -218,7 +221,7 @@ describe("startManagedServer", () => {
         spawnImpl,
         waitUntilReady: ready,
         randomToken: () => `token-${(tokenIndex += 1)}`,
-        env: {},
+        env: FAKE_NODE,
       },
     );
     const restarts: number[] = [];
@@ -243,7 +246,7 @@ describe("startManagedServer", () => {
         { baseDir: "/tmp/.tr3x", port: 43119 },
         {
           spawnImpl,
-          env: {},
+          env: FAKE_NODE,
           waitUntilReady: async ({ process }) => {
             (process as unknown as FakeChildProcess).exit(78);
             throw new Error("Server exited before becoming ready (78).");
@@ -259,7 +262,7 @@ describe("startManagedServer", () => {
     const { children, calls, spawnImpl } = fakeSpawn();
     const server = await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43113, restartDelayMs: 25 },
-      { spawnImpl, waitUntilReady: ready, env: {} },
+      { spawnImpl, waitUntilReady: ready, env: FAKE_NODE },
     );
     const fatal = vi.fn();
     server.events.on("fatal", fatal);
@@ -279,7 +282,7 @@ describe("startManagedServer", () => {
         { baseDir: "/tmp/.tr3x", port: 43114, restartDelayMs: 25 },
         {
           spawnImpl,
-          env: {},
+          env: FAKE_NODE,
           waitUntilReady: async ({ process }) => {
             const child = process as unknown as FakeChildProcess;
             child.stderr.emit(
@@ -303,7 +306,7 @@ describe("startManagedServer", () => {
     const { children, spawnImpl } = fakeSpawn();
     const server = await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43121, restartDelayMs: 100 },
-      { spawnImpl, waitUntilReady: ready, env: {} },
+      { spawnImpl, waitUntilReady: ready, env: FAKE_NODE },
     );
     const delays: number[] = [];
     const fatal = vi.fn();
@@ -333,7 +336,7 @@ describe("startManagedServer", () => {
         waitUntilReady: ({ process }) =>
           process === (children[0] as unknown) ? ready() : Promise.reject(new Error("timed out")),
         killGraceMs: 50,
-        env: {},
+        env: FAKE_NODE,
       },
     );
     const delays: number[] = [];
@@ -357,7 +360,7 @@ describe("startManagedServer", () => {
     const lines: string[] = [];
     const server = await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43126, onStderr: (line) => lines.push(line) },
-      { spawnImpl, waitUntilReady: ready, env: {} },
+      { spawnImpl, waitUntilReady: ready, env: FAKE_NODE },
     );
     const stderr = children[0]!.stderr;
     stderr.emit("data", "first\nauth-token=abc");
@@ -373,7 +376,7 @@ describe("startManagedServer", () => {
     const lines: string[] = [];
     await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43127, onStderr: (line) => lines.push(line) },
-      { spawnImpl, waitUntilReady: ready, env: {} },
+      { spawnImpl, waitUntilReady: ready, env: FAKE_NODE },
     );
     const child = children[0]!;
     child.stderr.emit("data", "auth-token=abc");
@@ -388,7 +391,7 @@ describe("startManagedServer", () => {
     const { children, spawnImpl } = fakeSpawn();
     const server = await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43122, restartDelayMs: 100 },
-      { spawnImpl, waitUntilReady: ready, env: {} },
+      { spawnImpl, waitUntilReady: ready, env: FAKE_NODE },
     );
     const delays: number[] = [];
     server.events.on("restart", (_attempt, delayMs) => delays.push(delayMs));
@@ -409,7 +412,7 @@ describe("startManagedServer", () => {
     });
     const server = await startManagedServer(
       { baseDir: "/tmp/.tr3x", port: 43123, restartDelayMs: 25 },
-      { spawnImpl, waitUntilReady: ready, env: {} },
+      { spawnImpl, waitUntilReady: ready, env: FAKE_NODE },
     );
     const delays: number[] = [];
     const fatal = vi.fn();
@@ -423,6 +426,12 @@ describe("startManagedServer", () => {
       "The T3 server failed 5 times in a row (spawn /opt/node EAGAIN).",
     );
     await server.stop();
+  });
+
+  it("rejects the start when there's no Node to run the server", async () => {
+    await expect(
+      startManagedServer({ baseDir: "/tmp/.tr3x", port: 43125 }, { env: { PATH: "" } }),
+    ).rejects.toThrow("The T3 server runs on Node, and no `node` is on PATH.");
   });
 
   it("rejects the start when the server can't be spawned", async () => {

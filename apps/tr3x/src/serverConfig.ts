@@ -1,4 +1,4 @@
-// @effect-diagnostics globalFetch:off -- tr3x runs on Node, whose global fetch backs the HTTP client.
+// @effect-diagnostics globalFetch:off -- the global fetch backs the HTTP client.
 import {
   ORCHESTRATION_PROTOCOL_QUERY_PARAM,
   ORCHESTRATION_PROTOCOL_VERSION,

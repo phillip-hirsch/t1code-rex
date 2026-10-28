@@ -1,5 +1,5 @@
-#!/usr/bin/env node
-// @effect-diagnostics globalDate:off -- The CLI runs on Node outside the Effect runtime.
+#!/usr/bin/env bun
+// @effect-diagnostics globalDate:off -- The CLI runs on Bun outside the Effect runtime.
 import { runDaemon } from "./daemon/daemon.ts";
 import { runDoctor } from "./doctor.ts";
 import { resolveTr3xPaths } from "./paths.ts";
