@@ -369,6 +369,11 @@ export function App(props: AppProps) {
     setNotice(result.ok ? null : `Could not change mode: ${result.error}`);
   };
 
+  /** Shows a failed command's error; a success leaves the notice alone. */
+  const reportFailure = (what: string) => (result: CommandResult) => {
+    if (!result.ok) setNotice(`${what}: ${result.error}`);
+  };
+
   const stop = async () => {
     if (activeRun === null) return;
     const result = await connection.interruptTurn({ threadId, runId: activeRun.id });
@@ -402,13 +407,19 @@ export function App(props: AppProps) {
       consume();
       const atTop = transcriptRef.current?.page(key.name === "pageup" ? -1 : 1);
       if (atTop && data.history.hasMoreHistory && !data.history.loading)
-        void connection.loadEarlier(threadId);
+        void connection
+          .loadEarlier(threadId)
+          .then(reportFailure("Could not load earlier messages"));
       return;
     }
     if (key.ctrl && key.name === "x") {
       consume();
       const queued = data.queue?.queuedRuns.at(-1);
-      if (queued) void connection.cancelQueuedRun({ threadId, runId: queued.run.id });
+      if (queued) {
+        void connection
+          .cancelQueuedRun({ threadId, runId: queued.run.id })
+          .then(reportFailure("Could not cancel the queued message"));
+      }
       return;
     }
     // a/s/d answer an approval only from an empty composer, once it's armed, once per request.
@@ -462,7 +473,9 @@ export function App(props: AppProps) {
       }
       if (key.name === "escape" && request?.type === "question" && request.input.dismissible) {
         consume();
-        void connection.dismissUserInput({ threadId, requestId: request.input.requestId });
+        void connection
+          .dismissUserInput({ threadId, requestId: request.input.requestId })
+          .then(reportFailure("Could not dismiss the question"));
         return;
       }
     }

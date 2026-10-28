@@ -378,6 +378,37 @@ const scenarios: Record<string, Scenario> = {
     await ui.dispose();
   },
 
+  async "failed history, cancel and dismiss commands say so"() {
+    const view = createFakeView([codex]);
+    const failed = (error: string) => ({ ok: false as const, error });
+    view.commands.loadEarlier.next = failed("history is gone");
+    view.commands.cancelQueuedRun.next = failed("already started");
+    view.commands.dismissUserInput.next = failed("request expired");
+    const queued = run("r2", 2, "queued", selection);
+    const { item, request } = pendingQuestion("q6", [question]);
+    view.setProjection(
+      projection({
+        selection,
+        items: [item],
+        requests: [request],
+        runs: [run("r1", 1, "running", selection), queued],
+        messages: [{ id: queued.userMessageId, text: "queued follow-up" }],
+      }),
+      { hasMoreHistory: true },
+    );
+    const ui = await mount(view, { width: 100, height: 40 });
+    await ui.frame("the queued message shows", (frame) => frame.includes("queued follow-up"));
+    let frame = await ui.press("x", { ctrl: true });
+    expect(frame.includes("Could not cancel the queued message: already started"), "cancel", frame);
+    frame = await ui.press("ESCAPE");
+    expect(frame.includes("Could not dismiss the question: request expired"), "dismiss", frame);
+    for (let press = 0; press < 20 && view.commands.loadEarlier.calls.length === 0; press += 1) {
+      frame = await ui.press(PAGE_UP);
+    }
+    expect(frame.includes("Could not load earlier messages: history is gone"), "history", frame);
+    await ui.dispose();
+  },
+
   async "rapid enters keep a typed answer to an earlier question"() {
     const view = createFakeView([codex]);
     const { item, request } = pendingQuestion("q3", [
