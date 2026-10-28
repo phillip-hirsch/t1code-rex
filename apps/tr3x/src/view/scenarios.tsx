@@ -400,8 +400,11 @@ const scenarios: Record<string, Scenario> = {
     await ui.frame("the queued message shows", (frame) => frame.includes("queued follow-up"));
     let frame = await ui.press("x", { ctrl: true });
     expect(frame.includes("Could not cancel the queued message: already started"), "cancel", frame);
-    frame = await ui.press("ESCAPE");
-    expect(frame.includes("Could not dismiss the question: request expired"), "dismiss", frame);
+    // A lone ESC reaches the app only after the input parser's escape timeout.
+    ui.setup.mockInput.pressKey("ESCAPE");
+    await ui.frame("the dismiss failure shows", (current) =>
+      current.includes("Could not dismiss the question: request expired"),
+    );
     for (let press = 0; press < 20 && view.commands.loadEarlier.calls.length === 0; press += 1) {
       frame = await ui.press(PAGE_UP);
     }
