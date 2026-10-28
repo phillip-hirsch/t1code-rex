@@ -45,8 +45,9 @@ import { PendingWork } from "./pending.ts";
 import { resolveRexStatus, sameRexStatus, type RexStatus } from "./status.ts";
 import { markdownStyles, palette } from "./theme.ts";
 import { buildTimelineRows } from "./timeline.ts";
-import { hintRows, lastItems, wrapText } from "./layout.ts";
-import { ApprovalPanel, Footer, PickerPanel, pickerHeight, QuestionPanel } from "./Panels.tsx";
+import { fitItems, hintRows, lastItems, planLayout, truncateText, wrapText } from "./layout.ts";
+import { approvalPlan, pickerPlan, questionPlan } from "./panelLines.ts";
+import { Footer, Lines, Panel } from "./Panels.tsx";
 import { Transcript, type TranscriptHandle } from "./Transcript.tsx";
 import { useThreadData } from "./useThreadData.ts";
 
@@ -156,7 +157,7 @@ export function App(props: AppProps) {
     if (questionKey && composer && suggestion && composer.plainText === "") {
       composer.setText(suggestion);
     }
-  }, [questionKey, suggestion]);
+  }, [composerRef, questionKey, suggestion]);
 
   const [picker, setPickerState] = useState<PickerState | null>(null);
   const pickerRef = useRef<PickerState | null>(null);
@@ -520,16 +521,17 @@ export function App(props: AppProps) {
           ? "No messages yet."
           : "Loading thread…";
 
+  const modelHint = activeRun ? "esc stop" : "^p model";
+  const modeHint = `^t ${nextRuntimeMode(runtimeMode)}`;
   const footerHints = [
     "enter send",
     "shift+enter newline",
-    activeRun ? "esc stop" : "^p model",
-    `^t ${nextRuntimeMode(runtimeMode)}`,
+    modelHint,
+    modeHint,
     "pgup history",
     "^c quit",
   ];
   const queuedRuns = data.queue?.queuedRuns ?? [];
-  const queue = lastItems(queuedRuns, QUEUE_ROWS);
   const queueHint = data.queue?.isHeld
     ? "held since stop; sending a message resumes them  ·  ctrl+x cancels the last"
     : "ctrl+x cancels the last queued message";
@@ -537,94 +539,102 @@ export function App(props: AppProps) {
     data.error && rows.length > 0 ? `The thread stopped syncing: ${data.error}` : null;
   // The run-active notice is moot once the run ends.
   const shownNotice = notice && !(notice === RUN_ACTIVE && activeRun === null) ? notice : null;
-  const linesOf = (text: string | null) => (text ? wrapText(text, terminal.width - 1).length : 0);
-  const composerHeight = 2 + Math.min(COMPOSER_LINES, Math.max(1, composerLines));
-  // The composer and key hints come first, then a line of transcript and what else
-  // shows; a request panel gets the rest.
-  const panelHeight = Math.max(
-    4,
-    terminal.height -
-      1 -
-      1 -
-      composerHeight -
-      hintRows(footerHints, terminal.width) -
-      (queuedRuns.length > 0
-        ? queue.shown.length + (queue.hidden > 0 ? 1 : 0) + linesOf(queueHint)
-        : 0) -
-      (picker ? pickerHeight(pickerEntries, picker, !supportsHandoff) : 0) -
-      linesOf(syncLine) -
-      linesOf(shownNotice),
-  );
+  // Lines below the transcript sit after one column of padding.
+  const wrapLine = (text: string | null) => (text ? wrapText(text, terminal.width - 1) : []);
+  const syncLines = wrapLine(syncLine);
+  const noticeLines = wrapLine(shownNotice);
+  const queueHintLines = wrapLine(queueHint);
+  const requestPlan =
+    request?.type === "approval"
+      ? approvalPlan(
+          request.approval,
+          pending.isApprovalArmed(request.approval.requestId),
+          terminal.width,
+        )
+      : question && questionDraft
+        ? questionPlan(
+            question,
+            questionDraft,
+            request?.type === "question" && request.input.dismissible,
+            terminal.width,
+          )
+        : null;
+  const picked = picker
+    ? pickerPlan(pickerEntries, picker, selection, !supportsHandoff, terminal.width)
+    : null;
+  const layout = planLayout({
+    height: terminal.height,
+    footerRows: hintRows(footerHints, terminal.width),
+    composerLines: Math.min(COMPOSER_LINES, composerLines),
+    queue: { length: queuedRuns.length, window: QUEUE_ROWS, hintLines: queueHintLines.length },
+    fixedLines: syncLines.length + noticeLines.length,
+    request: requestPlan,
+    picker: picked,
+  });
+  const queue = lastItems(queuedRuns, layout.queueShown);
+  const queueCount =
+    queue.shown.length > 0 ? `+${queue.hidden} more queued` : `+${queue.hidden} queued`;
+  // Folded, the footer keeps what fits one row; sending and quitting go last.
+  const shownHints = layout.footerFolded
+    ? fitItems(footerHints, (kept) => hintRows(kept, terminal.width) === 1, [
+        "pgup history",
+        "shift+enter newline",
+        modeHint,
+        modelHint,
+      ])
+    : footerHints;
 
   return (
     <box style={{ flexDirection: "column", width: "100%", height: "100%" }}>
-      <box style={{ flexDirection: "row", paddingLeft: 1, paddingRight: 1, flexShrink: 0 }}>
-        <text
-          content={header}
-          fg={reconnecting ? palette.warning : palette.muted}
-          truncate
-          wrapMode="none"
-        />
-      </box>
+      {layout.header ? (
+        <box style={{ flexDirection: "row", paddingLeft: 1, paddingRight: 1, flexShrink: 0 }}>
+          <text
+            content={truncateText(header, terminal.width - 2)}
+            fg={reconnecting ? palette.warning : palette.muted}
+            wrapMode="none"
+          />
+        </box>
+      ) : null}
       <Transcript
         ref={transcriptRef}
         rows={rows}
         styles={styles}
         header={historyHeader}
         empty={empty}
+        visible={layout.transcriptLine}
       />
-      {request?.type === "approval" ? (
-        <ApprovalPanel
-          approval={request.approval}
-          armed={pending.isApprovalArmed(request.approval.requestId)}
-          maxHeight={panelHeight}
-          width={terminal.width}
+      {requestPlan ? (
+        <Panel
+          plan={requestPlan}
+          rows={layout.requestRows}
+          color={request?.type === "approval" ? palette.warning : palette.accent}
         />
       ) : null}
-      {question && questionDraft ? (
-        <QuestionPanel
-          maxHeight={panelHeight}
-          width={terminal.width}
-          question={question}
-          draft={questionDraft}
-          dismissible={request?.type === "question" && request.input.dismissible}
-        />
-      ) : null}
-      {queuedRuns.length > 0 ? (
-        <box style={{ flexDirection: "column", flexShrink: 0, paddingLeft: 1 }}>
-          {queue.hidden > 0 ? (
-            <text content={`+${queue.hidden} more queued`} fg={palette.subtle} />
-          ) : null}
-          {queue.shown.map((queued) => (
-            <text
-              key={queued.run.id}
-              content={`${queued.run.queueHeld === true ? "held" : "queued"}: ${queued.text}`}
-              fg={palette.muted}
-              truncate
-              wrapMode="none"
-            />
-          ))}
-          <text content={queueHint} fg={palette.subtle} />
+      {queuedRuns.length > 0 && !layout.queueFolded ? (
+        <box style={{ flexDirection: "column", flexShrink: 0 }}>
+          <Lines lines={queue.hidden > 0 ? [queueCount] : []} color={palette.subtle} />
+          <Lines
+            lines={queue.shown.map((queued) =>
+              truncateText(
+                `${queued.run.queueHeld === true ? "held" : "queued"}: ${queued.text}`,
+                terminal.width - 1,
+              ),
+            )}
+            color={palette.muted}
+          />
+          <Lines lines={layout.queueHint ? queueHintLines : []} color={palette.subtle} />
         </box>
       ) : null}
-      {picker ? (
-        <PickerPanel
-          entries={pickerEntries}
-          state={picker}
-          current={selection}
-          providerLocked={!supportsHandoff}
-        />
-      ) : null}
-      {syncLine ? (
-        <text content={syncLine} fg={palette.warning} style={{ paddingLeft: 1, flexShrink: 0 }} />
-      ) : null}
-      {shownNotice ? (
-        <text content={shownNotice} fg={palette.error} style={{ paddingLeft: 1, flexShrink: 0 }} />
-      ) : null}
+      {picked ? <Panel plan={picked} rows={layout.pickerRows} color={palette.accent} /> : null}
+      <Lines lines={syncLines} color={palette.warning} />
+      <Lines lines={noticeLines} color={palette.error} />
       <box
         border
         borderColor={palette.border}
-        style={{ flexShrink: 0, height: composerHeight, paddingLeft: 1 }}
+        // oxlint-disable-next-line t3code/no-native-title-tooltip -- OpenTUI's border title.
+        title={layout.queueFolded ? ` ${queueCount} ` : ""}
+        titleColor={palette.subtle}
+        style={{ flexShrink: 0, height: 2 + layout.composerLines, paddingLeft: 1 }}
       >
         <textarea
           ref={composerRef}
@@ -647,7 +657,7 @@ export function App(props: AppProps) {
           style={{ flexGrow: 1 }}
         />
       </box>
-      <Footer hints={footerHints} />
+      <Footer hints={shownHints} />
     </box>
   );
 }

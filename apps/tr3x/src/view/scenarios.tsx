@@ -211,8 +211,354 @@ const startupScenarios: Record<string, () => Promise<void>> = Object.fromEntries
   ]),
 );
 
+/** This script runs on Bun; the view's own tsconfig has no Bun types. */
+declare const Bun: { readonly stringWidth: (text: string) => number };
+
+/** Every size the layout must hold at, width × height. */
+const SWEEP_SIZES = [
+  [80, 8],
+  [80, 10],
+  [80, 12],
+  [80, 14],
+  [80, 24],
+  [120, 40],
+  [40, 24],
+] as const;
+
+const normalize = (text: string) => text.replace(/\s+/gu, " ").trim();
+
+interface FrameBox {
+  readonly top: string;
+  readonly bottom: string;
+  /** Its rows between the borders, trimmed. */
+  readonly rows: ReadonlyArray<string>;
+}
+
+/**
+ * The frame's boxes top to bottom, after checking each is whole: every row
+ * inside one starts and ends with its border at the screen's edges, and no
+ * row outside one starts with a border. A panel that overflows breaks this.
+ */
+function frameBoxes(frame: string, width: number, height: number): ReadonlyArray<FrameBox> {
+  const rows = frame.split("\n").slice(0, height);
+  expect(rows.length === height, `the frame has ${height} rows`, frame);
+  const boxes: FrameBox[] = [];
+  let open: number | null = null;
+  rows.forEach((row, index) => {
+    // Bun's width, not the view's: the check doesn't measure with the code it checks.
+    const whole = Bun.stringWidth(row) === width;
+    if (open === null) {
+      if (row.startsWith("┌")) {
+        expect(whole && row.endsWith("┐"), `row ${index} opens a whole box`, frame);
+        open = index;
+      } else {
+        expect(!/^[│└├]/u.test(row), `row ${index} lies outside every box`, frame);
+      }
+    } else if (row.startsWith("└")) {
+      expect(whole && row.endsWith("┘"), `row ${index} closes its box`, frame);
+      boxes.push({
+        top: rows[open] ?? "",
+        bottom: row,
+        rows: rows.slice(open + 1, index).map((inner) => inner.slice(1, -1).trim()),
+      });
+      open = null;
+    } else {
+      expect(
+        whole && row.startsWith("│") && row.endsWith("│"),
+        `row ${index} stays in its box`,
+        frame,
+      );
+    }
+  });
+  expect(open === null, "every box closes", frame);
+  return boxes;
+}
+
+/** Checks the composer and the footer show, and returns the boxes above the composer. */
+function checkFrame(frame: string, width: number, height: number): ReadonlyArray<FrameBox> {
+  const boxes = frameBoxes(frame, width, height);
+  const composer = boxes.at(-1);
+  expect(composer !== undefined, "the composer's border shows", frame);
+  const rows = frame.split("\n").slice(0, height);
+  const below = rows.slice(rows.lastIndexOf(composer?.bottom ?? "") + 1);
+  expect(
+    below.length > 0 &&
+      below.every((row) => row.trim() !== "") &&
+      (below.at(-1) ?? "").includes("^c quit"),
+    "the footer sits under the composer and its last row shows",
+    frame,
+  );
+  return boxes.slice(0, -1);
+}
+
+/**
+ * Checks each row comes whole from one source: a cue, or text from one line of
+ * `sources` (a row cut short ends in "…"). Rows drawn over each other fail.
+ */
+function checkRows(
+  frame: string,
+  rows: ReadonlyArray<string>,
+  sources: ReadonlyArray<string>,
+  prefixes: ReadonlyArray<string> = [],
+): void {
+  const whole = sources.map(normalize);
+  const starts = prefixes.map(normalize);
+  for (const row of rows) {
+    const line = normalize(row.replace(/^› /u, ""));
+    const text = line.replace(/…$/u, "");
+    expect(
+      text === "" ||
+        /^… \d+ lines hidden …$|^… \d+ more lines$|^[↑↓] \d+ more$/u.test(line) ||
+        whole.some((source) => source.includes(text)) ||
+        starts.some((source) => source.startsWith(text)),
+      `row "${row}" comes from one source`,
+      frame,
+    );
+  }
+}
+
+const SWEEP_TARGET = "TARGET=/very/important/production.db";
+const SWEEP_APPROVAL = [
+  "rm -rf with the following arguments:",
+  ...Array.from({ length: 30 }, (_, index) => `  filler-line-${index} lorem ipsum dolor`),
+  SWEEP_TARGET,
+].join("\n");
+const CJK_TARGET = "終端=/本番/データ.db";
+/** One long line of double-width text, its target at the very end. */
+const CJK_APPROVAL = `削除の対象：${"漢字かな交じり文👍🏽".repeat(22)} ${CJK_TARGET}`;
+const SWEEP_CHOICES = "[a] accept   [s] accept for session   [d] decline";
+const SWEEP_QUESTION = {
+  id: "sweep",
+  header: "Migration",
+  question:
+    "Which approach should I take for the migration? It touches the users table, the sessions " +
+    "table and the audit log, and the backfill already finished last week.",
+  options: Array.from({ length: 12 }, (_, index) => ({
+    label: `Option ${index}`,
+    description: `Approach ${index} keeps the old table and backfills the new one in batches overnight.`,
+  })),
+};
+const optionText = (index: number) =>
+  `Option ${index} - Approach ${index} keeps the old table and backfills the new one in batches overnight.`;
+
+function checkApproval(
+  frame: string,
+  boxes: ReadonlyArray<FrameBox>,
+  prompt: string,
+  target: string,
+) {
+  const panel = boxes.find((box) => box.top.includes("Approval needed"));
+  expect(panel !== undefined, "the approval panel shows", frame);
+  const rows = panel?.rows ?? [];
+  checkRows(frame, rows, [...prompt.split("\n"), SWEEP_CHOICES]);
+  expect(
+    rows.some((row) => row.startsWith("[a] accept")),
+    "[a] accept shows",
+    frame,
+  );
+  expect(
+    rows.some((row) => row.includes(target)),
+    "the detail's last line shows",
+    frame,
+  );
+}
+
+function checkQuestion(frame: string, boxes: ReadonlyArray<FrameBox>, cursor: number) {
+  const panel = boxes.find((box) => box.top.includes(SWEEP_QUESTION.header));
+  expect(panel !== undefined, "the question panel shows", frame);
+  const rows = panel?.rows ?? [];
+  checkRows(
+    frame,
+    rows,
+    [SWEEP_QUESTION.question, ...SWEEP_QUESTION.options.map((option) => option.description)],
+    SWEEP_QUESTION.options.map((_, index) => optionText(index)),
+  );
+  const first = normalize(rows[0] ?? "").replace(/…$/u, "");
+  expect(
+    first.length >= 10 && SWEEP_QUESTION.question.startsWith(first),
+    "the question's first line shows",
+    frame,
+  );
+  expect(
+    rows.some((row) => row.startsWith(`› Option ${cursor} `)),
+    "the highlighted option shows",
+    frame,
+  );
+}
+
+const QUEUED = Array.from({ length: 10 }, (_, index) =>
+  run(`q${index}`, index + 2, "queued", selection),
+);
+
+/** The thread with ten queued messages behind a running one, and `request` pending. */
+function queuedProjection(
+  request?: ReturnType<typeof pendingApproval> | ReturnType<typeof pendingQuestion>,
+) {
+  return projection({
+    selection,
+    ...(request ? { items: [request.item], requests: [request.request] } : {}),
+    runs: [run("r1", 1, "running", selection), ...QUEUED],
+    messages: QUEUED.map((entry, index) => ({
+      id: entry.userMessageId,
+      text: `follow-up ${index}`,
+    })),
+  });
+}
+
+async function typeDraft(ui: Awaited<ReturnType<typeof mount>>) {
+  for (let line = 1; line <= 8; line += 1) {
+    await ui.setup.mockInput.typeText(`draft line ${line}`);
+    // Ctrl+J: a legacy terminal sends shift+enter as a plain enter.
+    if (line < 8) ui.setup.mockInput.pressKey("LINEFEED");
+  }
+}
+
+/** Mounts the view at each sweep size, brings up a case, and checks the frame it settles on. */
+async function sweep(
+  label: string,
+  open: (
+    view: ReturnType<typeof createFakeView>,
+    ui: Awaited<ReturnType<typeof mount>>,
+  ) => Promise<string>,
+  check: (frame: string, boxes: ReadonlyArray<FrameBox>) => void,
+): Promise<void> {
+  for (const [width, height] of SWEEP_SIZES) {
+    const view = createFakeView([codex]);
+    const ui = await mount(view, { width, height });
+    try {
+      const frame = await open(view, ui);
+      console.log(`--- ${label} ${width}x${height}\n${frame}`);
+      try {
+        check(frame, checkFrame(frame, width, height));
+      } catch (error) {
+        throw new Error(
+          `at ${width}x${height}: ${error instanceof Error ? error.message : String(error)}`,
+          { cause: error },
+        );
+      }
+    } finally {
+      await ui.dispose();
+    }
+  }
+}
+
+const armed = (ui: Awaited<ReturnType<typeof mount>>) =>
+  ui.frame("the approval is armed", (frame) => frame.includes("[a] accept"));
+
+async function highlightOption(ui: Awaited<ReturnType<typeof mount>>, cursor: number) {
+  await ui.frame("the question shows", (frame) => frame.includes(SWEEP_QUESTION.header));
+  for (let press = 0; press < cursor; press += 1) await ui.arrow("down");
+  return await ui.frame("the option is highlighted", (frame) =>
+    frame.includes(`› Option ${cursor} `),
+  );
+}
+
+const sweepScenarios: Record<string, Scenario> = {
+  async "the layout holds at every size: an approval"() {
+    await sweep(
+      "approval",
+      async (view, ui) => {
+        const { item, request } = pendingApproval("sweep-a", SWEEP_APPROVAL);
+        view.setProjection(projection({ selection, items: [item], requests: [request] }));
+        return await armed(ui);
+      },
+      (frame, boxes) => checkApproval(frame, boxes, SWEEP_APPROVAL, SWEEP_TARGET),
+    );
+  },
+
+  async "the layout holds at every size: a double-width approval"() {
+    await sweep(
+      "cjk-approval",
+      async (view, ui) => {
+        const { item, request } = pendingApproval("sweep-c", CJK_APPROVAL);
+        view.setProjection(projection({ selection, items: [item], requests: [request] }));
+        return await armed(ui);
+      },
+      (frame, boxes) => checkApproval(frame, boxes, CJK_APPROVAL, CJK_TARGET),
+    );
+  },
+
+  async "the layout holds at every size: a twelve-option question"() {
+    await sweep(
+      "question",
+      async (view, ui) => {
+        const { item, request } = pendingQuestion("sweep-q", [SWEEP_QUESTION]);
+        view.setProjection(projection({ selection, items: [item], requests: [request] }));
+        return await highlightOption(ui, 9);
+      },
+      (frame, boxes) => checkQuestion(frame, boxes, 9),
+    );
+  },
+
+  async "the layout holds at every size: a question under a long draft and a queue"() {
+    await sweep(
+      "draft-queue-question",
+      async (view, ui) => {
+        view.setProjection(queuedProjection());
+        await typeDraft(ui);
+        view.setProjection(queuedProjection(pendingQuestion("sweep-dq", [SWEEP_QUESTION])));
+        return await highlightOption(ui, 9);
+      },
+      (frame, boxes) => {
+        checkQuestion(frame, boxes, 9);
+        expect(frame.includes("queued"), "the queue is counted", frame);
+      },
+    );
+  },
+
+  async "the layout holds at every size: an approval under a long draft and a queue"() {
+    await sweep(
+      "draft-queue-approval",
+      async (view, ui) => {
+        view.setProjection(queuedProjection());
+        // Typed before the approval arrives: its keys answer only an empty composer.
+        await typeDraft(ui);
+        view.setProjection(queuedProjection(pendingApproval("sweep-da", SWEEP_APPROVAL)));
+        return await armed(ui);
+      },
+      (frame, boxes) => {
+        checkApproval(frame, boxes, SWEEP_APPROVAL, SWEEP_TARGET);
+        expect(frame.includes("queued"), "the queue is counted", frame);
+      },
+    );
+  },
+
+  async "the model picker fits a narrow terminal"() {
+    const wide = provider("codex", {
+      displayName: "Codex",
+      models: Array.from({ length: 12 }, (_, index) =>
+        model(`m${index}`, `Model ${index} with a long marketing name for wide screens`),
+      ),
+    });
+    const view = createFakeView([wide]);
+    view.setProjection(projection({ selection: { instanceId: wide.instanceId, model: "m0" } }));
+    const [width, height] = [40, 24];
+    const ui = await mount(view, { width, height });
+    const frame = await ui.press("p", { ctrl: true });
+    console.log(`--- picker ${width}x${height}\n${frame}`);
+    const boxes = checkFrame(frame, width, height);
+    const picker = boxes.find((box) => box.top.includes("Model"));
+    expect(picker !== undefined, "the picker shows", frame);
+    const rows = picker?.rows ?? [];
+    const entries = rows.filter((row) => !/^(type to filter|[↑↓] \d+ more)/u.test(row));
+    expect(entries.length > 0, "the picker lists models", frame);
+    expect(
+      entries.every((row) => /^(› )?Codex · Model \d+ /u.test(row) && row.endsWith("…")),
+      "each model is one line, cut with …",
+      frame,
+    );
+    expect(
+      rows.some((row) => /^↓ \d+ more$/u.test(row)),
+      "the hidden models are counted",
+      frame,
+    );
+    await ui.dispose();
+  },
+};
+
 const scenarios: Record<string, Scenario> = {
   ...startupScenarios,
+  ...sweepScenarios,
 
   async "view --new finds a project stored under a symlinked path"() {
     const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "tr3x-symlink-"));
@@ -519,7 +865,7 @@ const scenarios: Record<string, Scenario> = {
   async "a long approval shows the command's start and end, and says what's hidden"() {
     const lines = [
       "rm -rf with the following arguments:",
-      ...Array.from({ length: 28 }, (_, index) => `  filler-line-${index} lorem ipsum dolor`),
+      ...Array.from({ length: 40 }, (_, index) => `  filler-line-${index} lorem ipsum dolor`),
       "TARGET=/very/important/production.db",
     ];
     for (const [width, height] of [

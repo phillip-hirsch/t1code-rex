@@ -1006,6 +1006,9 @@ importers:
       react:
         specifier: 'catalog:'
         version: 19.3.0
+      string-width:
+        specifier: 8.2.1
+        version: 8.2.1
     devDependencies:
       '@t3tools/provider-testing':
         specifier: workspace:*

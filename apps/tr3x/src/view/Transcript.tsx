@@ -118,6 +118,7 @@ export function Transcript({
   styles,
   header,
   empty,
+  visible,
   ref,
 }: {
   readonly rows: ReadonlyArray<TimelineRow>;
@@ -125,6 +126,8 @@ export function Transcript({
   /** Shown above the first row: older history, loading, or nothing. */
   readonly header: string | null;
   readonly empty: string;
+  /** Hidden when the layout leaves it no rows: a scrollbox with none still draws its first. */
+  readonly visible: boolean;
   readonly ref?: Ref<TranscriptHandle>;
 }) {
   const scrollRef = useRef<ScrollBoxRenderable | null>(null);
@@ -162,6 +165,7 @@ export function Transcript({
       ref={scrollRef}
       stickyScroll
       stickyStart="bottom"
+      visible={visible}
       style={{ flexGrow: 1, flexShrink: 1, minHeight: 0, paddingLeft: 1, paddingRight: 1 }}
     >
       {header ? <text content={header} fg={palette.subtle} /> : null}

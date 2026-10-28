@@ -20,7 +20,8 @@
     "@t3tools/client-runtime": "workspace:*",
     "@t3tools/contracts": "workspace:*",
     "effect": "catalog:",
-    "react": "catalog:"
+    "react": "catalog:",
+    "string-width": "8.2.1"
   },
   "devDependencies": {
     "@t3tools/provider-testing": "workspace:*",
