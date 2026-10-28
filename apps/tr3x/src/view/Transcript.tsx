@@ -28,7 +28,7 @@ const Row = memo(function Row({ row, styles }: { row: TimelineRow; styles: Markd
       return (
         <box style={{ flexDirection: "column", marginTop: 1 }}>
           <box style={{ flexDirection: "row" }}>
-            <text content="› " fg={palette.user} />
+            <text content="›" fg={palette.user} style={{ marginRight: 1 }} />
             <box style={{ flexGrow: 1, flexShrink: 1 }}>
               <markdown
                 content={row.text}
