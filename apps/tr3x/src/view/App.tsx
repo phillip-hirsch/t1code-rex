@@ -545,13 +545,20 @@ export function App(props: AppProps) {
           {data.queue.queuedRuns.map((queued) => (
             <text
               key={queued.run.id}
-              content={`queued: ${queued.text}`}
+              content={`${queued.run.queueHeld === true ? "held" : "queued"}: ${queued.text}`}
               fg={palette.muted}
               truncate
               wrapMode="none"
             />
           ))}
-          <text content="ctrl+x cancels the last queued message" fg={palette.subtle} />
+          <text
+            content={
+              data.queue.isHeld
+                ? "held since stop; sending a message resumes them  ·  ctrl+x cancels the last"
+                : "ctrl+x cancels the last queued message"
+            }
+            fg={palette.subtle}
+          />
         </box>
       ) : null}
       {picker ? (

@@ -412,6 +412,31 @@ const scenarios: Record<string, Scenario> = {
     await ui.dispose();
   },
 
+  async "a queue held by stop says it's held and how to resume it"() {
+    const view = createFakeView([codex]);
+    const held = { ...run("r2", 2, "queued", selection), queueHeld: true };
+    view.setProjection(
+      projection({
+        selection,
+        runs: [run("r1", 1, "interrupted", selection), held],
+        messages: [{ id: held.userMessageId, text: "queued follow-up" }],
+      }),
+    );
+    const ui = await mount(view, { width: 100, height: 24 });
+    const frame = await ui.frame("the queue shows", (current) =>
+      current.includes("queued follow-up"),
+    );
+    expect(frame.includes("held: queued follow-up"), "the message reads as held", frame);
+    expect(frame.includes("sending a message resumes them"), "the view says how to resume", frame);
+    console.log(
+      frame
+        .split("\n")
+        .filter((line) => line.includes("held"))
+        .join("\n"),
+    );
+    await ui.dispose();
+  },
+
   async "rapid enters keep a typed answer to an earlier question"() {
     const view = createFakeView([codex]);
     const { item, request } = pendingQuestion("q3", [
