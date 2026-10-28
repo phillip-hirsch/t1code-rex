@@ -1,5 +1,4 @@
 // @effect-diagnostics globalTimers:off -- Test teardown for real processes, outside any Effect runtime.
-import { isProcessAlive } from "../daemon/health.ts";
 import { CLI, spawnBun, STARTED, waitForLine, type BunProcess } from "./bunProcess.ts";
 import { commandLine, liveFakeProviders } from "./fakeProviders.ts";
 
@@ -25,10 +24,13 @@ export interface DaemonFixture {
   readonly stop: () => Promise<DaemonStopReport>;
 }
 
-/** Resolves true once `pid` has exited, or false after `timeoutMs`. Not our child, so probe it. */
-async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+/**
+ * Resolves true once the process is gone, or false after `timeoutMs`. Not our
+ * child, so probe it: `isOurs` rechecks its command line, so a reused PID counts as gone.
+ */
+async function waitForExit(isOurs: () => boolean, timeoutMs: number): Promise<boolean> {
   const deadline = AbortSignal.timeout(timeoutMs);
-  while (isProcessAlive(pid)) {
+  while (isOurs()) {
     if (deadline.aborted) return false;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -52,12 +54,14 @@ function signal(pid: number, name: NodeJS.Signals): void {
   }
 }
 
-/** SIGTERM, then SIGKILL past the limit. */
-async function terminate(pid: number): Promise<void> {
+/** SIGTERM, then SIGKILL past the limit. Each signal first rechecks that `pid` is still ours. */
+async function terminate(pid: number, isOurs: () => boolean): Promise<void> {
+  if (!isOurs()) return;
   signal(pid, "SIGTERM");
-  if (await waitForExit(pid, PROCESS_EXIT_MS)) return;
+  if (await waitForExit(isOurs, PROCESS_EXIT_MS)) return;
+  if (!isOurs()) return;
   signal(pid, "SIGKILL");
-  await waitForExit(pid, PROCESS_EXIT_MS);
+  await waitForExit(isOurs, PROCESS_EXIT_MS);
 }
 
 /** Starts `tr3x daemon` on Bun in `home`; pair it with an unconditional `stop()` in teardown. */
@@ -82,12 +86,18 @@ export function startDaemon(home: string): DaemonFixture {
     }
     const daemonCode = await daemon.exited;
     // The daemon waits for its server, so one still running was left behind; only ours, by its base dir.
-    if (serverPid !== undefined && commandLine(serverPid)?.includes(`--base-dir ${home}`)) {
-      await terminate(serverPid);
-      forced.push("server");
+    const server = serverPid;
+    if (server !== undefined) {
+      const isOurServer = () => commandLine(server)?.includes(`--base-dir ${home}`) === true;
+      if (isOurServer()) {
+        await terminate(server, isOurServer);
+        forced.push("server");
+      }
     }
     const providers = liveFakeProviders(home);
-    for (const pid of providers) await terminate(pid);
+    for (const pid of providers) {
+      await terminate(pid, () => commandLine(pid)?.includes(home) === true);
+    }
     if (providers.length > 0) forced.push(`${providers.length} fake provider(s)`);
     return { daemonCode, forced };
   };
